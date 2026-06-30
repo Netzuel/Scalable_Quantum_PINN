@@ -1,0 +1,14 @@
+.venv
+.DS_Store
+__pycache__/
+.ipynb_checkpoints/
+*.py[cod]
+*.pt
+*.pth
+*.h5
+*.hdf5
+outputs/
+results/
+runs/
+wandb/
+

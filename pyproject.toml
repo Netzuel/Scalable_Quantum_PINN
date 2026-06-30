@@ -1,0 +1,14 @@
+[project]
+name = "scalable-quantum-pinn"
+version = "0.1.0"
+description = "Sparse Pauli-coordinate PINNs for scalable adiabatic-gauge-potential discovery."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Antonio Ferrer Sanchez", email = "netzuel@gmail.com" }
+]
+dependencies = [
+  "torch",
+  "numpy"
+]
