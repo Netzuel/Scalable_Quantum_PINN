@@ -1,0 +1,113 @@
+{
+  "basis": {
+    "alphabet": [
+      "I",
+      "X",
+      "Y",
+      "Z"
+    ],
+    "max_order": 2,
+    "ordering": "lexicographic product over I, X, Y, Z",
+    "size": 16
+  },
+  "coefficient_convention": {
+    "coefficient_formula": "C_P = Tr(P H) / 2**n_qubits",
+    "operator_expansion": "H = sum_P C_P P",
+    "pauli_alphabet": [
+      "I",
+      "X",
+      "Y",
+      "Z"
+    ],
+    "pauli_basis": "{I, X, Y, Z}^{tensor n_qubits}",
+    "stored_terms": "Only coefficients with abs(C_P) > drop_tol are stored."
+  },
+  "distance": "1_0",
+  "drop_tol": 1e-08,
+  "format": "pauli_hamiltonian_pair_v1",
+  "hamiltonians": {
+    "final": {
+      "role": "H_prob",
+      "source_key": "Hidrogen_2_qubits_H_prob_1_0",
+      "tau": 1.0,
+      "term_count": 5,
+      "terms": {
+        "II": [
+          -0.540066291578114,
+          0.0
+        ],
+        "IZ": [
+          0.26752866338938475,
+          0.0
+        ],
+        "XX": [
+          0.19679057598114014,
+          0.0
+        ],
+        "ZI": [
+          -0.26752866338938475,
+          0.0
+        ],
+        "ZZ": [
+          -0.009014914743602276,
+          0.0
+        ]
+      },
+      "terms_by_order": {
+        "0": 1,
+        "1": 2,
+        "2": 2
+      }
+    },
+    "initial": {
+      "role": "H_hf",
+      "source_key": "Hidrogen_2_qubits_H_hf_1_0",
+      "tau": 0.0,
+      "term_count": 4,
+      "terms": {
+        "II": [
+          -0.540066291578114,
+          0.0
+        ],
+        "IZ": [
+          0.26752866338938475,
+          0.0
+        ],
+        "ZI": [
+          -0.26752866338938475,
+          0.0
+        ],
+        "ZZ": [
+          -0.009014914743602276,
+          0.0
+        ]
+      },
+      "terms_by_order": {
+        "0": 1,
+        "1": 2,
+        "2": 1
+      }
+    }
+  },
+  "n_qubits": 2,
+  "source": {
+    "dense_dtype": "float32",
+    "dense_hdf5": "Hamiltonians_to_use/Hamiltonians.h5",
+    "dense_usage": "Used only by the one-time adapter; training consumes this Pauli-coordinate JSON.",
+    "source_keys": {
+      "final": "Hidrogen_2_qubits_H_prob_1_0",
+      "initial": "Hidrogen_2_qubits_H_hf_1_0"
+    },
+    "source_shapes": {
+      "final": [
+        4,
+        4
+      ],
+      "initial": [
+        4,
+        4
+      ]
+    }
+  },
+  "system": "Hidrogen"
+}

@@ -1,0 +1,53 @@
+{
+  "physical": {
+    "parameters": {
+      "system": "Hidrogen",
+      "num_qubits": 20,
+      "distance": "1_0",
+      "hamiltonian_source": "Hamiltonians_to_use/pauli_decompositions/index.json",
+      "t_initial": 0.0,
+      "T": 1.0,
+      "tau_range": [0.0, 1.0],
+      "schedule": "sinusoidal_sin2"
+    }
+  },
+  "neural": {
+    "model": "ProjectedSparseAGPPINN",
+    "general": {
+      "n_inputs": 1,
+      "n_outputs": "agp_top_k",
+      "n_hidden": 3,
+      "n_neurons": 56,
+      "activation": "silu",
+      "layer_type": "quadratic"
+    }
+  },
+  "support": {
+    "strategy": "top_commutator_projected",
+    "agp_top_k": 32,
+    "intermediate_top_k": 128,
+    "residual_top_k": 256,
+    "residual_projection": "largest_endpoint_commutator_terms"
+  },
+  "training": {
+    "device": "auto",
+    "optimizer": "SOAP",
+    "parameters": {
+      "epochs": 25,
+      "num_points": 16,
+      "lr": 0.0001,
+      "random_seed": 11
+    },
+    "loss": {
+      "residual": 1.0,
+      "agp_l2": 1e-8
+    },
+    "export": {
+      "path_images": "Images/",
+      "path_data": "Models_Data/",
+      "top_coefficients": 8,
+      "plot_quantity": "d_lambda_dt_times_C_P",
+      "format": "pdf"
+    }
+  }
+}

@@ -1,0 +1,295 @@
+{
+  "coefficient_convention": {
+    "coefficient_formula": "C_P = Tr(P H) / 2**n_qubits",
+    "operator_expansion": "H = sum_P C_P P",
+    "pauli_alphabet": [
+      "I",
+      "X",
+      "Y",
+      "Z"
+    ],
+    "pauli_basis": "{I, X, Y, Z}^{tensor n_qubits}",
+    "stored_terms": "Only coefficients with abs(C_P) > drop_tol are stored."
+  },
+  "drop_tol": 1e-08,
+  "format": "pauli_hamiltonian_index_v1",
+  "pair_count": 25,
+  "pairs": {
+    "Hidrogen_10_qubits_1_0": {
+      "basis_size": 1048576,
+      "distance": "1_0",
+      "file": "Hidrogen/10_qubits/distance_1_0.json",
+      "final_key": "qiskit_sparse_pauli_op",
+      "final_term_count": 252,
+      "initial_key": "diagonal_projection_of_final",
+      "initial_term_count": 56,
+      "n_qubits": 10,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_12_qubits_1_0": {
+      "basis_size": 16777216,
+      "distance": "1_0",
+      "file": "Hidrogen/12_qubits/distance_1_0.json",
+      "final_key": "qiskit_sparse_pauli_op",
+      "final_term_count": 327,
+      "initial_key": "diagonal_projection_of_final",
+      "initial_term_count": 79,
+      "n_qubits": 12,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_20_qubits_1_0": {
+      "basis_size": 1099511627776,
+      "distance": "1_0",
+      "file": "Hidrogen/20_qubits/distance_1_0.json",
+      "final_key": "qiskit_sparse_pauli_op",
+      "final_term_count": 2951,
+      "initial_key": "diagonal_projection_of_final",
+      "initial_term_count": 211,
+      "n_qubits": 20,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_2_qubits_0_5": {
+      "basis_size": 16,
+      "distance": "0_5",
+      "file": "Hidrogen/2_qubits/distance_0_5.json",
+      "final_key": "Hidrogen_2_qubits_H_prob_0_5",
+      "final_term_count": 5,
+      "initial_key": "Hidrogen_2_qubits_H_hf_0_5",
+      "initial_term_count": 4,
+      "n_qubits": 2,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_2_qubits_1_0": {
+      "basis_size": 16,
+      "distance": "1_0",
+      "file": "Hidrogen/2_qubits/distance_1_0.json",
+      "final_key": "Hidrogen_2_qubits_H_prob_1_0",
+      "final_term_count": 5,
+      "initial_key": "Hidrogen_2_qubits_H_hf_1_0",
+      "initial_term_count": 4,
+      "n_qubits": 2,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_2_qubits_1_5": {
+      "basis_size": 16,
+      "distance": "1_5",
+      "file": "Hidrogen/2_qubits/distance_1_5.json",
+      "final_key": "Hidrogen_2_qubits_H_prob_1_5",
+      "final_term_count": 5,
+      "initial_key": "Hidrogen_2_qubits_H_hf_1_5",
+      "initial_term_count": 4,
+      "n_qubits": 2,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_2_qubits_2_0": {
+      "basis_size": 16,
+      "distance": "2_0",
+      "file": "Hidrogen/2_qubits/distance_2_0.json",
+      "final_key": "Hidrogen_2_qubits_H_prob_2_0",
+      "final_term_count": 5,
+      "initial_key": "Hidrogen_2_qubits_H_hf_2_0",
+      "initial_term_count": 4,
+      "n_qubits": 2,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_2_qubits_2_5": {
+      "basis_size": 16,
+      "distance": "2_5",
+      "file": "Hidrogen/2_qubits/distance_2_5.json",
+      "final_key": "Hidrogen_2_qubits_H_prob_2_5",
+      "final_term_count": 5,
+      "initial_key": "Hidrogen_2_qubits_H_hf_2_5",
+      "initial_term_count": 4,
+      "n_qubits": 2,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_2_qubits_3_0": {
+      "basis_size": 16,
+      "distance": "3_0",
+      "file": "Hidrogen/2_qubits/distance_3_0.json",
+      "final_key": "Hidrogen_2_qubits_H_prob_3_0",
+      "final_term_count": 5,
+      "initial_key": "Hidrogen_2_qubits_H_hf_3_0",
+      "initial_term_count": 4,
+      "n_qubits": 2,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_2_qubits_3_5": {
+      "basis_size": 16,
+      "distance": "3_5",
+      "file": "Hidrogen/2_qubits/distance_3_5.json",
+      "final_key": "Hidrogen_2_qubits_H_prob_3_5",
+      "final_term_count": 5,
+      "initial_key": "Hidrogen_2_qubits_H_hf_3_5",
+      "initial_term_count": 4,
+      "n_qubits": 2,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_6_qubits_0_5": {
+      "basis_size": 4096,
+      "distance": "0_5",
+      "file": "Hidrogen/6_qubits/distance_0_5.json",
+      "final_key": "Hidrogen_6_qubits_H_prob_0_5",
+      "final_term_count": 175,
+      "initial_key": "Hidrogen_6_qubits_H_hf_0_5",
+      "initial_term_count": 47,
+      "n_qubits": 6,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_6_qubits_1_0": {
+      "basis_size": 4096,
+      "distance": "1_0",
+      "file": "Hidrogen/6_qubits/distance_1_0.json",
+      "final_key": "Hidrogen_6_qubits_H_prob_1_0",
+      "final_term_count": 164,
+      "initial_key": "Hidrogen_6_qubits_H_hf_1_0",
+      "initial_term_count": 36,
+      "n_qubits": 6,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_6_qubits_1_5": {
+      "basis_size": 4096,
+      "distance": "1_5",
+      "file": "Hidrogen/6_qubits/distance_1_5.json",
+      "final_key": "Hidrogen_6_qubits_H_prob_1_5",
+      "final_term_count": 165,
+      "initial_key": "Hidrogen_6_qubits_H_hf_1_5",
+      "initial_term_count": 37,
+      "n_qubits": 6,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_6_qubits_2_0": {
+      "basis_size": 4096,
+      "distance": "2_0",
+      "file": "Hidrogen/6_qubits/distance_2_0.json",
+      "final_key": "Hidrogen_6_qubits_H_prob_2_0",
+      "final_term_count": 169,
+      "initial_key": "Hidrogen_6_qubits_H_hf_2_0",
+      "initial_term_count": 41,
+      "n_qubits": 6,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_6_qubits_2_5": {
+      "basis_size": 4096,
+      "distance": "2_5",
+      "file": "Hidrogen/6_qubits/distance_2_5.json",
+      "final_key": "Hidrogen_6_qubits_H_prob_2_5",
+      "final_term_count": 169,
+      "initial_key": "Hidrogen_6_qubits_H_hf_2_5",
+      "initial_term_count": 41,
+      "n_qubits": 6,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_6_qubits_3_0": {
+      "basis_size": 4096,
+      "distance": "3_0",
+      "file": "Hidrogen/6_qubits/distance_3_0.json",
+      "final_key": "Hidrogen_6_qubits_H_prob_3_0",
+      "final_term_count": 166,
+      "initial_key": "Hidrogen_6_qubits_H_hf_3_0",
+      "initial_term_count": 38,
+      "n_qubits": 6,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_6_qubits_3_5": {
+      "basis_size": 4096,
+      "distance": "3_5",
+      "file": "Hidrogen/6_qubits/distance_3_5.json",
+      "final_key": "Hidrogen_6_qubits_H_prob_3_5",
+      "final_term_count": 169,
+      "initial_key": "Hidrogen_6_qubits_H_hf_3_5",
+      "initial_term_count": 41,
+      "n_qubits": 6,
+      "system": "Hidrogen"
+    },
+    "Hidrogen_8_qubits_1_0": {
+      "basis_size": 65536,
+      "distance": "1_0",
+      "file": "Hidrogen/8_qubits/distance_1_0.json",
+      "final_key": "qiskit_sparse_pauli_op",
+      "final_term_count": 185,
+      "initial_key": "diagonal_projection_of_final",
+      "initial_term_count": 37,
+      "n_qubits": 8,
+      "system": "Hidrogen"
+    },
+    "Li_4_qubits_0_5": {
+      "basis_size": 256,
+      "distance": "0_5",
+      "file": "Li/4_qubits/distance_0_5.json",
+      "final_key": "Li_4_qubits_H_prob_0_5",
+      "final_term_count": 100,
+      "initial_key": "Li_4_qubits_H_hf_0_5",
+      "initial_term_count": 16,
+      "n_qubits": 4,
+      "system": "Li"
+    },
+    "Li_4_qubits_1_0": {
+      "basis_size": 256,
+      "distance": "1_0",
+      "file": "Li/4_qubits/distance_1_0.json",
+      "final_key": "Li_4_qubits_H_prob_1_0",
+      "final_term_count": 100,
+      "initial_key": "Li_4_qubits_H_hf_1_0",
+      "initial_term_count": 16,
+      "n_qubits": 4,
+      "system": "Li"
+    },
+    "Li_4_qubits_1_5": {
+      "basis_size": 256,
+      "distance": "1_5",
+      "file": "Li/4_qubits/distance_1_5.json",
+      "final_key": "Li_4_qubits_H_prob_1_5",
+      "final_term_count": 100,
+      "initial_key": "Li_4_qubits_H_hf_1_5",
+      "initial_term_count": 16,
+      "n_qubits": 4,
+      "system": "Li"
+    },
+    "Li_4_qubits_2_0": {
+      "basis_size": 256,
+      "distance": "2_0",
+      "file": "Li/4_qubits/distance_2_0.json",
+      "final_key": "Li_4_qubits_H_prob_2_0",
+      "final_term_count": 100,
+      "initial_key": "Li_4_qubits_H_hf_2_0",
+      "initial_term_count": 16,
+      "n_qubits": 4,
+      "system": "Li"
+    },
+    "Li_4_qubits_2_5": {
+      "basis_size": 256,
+      "distance": "2_5",
+      "file": "Li/4_qubits/distance_2_5.json",
+      "final_key": "Li_4_qubits_H_prob_2_5",
+      "final_term_count": 100,
+      "initial_key": "Li_4_qubits_H_hf_2_5",
+      "initial_term_count": 16,
+      "n_qubits": 4,
+      "system": "Li"
+    },
+    "Li_4_qubits_3_0": {
+      "basis_size": 256,
+      "distance": "3_0",
+      "file": "Li/4_qubits/distance_3_0.json",
+      "final_key": "Li_4_qubits_H_prob_3_0",
+      "final_term_count": 100,
+      "initial_key": "Li_4_qubits_H_hf_3_0",
+      "initial_term_count": 16,
+      "n_qubits": 4,
+      "system": "Li"
+    },
+    "Li_4_qubits_3_5": {
+      "basis_size": 256,
+      "distance": "3_5",
+      "file": "Li/4_qubits/distance_3_5.json",
+      "final_key": "Li_4_qubits_H_prob_3_5",
+      "final_term_count": 100,
+      "initial_key": "Li_4_qubits_H_hf_3_5",
+      "initial_term_count": 16,
+      "n_qubits": 4,
+      "system": "Li"
+    }
+  },
+  "source_dense_hdf5": "Hamiltonians_to_use/Hamiltonians.h5"
+}

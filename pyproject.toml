@@ -10,5 +10,22 @@ authors = [
 ]
 dependencies = [
   "torch",
-  "numpy"
+  "numpy",
+  "h5py",
+  "matplotlib",
+  "pytorch-optimizer"
+]
+
+[project.optional-dependencies]
+chemistry = [
+  "qiskit>=1.4",
+  "qiskit-nature>=0.8",
+  "pyscf"
+]
+
+[tool.setuptools]
+py-modules = [
+  "models",
+  "pauli_utilities",
+  "utils"
 ]

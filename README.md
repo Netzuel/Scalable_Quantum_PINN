@@ -12,12 +12,18 @@ chemistry Hamiltonians. Its central bottleneck was explicit dense-matrix
 learning: the network emitted matrix entries for `A_CD(t)` and Pauli
 coefficients over a full basis whose size grows as `4**N`.
 
-This repository targets the next problem: **large-qubit AGP discovery without
-dense Hilbert-space matrices and without full Pauli-basis outputs**.
+This repository targets the next problem: **AGP discovery without dense
+Hilbert-space matrices**. It supports two Pauli-coordinate modes:
+
+- selected-support experiments for scalable/local AGP ansatzes;
+- explicit full-basis experiments for the copied `q=2,4,6` `Quantum_PINN`
+  Hamiltonians, where the PINN emits all `4**q` Pauli coefficients but the loss
+  is still computed symbolically.
 
 ## Design Principle
 
-The model works in sparse Pauli coordinates. A user supplies:
+The model works in sparse Pauli coordinates. In selected-support mode, a user
+supplies:
 
 - sparse initial and final Hamiltonians, `H_initial` and `H_final`;
 - a scalable AGP ansatz support, such as local one- and two-body Pauli strings;
@@ -39,18 +45,52 @@ and trains against the Euler-Lagrange residual
 directly in sparse Pauli-coordinate space. No dense `2**N x 2**N` matrices are
 constructed by the library code.
 
+For the full-basis chemistry-starting experiments, `FullPauliAGPPINN` emits:
+
+```text
+A_lambda(t) = sum_{P in {I,X,Y,Z}^q} a_P(t) P
+```
+
+with exactly `4**q` outputs and fixed
+`lambda(t)=sin^2(pi tau / 2)`, where `tau=(t-t_initial)/T`. The Hamiltonians
+copied from `Quantum_PINN` are converted once into Pauli-term dictionaries, and
+training consumes those symbolic coefficients. The derivative `d lambda / dt`
+therefore includes the chain-rule factor `1/T`.
+
+The full-basis loss is the symbolic Euler-Lagrange action residual,
+
+```text
+S = < || [ i dH_AD/dlambda - [A_lambda, H_AD], H_AD ] ||^2 >
+```
+
+computed directly in Pauli-coordinate space from Pauli commutator rules and
+time-dependent coefficients. No dense Hilbert-space matrices are constructed in
+the model or loss. No endpoint loss is added for the fixed schedule:
+`lambda(0)=0`, `lambda(1)=1`, and `d lambda / dt = 0` at both endpoints, so
+`H_CD = H_AD + dot(lambda) A_lambda` exactly reduces to `H_initial` at
+`tau=0` and `H_final` at `tau=1`.
+
 ## Repository Layout
 
 - `models.py`: sparse Pauli-coordinate PINN models.
 - `utils.py`: sparse Pauli operators, differentiable Pauli algebra, local
-  ansatz generation, and benchmark Hamiltonians.
+  ansatz generation, full-basis helpers, and benchmark Hamiltonians.
+- `pauli_utilities.py`: coefficient-space Pauli helpers recovered from the QFI
+  project without dense matrix utilities.
+- `Hamiltonians_to_use/`: copied `Quantum_PINN` Hamiltonian source data plus
+  canonical Pauli-coordinate decompositions under
+  `pauli_decompositions/index.json`.
+- `tools/generate_qiskit_pauli_hamiltonian.py`: optional Qiskit Nature/PySCF
+  generator for new molecular Hamiltonians, exporting directly to sparse
+  Pauli-coordinate JSON.
 - `examples/`: short smoke examples, not paper-scale training runs.
-- `tests/`: minimal correctness checks for the Pauli algebra and loss path.
+- `tests/`: correctness checks plus self-contained `full_pauli_{2,4,6}_qubits`
+  training folders.
 - `documentation/`: manuscript PDF and project notes.
 - `AGENTS.md`: working instructions for future agents.
 
-No results, checkpoints, or historical scratch runs are copied from the old
-repository.
+No old result folders, checkpoints, or historical scratch runs are copied from
+the old repository.
 
 ## Current Status
 
@@ -59,7 +99,115 @@ discovery has been solved. Exactness is possible only inside the supplied
 operator support and residual closure. For generic interacting systems, the
 exact AGP can still require exponentially many Pauli strings; the scalable
 research direction is therefore to learn useful local/sparse/projected AGPs and
-to measure the residual left outside the chosen support.
+to measure the residual left outside the chosen support. The current full-basis
+mode is deliberate for `q=2,4,6` baseline experiments and should not be treated
+as a large-`q` strategy.
+
+## Full-Pauli Training Starts
+
+Each folder is a runnable experiment scaffold:
+
+```text
+tests/full_pauli_2_qubits/
+tests/full_pauli_4_qubits/
+tests/full_pauli_6_qubits/
+```
+
+Each run folder has a root `config.json` with `physical`, `neural`, and
+`training` blocks. The `physical.hamiltonian_source` field points to the
+Pauli-coordinate Hamiltonian index, not to the dense HDF5 source. The neural
+default is a 3x56 QRes-style quadratic MLP, using quadratic residual layers
+instead of plain linear layers. The default optimizer is SOAP; if the selected
+device is MPS, the runner uses `SafeMPSSOAP`, which moves SOAP's unsupported
+preconditioner eigendecomposition/QR operations to CPU. Automatic device
+selection follows `cuda > mps > cpu`. The default physical time is `T=1.0`, but
+the runner samples `tau in [0,1]` and converts it to physical time
+`t=t_initial+T tau`, so changing `T` only requires editing the config or
+passing `--physical-time`.
+
+Example:
+
+```bash
+conda run -n torch-mps python tests/full_pauli_2_qubits/training_script.py --epochs 10 --num-points 32
+```
+
+Use `restart_folders.py` inside a run folder to clear `Images/` and
+`Models_Data/` before another run.
+
+At the end of training, each run exports PDF-only vector figures:
+
+- `Images/losses.pdf`: training loss and Euler-Lagrange action-residual
+  histories.
+- `Images/top_hcd_coefficients.pdf`: time traces of the largest direct
+  counterdiabatic coefficients `d lambda / dt * C_P(t)`, ranked by
+  `sqrt(mean_tau((d lambda / dt * C_P(t))^2))`.
+- `Images/hcd_coefficient_support_map.pdf`: top Pauli strings as operator
+  hyperedges, with one row per learned term and one column per qubit.
+- `Images/hcd_connection_summary.pdf`: pairwise qubit participation induced by
+  all learned Pauli strings, plus total importance by Pauli-string order.
+
+Numerical artifacts and weights are stored under `Models_Data/`:
+
+- `loss_history.json`
+- `config.json`
+- `model_weights.pt`
+- `training_checkpoint.pt`
+- `final_agp_coefficients.pt`: raw AGP coefficients, direct counterdiabatic
+  coefficients, `tau`, physical `t`, `lambda`, and `d lambda / dt`.
+- `Models_Data/coefficient_importance.json`: machine-readable ranking for all
+  `4**q` direct counterdiabatic coefficients.
+- `Models_Data/coefficient_plot_data.json`: numerical arrays behind the
+  coefficient, hyperedge, and connection-summary plots.
+
+These plots do not impose a connectivity ansatz. Zero or small coefficients are
+allowed to emerge from training; the figures only rank what the PINN learned.
+
+## Projected Sparse q=20 Start
+
+The q=20 Hamiltonian examples are meant for sparse/support-selected AGP
+experiments. The first runnable q=20 scaffold is:
+
+```text
+tests/sparse_agp_20_qubits/
+```
+
+It uses the full sparse q=20 chemistry Hamiltonian pair, but the PINN emits a
+bounded AGP support selected from the largest symbolic endpoint-commutator
+terms. The default run uses 32 AGP outputs, 2951 Hamiltonian terms, 2983
+intermediate generator terms, and a 256-term residual projection. This is a
+projected approximation to the unrestricted AGP problem, not a full `4**20`
+coefficient model.
+
+## New Hamiltonian Generation
+
+The retained `Quantum_PINN` Hamiltonians were extracted once from the old
+`Hamiltonians.h5` provenance file. New molecular Hamiltonians should instead be
+generated directly as sparse Pauli operators when possible:
+
+```bash
+conda run -n torch-mps python tools/generate_qiskit_pauli_hamiltonian.py chemistry \
+  --system Hidrogen \
+  --distance 1.0 \
+  --atom "H 0 0 0; H 0 0 1.0" \
+  --basis sto3g \
+  --mapper parity \
+  --taper \
+  --target-qubits 2 \
+  --include-nuclear-repulsion \
+  --update-index
+```
+
+This command requires the optional chemistry dependencies:
+
+```bash
+conda run -n torch-mps python -m pip install -e ".[chemistry]"
+```
+
+For chemistry systems, the qubit count `q` is set by the active space, mapper,
+and optional tapering. The generator validates `--target-qubits`; it does not
+force a physically unrelated Hamiltonian to have an arbitrary qubit count. The
+initial endpoint is built symbolically as the computational-basis diagonal of
+the final Hamiltonian by retaining only `I/Z` Pauli strings.
 
 ## Quick Validation
 
@@ -67,6 +215,7 @@ Use the local `torch-mps` environment on this machine:
 
 ```bash
 conda run -n torch-mps python -m py_compile models.py utils.py
+conda run -n torch-mps python -m py_compile pauli_utilities.py tools/adapt_quantum_pinn_hamiltonians.py tools/generate_qiskit_pauli_hamiltonian.py
 conda run -n torch-mps python examples/two_qubit_sparse_demo.py
 conda run -n torch-mps python -m unittest discover -s tests
 ```

@@ -11,4 +11,7 @@ outputs/
 results/
 runs/
 wandb/
-
+tests/full_pauli_*_qubits/Images/*
+tests/full_pauli_*_qubits/Models_Data/*
+tests/sparse_agp_*_qubits/Images/*
+tests/sparse_agp_*_qubits/Models_Data/*

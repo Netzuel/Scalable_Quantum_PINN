@@ -8,12 +8,19 @@ the selected ansatz support rather than with the full Hilbert-space matrix.
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import combinations, product
+from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import torch
+
+try:  # Optional at import time; required only when SOAP is selected.
+    import pytorch_optimizer
+except ImportError:  # pragma: no cover - depends on the local environment.
+    pytorch_optimizer = None
 
 PAULI_ALPHABET = ("I", "X", "Y", "Z")
 
@@ -35,6 +42,96 @@ _MUL_TABLE: dict[tuple[str, str], tuple[complex, str]] = {
     ("Z", "Y"): (0.0 - 1.0j, "X"),
     ("X", "Z"): (0.0 - 1.0j, "Y"),
 }
+
+
+if pytorch_optimizer is not None:
+
+    class SafeMPSSOAP(pytorch_optimizer.SOAP):
+        """SOAP variant with CPU fallback for MPS eigendecomposition/QR steps."""
+
+        @staticmethod
+        def get_orthogonal_matrix(mat: torch.Tensor) -> list[torch.Tensor]:
+            matrices: list[torch.Tensor] = []
+            for m in mat:
+                if len(m) == 0:
+                    matrices.append([])
+                    continue
+
+                if m.device.type == "mps":
+                    m_cpu = m.detach().to(device="cpu", dtype=torch.float32)
+                    eye = torch.eye(m_cpu.shape[0], device="cpu", dtype=m_cpu.dtype)
+                    _, q_cpu = torch.linalg.eigh(m_cpu + 1e-30 * eye)
+                    q = torch.flip(q_cpu, dims=[1]).to(device=m.device, dtype=m.dtype)
+                else:
+                    try:
+                        eye = torch.eye(m.shape[0], device=m.device, dtype=m.dtype)
+                        _, q = torch.linalg.eigh(m + 1e-30 * eye)
+                    except Exception:  # pragma: no cover - backend-specific fallback.
+                        eye = torch.eye(m.shape[0], device=m.device, dtype=torch.float64)
+                        _, q = torch.linalg.eigh(m.to(torch.float64) + 1e-30 * eye)
+                        q = q.to(m.dtype)
+                    q = torch.flip(q, dims=[1])
+
+                matrices.append(q)
+
+            return matrices
+
+        def get_orthogonal_matrix_qr(
+            self,
+            state,
+            max_precondition_dim: int = 10000,
+            merge_dims: bool = False,
+        ):
+            if not any(len(m) != 0 and m.device.type == "mps" for m in state["GG"]):
+                return super().get_orthogonal_matrix_qr(state, max_precondition_dim, merge_dims)
+
+            original_shape = state["exp_avg_sq"].shape
+            permuted_shape = original_shape
+            if self.data_format == "channels_last" and len(original_shape) == 4:
+                permuted_shape = state["exp_avg_sq"].permute(0, 3, 1, 2).shape
+
+            exp_avg_sq = state["exp_avg_sq"]
+            if merge_dims:
+                from pytorch_optimizer.optimizer.soap import merge_small_dims
+
+                exp_avg_sq = exp_avg_sq.reshape(merge_small_dims(exp_avg_sq.size(), max_precondition_dim))
+
+            matrices = []
+            for ind, (m, o) in enumerate(zip(state["GG"], state["Q"])):
+                if len(m) == 0:
+                    matrices.append([])
+                    continue
+
+                m_cpu = m.detach().to(device="cpu", dtype=torch.float32)
+                o_cpu = o.detach().to(device="cpu", dtype=torch.float32)
+                est_eig = torch.diag(o_cpu.T @ m_cpu @ o_cpu)
+                sort_idx_cpu = torch.argsort(est_eig, descending=True)
+                sort_idx = sort_idx_cpu.to(exp_avg_sq.device)
+                exp_avg_sq = exp_avg_sq.index_select(ind, sort_idx)
+
+                power_iter = m_cpu @ o_cpu[:, sort_idx_cpu]
+                q_cpu, _ = torch.linalg.qr(power_iter)
+                matrices.append(q_cpu.to(device=m.device, dtype=m.dtype))
+
+            if merge_dims:
+                if self.data_format == "channels_last" and len(original_shape) == 4:
+                    exp_avg_sq = exp_avg_sq.reshape(permuted_shape).permute(0, 2, 3, 1)
+                else:
+                    exp_avg_sq = exp_avg_sq.reshape(original_shape)
+
+            state["exp_avg_sq"] = exp_avg_sq
+            return matrices
+
+else:
+
+    class SafeMPSSOAP(torch.optim.Optimizer):
+        """Placeholder that reports the missing optional SOAP dependency."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            raise ImportError("Install pytorch-optimizer to use SOAP or SafeMPSSOAP.")
+
+
+SafeMPSSoap = SafeMPSSOAP
 
 
 def validate_pauli_label(label: str, n_qubits: int | None = None) -> str:
@@ -103,6 +200,150 @@ def sort_pauli_labels(labels: Iterable[str]) -> list[str]:
     """Sort labels by locality first, then lexicographically."""
 
     return sorted({validate_pauli_label(label) for label in labels}, key=lambda x: (pauli_weight(x), x))
+
+
+def all_pauli_labels(n_qubits: int) -> list[str]:
+    """Generate the full ``4**n_qubits`` Pauli-product basis."""
+
+    if n_qubits < 1:
+        raise ValueError("Use at least one qubit.")
+    return ["".join(symbols) for symbols in product(PAULI_ALPHABET, repeat=n_qubits)]
+
+
+def fixed_sinusoidal_schedule(
+    t: torch.Tensor,
+    *,
+    t_min: float = 0.0,
+    t_max: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``lambda(t)=sin^2(pi tau / 2)`` and ``d lambda / dt``.
+
+    Here ``tau = (t - t_min) / T`` and ``T = t_max - t_min``. The derivative
+    includes the chain-rule factor ``1 / T``.
+    """
+
+    if t_max <= t_min:
+        raise ValueError("t_max must be greater than t_min.")
+    tau = (t - t_min) / (t_max - t_min)
+    pi = torch.as_tensor(torch.pi, dtype=t.dtype, device=t.device)
+    lam = torch.sin(0.5 * pi * tau).pow(2)
+    d_lambda_dt = 0.5 * pi * torch.sin(pi * tau) / (t_max - t_min)
+    start_mask = tau <= 0.0
+    end_mask = tau >= 1.0
+    lam = torch.where(start_mask, torch.zeros_like(lam), lam)
+    lam = torch.where(end_mask, torch.ones_like(lam), lam)
+    d_lambda_dt = torch.where(start_mask | end_mask, torch.zeros_like(d_lambda_dt), d_lambda_dt)
+    return lam, d_lambda_dt
+
+
+def format_distance_token(distance: str | float) -> str:
+    """Normalize a distance value to the historical HDF5 key token."""
+
+    if isinstance(distance, str):
+        return distance.replace(".", "_")
+    return str(float(distance)).replace(".", "_")
+
+
+def _decode_json_complex(value: object) -> complex:
+    if isinstance(value, (int, float)):
+        return complex(float(value), 0.0)
+    if isinstance(value, list) and len(value) == 2:
+        return complex(float(value[0]), float(value[1]))
+    raise ValueError(f"Cannot decode complex coefficient from {value!r}.")
+
+
+def _decode_json_terms(terms: Mapping[str, object]) -> dict[str, complex]:
+    return {label: _decode_json_complex(coeff) for label, coeff in terms.items()}
+
+
+def _load_pauli_pair_payload(
+    payload: Mapping[str, object],
+    *,
+    system: str,
+    n_qubits: int,
+    distance: str,
+) -> tuple["SparsePauliOperator", "SparsePauliOperator"]:
+    if str(payload.get("system")) != system:
+        raise KeyError(f"Requested system {system!r}, but pair file contains {payload.get('system')!r}.")
+    if int(payload.get("n_qubits", -1)) != n_qubits:
+        raise KeyError(f"Requested {n_qubits} qubits, but pair file contains {payload.get('n_qubits')!r}.")
+    if str(payload.get("distance")) != distance:
+        raise KeyError(f"Requested distance {distance!r}, but pair file contains {payload.get('distance')!r}.")
+    hamiltonians = payload.get("hamiltonians")
+    if not isinstance(hamiltonians, Mapping):
+        raise KeyError("Pauli pair payload does not contain a 'hamiltonians' mapping.")
+    initial = hamiltonians.get("initial")
+    final = hamiltonians.get("final")
+    if not isinstance(initial, Mapping) or not isinstance(final, Mapping):
+        raise KeyError("Pauli pair payload must contain 'initial' and 'final' Hamiltonians.")
+    initial_terms = initial.get("terms")
+    final_terms = final.get("terms")
+    if not isinstance(initial_terms, Mapping) or not isinstance(final_terms, Mapping):
+        raise KeyError("Pauli pair endpoints must contain term mappings.")
+    return (
+        SparsePauliOperator(_decode_json_terms(initial_terms), n_qubits=n_qubits),
+        SparsePauliOperator(_decode_json_terms(final_terms), n_qubits=n_qubits),
+    )
+
+
+def load_pauli_hamiltonian_pair(
+    path: str | Path,
+    *,
+    system: str,
+    n_qubits: int,
+    distance: str | float,
+) -> tuple[SparsePauliOperator, SparsePauliOperator]:
+    """Load adapted Pauli-coordinate Hamiltonians.
+
+    Supported inputs are the organized ``pauli_decompositions/index.json``
+    format, a direct ``pauli_hamiltonian_pair_v1`` JSON file, or the older
+    aggregate ``Hamiltonians_pauli.json`` format.
+    """
+
+    path = Path(path)
+    if path.is_dir():
+        path = path / "index.json"
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    distance_token = format_distance_token(distance)
+    payload_format = payload.get("format")
+    if payload_format == "pauli_hamiltonian_index_v1":
+        pair_id = f"{system}_{n_qubits}_qubits_{distance_token}"
+        pairs = payload["pairs"]
+        if pair_id not in pairs:
+            available = ", ".join(sorted(pairs)[:5])
+            raise KeyError(f"Missing Hamiltonian pair {pair_id!r}. First available pairs: {available}")
+        pair_file = path.parent / pairs[pair_id]["file"]
+        with pair_file.open("r", encoding="utf-8") as handle:
+            pair_payload = json.load(handle)
+        return _load_pauli_pair_payload(
+            pair_payload,
+            system=system,
+            n_qubits=n_qubits,
+            distance=distance_token,
+        )
+    if payload_format == "pauli_hamiltonian_pair_v1":
+        return _load_pauli_pair_payload(
+            payload,
+            system=system,
+            n_qubits=n_qubits,
+            distance=distance_token,
+        )
+
+    datasets = payload["datasets"]
+    prefix = f"{system}_{n_qubits}_qubits"
+    h0_key = f"{prefix}_H_hf_{distance_token}"
+    h1_key = f"{prefix}_H_prob_{distance_token}"
+    missing = [key for key in (h0_key, h1_key) if key not in datasets]
+    if missing:
+        available = ", ".join(sorted(datasets)[:5])
+        raise KeyError(f"Missing Hamiltonian key(s) {missing}. First available keys: {available}")
+    h0_terms = _decode_json_terms(datasets[h0_key]["terms"])
+    h1_terms = _decode_json_terms(datasets[h1_key]["terms"])
+    return (
+        SparsePauliOperator(h0_terms, n_qubits=n_qubits),
+        SparsePauliOperator(h1_terms, n_qubits=n_qubits),
+    )
 
 
 @dataclass(frozen=True)
@@ -399,3 +640,164 @@ class PauliAlgebra:
 
         return torch.mean(torch.sum(torch.abs(coefficients) ** 2, dim=-1).real)
 
+
+class SparseRightCommutator:
+    """Symbolic commutator ``[A, B]`` with full-basis ``A`` and sparse ``B``.
+
+    This avoids precomputing all full-basis pairwise commutators. It is intended
+    for the full-AGP setting where ``A`` has ``4**q`` coefficients but the
+    Hamiltonian support is sparse.
+    """
+
+    def __init__(self, basis_labels: Sequence[str], right_labels: Sequence[str]):
+        self.basis_labels = [validate_pauli_label(label) for label in basis_labels]
+        self.right_labels = [validate_pauli_label(label, len(self.basis_labels[0])) for label in right_labels]
+        self.n_qubits = infer_n_qubits(self.basis_labels)
+        self.index = {label: idx for idx, label in enumerate(self.basis_labels)}
+        if len(self.index) != len(self.basis_labels):
+            raise ValueError("basis_labels must be unique.")
+        left_idx: list[int] = []
+        right_slot: list[int] = []
+        out_idx: list[int] = []
+        coeffs: list[complex] = []
+        for slot, right_label in enumerate(self.right_labels):
+            for left_position, left_label in enumerate(self.basis_labels):
+                item = commutator_pauli_labels(left_label, right_label)
+                if item is None:
+                    continue
+                phase, out_label = item
+                if out_label not in self.index:
+                    raise ValueError(f"Output label {out_label} is not in the commutator basis.")
+                left_idx.append(left_position)
+                right_slot.append(slot)
+                out_idx.append(self.index[out_label])
+                coeffs.append(phase)
+        self._left_idx = tuple(left_idx)
+        self._right_slot = tuple(right_slot)
+        self._out_idx = tuple(out_idx)
+        self._coeffs = tuple(coeffs)
+
+    @property
+    def basis_size(self) -> int:
+        return len(self.basis_labels)
+
+    @property
+    def right_size(self) -> int:
+        return len(self.right_labels)
+
+    def commutator(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        """Compute ``[left, right]`` in the full basis."""
+
+        if left.shape[-1] != self.basis_size:
+            raise ValueError(f"left last axis must be {self.basis_size}, got {left.shape[-1]}.")
+        if right.shape[-1] != self.right_size:
+            raise ValueError(f"right last axis must be {self.right_size}, got {right.shape[-1]}.")
+        prefix = torch.broadcast_shapes(left.shape[:-1], right.shape[:-1])
+        left = left.expand(prefix + (self.basis_size,))
+        right = right.expand(prefix + (self.right_size,))
+        dtype = torch.promote_types(left.dtype, right.dtype)
+        if not torch.empty((), dtype=dtype).is_complex():
+            dtype = torch.complex128 if dtype == torch.float64 else torch.complex64
+        left = left.to(dtype)
+        right = right.to(dtype)
+        result = torch.zeros(prefix + (self.basis_size,), dtype=dtype, device=left.device)
+        if not self._coeffs:
+            return result
+        device = left.device
+        left_idx = torch.tensor(self._left_idx, dtype=torch.long, device=device)
+        right_slot = torch.tensor(self._right_slot, dtype=torch.long, device=device)
+        out_idx = torch.tensor(self._out_idx, dtype=torch.long, device=device)
+        coeffs = torch.tensor(self._coeffs, dtype=dtype, device=device)
+        source = coeffs * left[..., left_idx] * right[..., right_slot]
+        result.index_add_(-1, out_idx, source)
+        return result
+
+
+class ProjectedCommutator:
+    """Symbolic commutator projected between explicit sparse label sets.
+
+    It computes ``[left, right]`` where ``left`` lives on ``left_labels``,
+    ``right`` lives on ``right_labels``, and only outputs whose Pauli label is
+    present in ``output_labels`` are retained. This is useful for large-qubit
+    projected residuals where full commutator closure is intentionally avoided.
+    """
+
+    def __init__(
+        self,
+        left_labels: Sequence[str],
+        right_labels: Sequence[str],
+        output_labels: Sequence[str],
+    ) -> None:
+        self.left_labels = [validate_pauli_label(label) for label in left_labels]
+        self.right_labels = [validate_pauli_label(label, len(self.left_labels[0])) for label in right_labels]
+        self.output_labels = [validate_pauli_label(label, len(self.left_labels[0])) for label in output_labels]
+        self.n_qubits = infer_n_qubits(self.left_labels + self.right_labels + self.output_labels)
+        self.output_index = {label: idx for idx, label in enumerate(self.output_labels)}
+        if len(self.output_index) != len(self.output_labels):
+            raise ValueError("output_labels must be unique.")
+
+        left_idx: list[int] = []
+        right_idx: list[int] = []
+        out_idx: list[int] = []
+        coeffs: list[complex] = []
+        for left_position, left_label in enumerate(self.left_labels):
+            for right_position, right_label in enumerate(self.right_labels):
+                item = commutator_pauli_labels(left_label, right_label)
+                if item is None:
+                    continue
+                phase, out_label = item
+                output_position = self.output_index.get(out_label)
+                if output_position is None:
+                    continue
+                left_idx.append(left_position)
+                right_idx.append(right_position)
+                out_idx.append(output_position)
+                coeffs.append(phase)
+
+        self._left_idx = tuple(left_idx)
+        self._right_idx = tuple(right_idx)
+        self._out_idx = tuple(out_idx)
+        self._coeffs = tuple(coeffs)
+
+    @property
+    def left_size(self) -> int:
+        return len(self.left_labels)
+
+    @property
+    def right_size(self) -> int:
+        return len(self.right_labels)
+
+    @property
+    def output_size(self) -> int:
+        return len(self.output_labels)
+
+    @property
+    def nnz(self) -> int:
+        return len(self._coeffs)
+
+    def commutator(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        """Compute the projected commutator."""
+
+        if left.shape[-1] != self.left_size:
+            raise ValueError(f"left last axis must be {self.left_size}, got {left.shape[-1]}.")
+        if right.shape[-1] != self.right_size:
+            raise ValueError(f"right last axis must be {self.right_size}, got {right.shape[-1]}.")
+        prefix = torch.broadcast_shapes(left.shape[:-1], right.shape[:-1])
+        left = left.expand(prefix + (self.left_size,))
+        right = right.expand(prefix + (self.right_size,))
+        dtype = torch.promote_types(left.dtype, right.dtype)
+        if not torch.empty((), dtype=dtype).is_complex():
+            dtype = torch.complex128 if dtype == torch.float64 else torch.complex64
+        left = left.to(dtype)
+        right = right.to(dtype)
+        result = torch.zeros(prefix + (self.output_size,), dtype=dtype, device=left.device)
+        if not self._coeffs:
+            return result
+        device = left.device
+        left_idx = torch.tensor(self._left_idx, dtype=torch.long, device=device)
+        right_idx = torch.tensor(self._right_idx, dtype=torch.long, device=device)
+        out_idx = torch.tensor(self._out_idx, dtype=torch.long, device=device)
+        coeffs = torch.tensor(self._coeffs, dtype=dtype, device=device)
+        source = coeffs * left[..., left_idx] * right[..., right_idx]
+        result.index_add_(-1, out_idx, source)
+        return result
