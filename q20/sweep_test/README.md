@@ -1,16 +1,26 @@
-# q20 Support-Size Sweep
+# q20 Sparse AGP Curriculum
 
-This folder runs a fixed-support q=20 AGP sweep outside `tests/`.
+This folder runs the q20 sparse AGP curriculum outside `tests/`.
 
-The controlled variable is the AGP output support size:
+The default configuration is:
 
 ```text
-576, 768, 1024, 1536, 2048
+K = 1024 AGP output terms
+Q = auto holdout residual terms
+i = 10 holdout-feedback iterations
 ```
 
-Adaptive support growth is disabled so each run keeps exactly its requested
-number of AGP terms. The q=20 Hamiltonian, residual projection size, architecture,
-time grid, seed, and optimizer are kept fixed.
+The AGP support is fixed during feedback. The curriculum adds the largest unseen
+holdout residual equations back into the training residual basis and fine-tunes
+the same `K=1024` coefficient functions. In automatic mode,
+
+```text
+Q = initial_residual_terms + (i + unseen_batches_after_final_iteration)
+    * add_residual_terms_per_iteration
+```
+
+For the default q20 settings this resolves to `Q = 13312`, leaving 1024
+configured holdout residual equations unseen after round 10.
 
 Generated artifacts are ignored by git and written to:
 
@@ -20,13 +30,19 @@ Images/
 Models_Data/
 ```
 
-Run the full sweep with:
+Clean generated artifacts and recreate empty output folders:
+
+```bash
+conda run -n torch-mps python q20/sweep_test/restart_folders.py
+```
+
+Train the baseline `K=1024` AGP model:
 
 ```bash
 conda run --no-capture-output -n torch-mps python q20/sweep_test/training_script.py
 ```
 
-Rebuild only the sweep summary from completed runs with:
+Rebuild only the baseline summary from completed runs with:
 
 ```bash
 conda run -n torch-mps python q20/sweep_test/training_script.py --summary-only
@@ -52,16 +68,14 @@ conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_study.p
   --device cpu
 ```
 
-Run one holdout-feedback training pass. This keeps the AGP support fixed, adds
-the largest unseen holdout residual strings to the training residual basis, and
-fine-tunes from the existing checkpoint:
+Run the default ten-iteration holdout-feedback curriculum. If the baseline
+`runs/agp_1024/` checkpoint is missing, this command trains it first using
+`config.json`.
 
 ```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_feedback_training.py \
-  --base-agp-terms 1024 \
-  --rounds 1 \
-  --add-residual-terms 1024 \
-  --epochs-per-round 1000 \
-  --lr 1e-5 \
-  --device mps
+conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_feedback_training.py
 ```
+
+The feedback summary exports the round-wise residual plots plus the final-round
+`hcd_coefficient_support_map.pdf` and `hcd_connection_summary.pdf` in the main
+feedback `Images/` folder.

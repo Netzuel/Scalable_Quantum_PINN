@@ -365,22 +365,56 @@ AGP-support curriculum:
 
 The current q20 feedback experiment implements the first level.
 
-## 10. q20 Feedback Result
+## 10. q20 Feedback Configuration
 
-The q20 feedback experiment used:
+The current q20 default configuration is:
 
 ```text
 q = 20
 K = 1024
-Q = 8192
+Q = auto
 initial R_train = 2048
-feedback R_train = 3072
-feedback additions = 1024
-fine-tuning epochs = 1000
+feedback iterations = 10
+feedback additions per iteration = 1024 residual terms
+unseen residual batches after final iteration = 1
+fine-tuning epochs per iteration = 1000
 learning rate = 1e-5
 ```
 
-The result was:
+The automatic residual budget is:
+
+```text
+Q = initial R_train + (feedback iterations + unseen residual batches after final iteration)
+    * feedback additions per iteration
+```
+
+For the default q20 configuration:
+
+```text
+Q = 2048 + (10 + 1) * 1024 = 13312
+```
+
+The residual training basis therefore follows the curriculum:
+
+```text
+i = 0: R_train = 2048
+i = 1: R_train = 3072
+i = 2: R_train = 4096
+i = 3: R_train = 5120
+i = 4: R_train = 6144
+i = 5: R_train = 7168
+i = 6: R_train = 8192
+i = 7: R_train = 9216
+i = 8: R_train = 10240
+i = 9: R_train = 11264
+i = 10: R_train = 12288
+```
+
+The final feedback round still leaves `13312 - 12288 = 1024` configured holdout
+residual equations unseen. Therefore the unseen residual in the final plot is a
+real diagnostic on the selected holdout pool, not an empty-set zero.
+
+The first one-round feedback test produced:
 
 ```text
 baseline:
@@ -428,7 +462,8 @@ holdout_relative_residual <= 0.10
 unseen_relative_residual <= 1.0
 ```
 
-The feedback run passes these two thresholds after one round.
+The one-round feedback run passed these two thresholds. The current default
+configuration now continues this process for ten feedback iterations.
 
 ## 12. What Must Be Reported
 
@@ -469,34 +504,30 @@ Main scripts:
 
 ```text
 training_script.py
-    trains fixed-support q20 sweeps
+    trains the fixed-support q20 baseline
 
 holdout_study.py
-    evaluates trained supports on the common Q=8192 holdout residual basis
+    evaluates trained supports on a common holdout residual basis
 
 holdout_feedback_training.py
     performs holdout-feedback fine-tuning at fixed K
 ```
 
-The current feedback command is:
+The default feedback command reads the `K=1024`, `Q=auto`, `i=10` curriculum
+from `q20/sweep_test/config.json`. If the cleaned folder has no baseline
+checkpoint, this command trains the baseline first:
 
 ```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_feedback_training.py \
-  --base-agp-terms 1024 \
-  --rounds 1 \
-  --add-residual-terms 1024 \
-  --epochs-per-round 1000 \
-  --lr 1e-5 \
-  --device mps
+conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_feedback_training.py
 ```
 
-The methodology can be extended directly to five feedback iterations by setting:
+The feedback summary exports round-wise residual plots and, for the final round,
+copies these two AGP-structure plots into the main feedback `Images/` folder:
 
 ```text
---rounds 5
+hcd_coefficient_support_map.pdf
+hcd_connection_summary.pdf
 ```
-
-and choosing an appropriate residual-addition batch size.
 
 ## 14. Interpretation
 
