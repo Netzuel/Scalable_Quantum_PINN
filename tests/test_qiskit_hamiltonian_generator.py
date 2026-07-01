@@ -4,6 +4,7 @@ from tools.generate_qiskit_pauli_hamiltonian import (
     build_pair_payload,
     diagonal_projection_terms,
     sparse_pauli_op_to_terms,
+    transverse_ising_terms,
 )
 
 
@@ -41,6 +42,24 @@ class QiskitHamiltonianGeneratorTests(unittest.TestCase):
         operator = SparsePauliOp(["ZI", "XX", "XX"], coeffs=[1.0, 0.25, -0.25])
         terms = sparse_pauli_op_to_terms(operator, drop_tol=1e-12)
         self.assertEqual(terms, {"ZI": 1.0 + 0.0j})
+
+    def test_transverse_ising_terms_are_sparse_and_diagonal_projectable(self):
+        final_terms = transverse_ising_terms(
+            n_qubits=4,
+            x_field=1.0,
+            zz_coupling=0.5,
+            z_field=0.0,
+            identity_shift=0.0,
+            field_gradient=0.0,
+            coupling_gradient=0.0,
+            periodic=False,
+            drop_tol=1e-12,
+        )
+        initial_terms = diagonal_projection_terms(final_terms)
+
+        self.assertEqual(len(final_terms), 7)
+        self.assertEqual(len(initial_terms), 3)
+        self.assertTrue(all(set(label) <= {"I", "Z"} for label in initial_terms))
 
 
 if __name__ == "__main__":

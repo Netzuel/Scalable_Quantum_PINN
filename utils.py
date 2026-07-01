@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - depends on the local environment.
     pytorch_optimizer = None
 
 PAULI_ALPHABET = ("I", "X", "Y", "Z")
+FULL_PAULI_EXACT_MAX_QUBITS = 8
 
 _MUL_TABLE: dict[tuple[str, str], tuple[complex, str]] = {
     ("I", "I"): (1.0 + 0.0j, "I"),
@@ -208,6 +209,16 @@ def all_pauli_labels(n_qubits: int) -> list[str]:
     if n_qubits < 1:
         raise ValueError("Use at least one qubit.")
     return ["".join(symbols) for symbols in product(PAULI_ALPHABET, repeat=n_qubits)]
+
+
+def pauli_training_regime(n_qubits: int) -> str:
+    """Return the default AGP coefficient regime for a qubit count."""
+
+    if n_qubits < 1:
+        raise ValueError("Use at least one qubit.")
+    if n_qubits <= FULL_PAULI_EXACT_MAX_QUBITS:
+        return "full_pauli_exact"
+    return "adaptive_projected_sparse"
 
 
 def fixed_sinusoidal_schedule(
@@ -704,12 +715,15 @@ class SparseRightCommutator:
         if not self._coeffs:
             return result
         device = left.device
-        left_idx = torch.tensor(self._left_idx, dtype=torch.long, device=device)
-        right_slot = torch.tensor(self._right_slot, dtype=torch.long, device=device)
-        out_idx = torch.tensor(self._out_idx, dtype=torch.long, device=device)
-        coeffs = torch.tensor(self._coeffs, dtype=dtype, device=device)
-        source = coeffs * left[..., left_idx] * right[..., right_slot]
-        result.index_add_(-1, out_idx, source)
+        chunk_size = 250_000
+        for start in range(0, len(self._coeffs), chunk_size):
+            stop = min(start + chunk_size, len(self._coeffs))
+            left_idx = torch.tensor(self._left_idx[start:stop], dtype=torch.long, device=device)
+            right_slot = torch.tensor(self._right_slot[start:stop], dtype=torch.long, device=device)
+            out_idx = torch.tensor(self._out_idx[start:stop], dtype=torch.long, device=device)
+            coeffs = torch.tensor(self._coeffs[start:stop], dtype=dtype, device=device)
+            source = coeffs * left[..., left_idx] * right[..., right_slot]
+            result.index_add_(-1, out_idx, source)
         return result
 
 
@@ -794,10 +808,13 @@ class ProjectedCommutator:
         if not self._coeffs:
             return result
         device = left.device
-        left_idx = torch.tensor(self._left_idx, dtype=torch.long, device=device)
-        right_idx = torch.tensor(self._right_idx, dtype=torch.long, device=device)
-        out_idx = torch.tensor(self._out_idx, dtype=torch.long, device=device)
-        coeffs = torch.tensor(self._coeffs, dtype=dtype, device=device)
-        source = coeffs * left[..., left_idx] * right[..., right_idx]
-        result.index_add_(-1, out_idx, source)
+        chunk_size = 250_000
+        for start in range(0, len(self._coeffs), chunk_size):
+            stop = min(start + chunk_size, len(self._coeffs))
+            left_idx = torch.tensor(self._left_idx[start:stop], dtype=torch.long, device=device)
+            right_idx = torch.tensor(self._right_idx[start:stop], dtype=torch.long, device=device)
+            out_idx = torch.tensor(self._out_idx[start:stop], dtype=torch.long, device=device)
+            coeffs = torch.tensor(self._coeffs[start:stop], dtype=dtype, device=device)
+            source = coeffs * left[..., left_idx] * right[..., right_idx]
+            result.index_add_(-1, out_idx, source)
         return result

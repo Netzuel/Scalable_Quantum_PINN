@@ -25,6 +25,10 @@ where `S` is a selected sparse support, for example all one- and two-local
 Pauli strings on a hardware graph. The neural network output dimension is
 `1 + |S|`, not `1 + 2 * 4**N`.
 
+For the low-size regime, `q <= 8`, the repository can deliberately choose
+`S = {I,X,Y,Z}^q` and train all `4**q` AGP coefficients exactly in Pauli
+coordinates. For `q > 8`, the default training path is projected sparse.
+
 ## Loss Without Dense Matrices
 
 The Euler-Lagrange residual is evaluated through Pauli algebra:
@@ -49,14 +53,12 @@ This distinction is the central research discipline for the repository.
 
 ## Immediate Experiment Path
 
-1. Start with transverse-field Ising chains using local one- and two-body AGP
-   supports.
-2. Track scaling of `agp_terms`, residual-basis size, and training time as
+1. Use full-basis training only for the low-size exact regime, `q <= 8`.
+2. For `q > 8`, start from endpoint-commutator AGP candidates and generated
+   commutator residual bases.
+3. Use adaptive support growth: train, inspect residual Pauli terms, expand the
+   AGP support, and retrain while transferring shared network weights.
+4. Track scaling of `agp_terms`, residual-basis size, and training time as
    qubit count increases.
-3. Compare learned sparse AGPs against exact small-qubit solutions only for
+5. Compare learned sparse AGPs against exact small-qubit solutions only for
    validation.
-4. Add adaptive support growth: train, inspect residual Pauli terms, expand the
-   support, and retrain.
-5. Move to chemistry-style Hamiltonians only after the sparse workflow is
-   stable on structured spin chains.
-

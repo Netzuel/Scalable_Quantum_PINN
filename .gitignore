@@ -15,3 +15,5 @@ tests/full_pauli_*_qubits/Images/*
 tests/full_pauli_*_qubits/Models_Data/*
 tests/sparse_agp_*_qubits/Images/*
 tests/sparse_agp_*_qubits/Models_Data/*
+q20/sweep_test/Images/*
+q20/sweep_test/Models_Data/*

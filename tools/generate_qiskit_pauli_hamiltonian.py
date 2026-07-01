@@ -1,8 +1,9 @@
-"""Generate Pauli-coordinate Hamiltonian pairs from Qiskit operators.
+"""Generate Pauli-coordinate Hamiltonian pairs.
 
 The training code consumes sparse Pauli dictionaries, not dense matrices. This
 tool creates the same ``pauli_hamiltonian_pair_v1`` JSON format from a Qiskit
-``SparsePauliOp`` produced by Qiskit Nature.
+``SparsePauliOp`` produced by Qiskit Nature, or from analytic sparse spin-model
+generators used for large-qubit smoke tests.
 
 Chemistry example, when ``qiskit-nature`` and ``pyscf`` are installed:
 
@@ -39,7 +40,7 @@ DIAGONAL_ALPHABET = {"I", "Z"}
 DEFAULT_ORGANIZED_DIR = Path("Hamiltonians_to_use/pauli_decompositions")
 COEFFICIENT_CONVENTION = {
     "operator_expansion": "H = sum_P C_P P",
-    "coefficient_formula": "Qiskit SparsePauliOp coefficients, with labels in matrix tensor-product order",
+    "coefficient_formula": "Sparse Pauli coefficients, with labels in matrix tensor-product order",
     "pauli_alphabet": list(PAULI_ALPHABET),
     "pauli_basis": "{I, X, Y, Z}^{tensor n_qubits}",
     "stored_terms": "Only coefficients with abs(C_P) > drop_tol are stored.",
@@ -120,6 +121,71 @@ def add_identity_shift(terms: Mapping[str, complex], n_qubits: int, shift: float
     return sort_terms({label: coeff for label, coeff in shifted.items() if abs(coeff) > drop_tol})
 
 
+def pauli_label(n_qubits: int, assignments: Mapping[int, str]) -> str:
+    """Build a Pauli label from sparse site assignments."""
+
+    if n_qubits < 1:
+        raise ValueError("Use at least one qubit.")
+    chars = ["I"] * n_qubits
+    for site, symbol in assignments.items():
+        if site < 0 or site >= n_qubits:
+            raise ValueError(f"Site index {site} is outside 0..{n_qubits - 1}.")
+        symbol = symbol.upper()
+        if symbol not in PAULI_ALPHABET:
+            raise ValueError(f"Invalid Pauli symbol {symbol!r}.")
+        chars[site] = symbol
+    return "".join(chars)
+
+
+def scaled_coefficient(value: float, gradient: float, index: int, count: int) -> float:
+    """Return a deterministic weakly inhomogeneous coefficient."""
+
+    if count <= 1 or gradient == 0.0:
+        return float(value)
+    center = 0.5 * (count - 1)
+    normalized = (index - center) / max(center, 1.0)
+    return float(value) * (1.0 + float(gradient) * normalized)
+
+
+def transverse_ising_terms(
+    *,
+    n_qubits: int,
+    x_field: float,
+    zz_coupling: float,
+    z_field: float,
+    identity_shift: float,
+    field_gradient: float,
+    coupling_gradient: float,
+    periodic: bool,
+    drop_tol: float,
+) -> dict[str, complex]:
+    """Build a sparse transverse-field Ising Hamiltonian in Pauli coordinates."""
+
+    if n_qubits < 2:
+        raise ValueError("Use at least two qubits for a transverse-Ising Hamiltonian.")
+    terms: defaultdict[str, complex] = defaultdict(complex)
+    if abs(identity_shift) > drop_tol:
+        terms["I" * n_qubits] += complex(float(identity_shift), 0.0)
+
+    for site in range(n_qubits):
+        x_coeff = -scaled_coefficient(x_field, field_gradient, site, n_qubits)
+        if abs(x_coeff) > drop_tol:
+            terms[pauli_label(n_qubits, {site: "X"})] += complex(x_coeff, 0.0)
+        z_coeff = -scaled_coefficient(z_field, field_gradient, site, n_qubits)
+        if abs(z_coeff) > drop_tol:
+            terms[pauli_label(n_qubits, {site: "Z"})] += complex(z_coeff, 0.0)
+
+    edges = [(site, site + 1) for site in range(n_qubits - 1)]
+    if periodic:
+        edges.append((n_qubits - 1, 0))
+    for edge_index, (left, right) in enumerate(edges):
+        coeff = -scaled_coefficient(zz_coupling, coupling_gradient, edge_index, len(edges))
+        if abs(coeff) > drop_tol:
+            terms[pauli_label(n_qubits, {left: "Z", right: "Z"})] += complex(coeff, 0.0)
+
+    return sort_terms({label: coeff for label, coeff in terms.items() if abs(coeff) > drop_tol})
+
+
 def endpoint_payload(
     *,
     role: str,
@@ -147,6 +213,8 @@ def build_pair_payload(
     final_terms: Mapping[str, complex],
     source: Mapping[str, object],
     drop_tol: float,
+    initial_source_key: str = "diagonal_projection_of_final",
+    final_source_key: str = "qiskit_sparse_pauli_op",
 ) -> dict[str, object]:
     return {
         "format": "pauli_hamiltonian_pair_v1",
@@ -166,14 +234,14 @@ def build_pair_payload(
             "initial": endpoint_payload(
                 role="H_diagonal",
                 tau=0.0,
-                source_key="diagonal_projection_of_final",
+                source_key=initial_source_key,
                 terms=initial_terms,
                 n_qubits=n_qubits,
             ),
             "final": endpoint_payload(
                 role="H_problem",
                 tau=1.0,
-                source_key="qiskit_sparse_pauli_op",
+                source_key=final_source_key,
                 terms=final_terms,
                 n_qubits=n_qubits,
             ),
@@ -355,6 +423,54 @@ def run_chemistry(args: argparse.Namespace) -> None:
     )
 
 
+def run_transverse_ising(args: argparse.Namespace) -> None:
+    final_terms = transverse_ising_terms(
+        n_qubits=args.num_qubits,
+        x_field=args.x_field,
+        zz_coupling=args.zz_coupling,
+        z_field=args.z_field,
+        identity_shift=args.identity_shift,
+        field_gradient=args.field_gradient,
+        coupling_gradient=args.coupling_gradient,
+        periodic=args.periodic,
+        drop_tol=args.drop_tol,
+    )
+    initial_terms = diagonal_projection_terms(final_terms)
+    distance = distance_token(args.distance)
+    source = {
+        "generator": "tools/generate_qiskit_pauli_hamiltonian.py",
+        "backend": "analytic_transverse_field_ising",
+        "num_qubits": args.num_qubits,
+        "x_field": args.x_field,
+        "zz_coupling": args.zz_coupling,
+        "z_field": args.z_field,
+        "identity_shift": args.identity_shift,
+        "field_gradient": args.field_gradient,
+        "coupling_gradient": args.coupling_gradient,
+        "periodic": bool(args.periodic),
+        "initial_construction": "computational-basis diagonal projection, keeping only I/Z Pauli strings",
+        "dense_usage": "None; analytic Pauli strings are exported directly.",
+    }
+    payload = build_pair_payload(
+        system=args.system,
+        n_qubits=args.num_qubits,
+        distance=distance,
+        initial_terms=initial_terms,
+        final_terms=final_terms,
+        source=source,
+        drop_tol=args.drop_tol,
+        final_source_key="analytic_transverse_field_ising_sparse_pauli",
+    )
+    output_path = args.output or pair_output_path(args.organized_dir, args.system, args.num_qubits, distance)
+    write_json(output_path, payload)
+    if args.update_index:
+        update_index(args.organized_dir / "index.json", payload, output_path, args.drop_tol)
+    print(
+        f"wrote {output_path} with {len(initial_terms)} initial terms, "
+        f"{len(final_terms)} final terms, n_qubits={args.num_qubits}"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -377,6 +493,36 @@ def build_parser() -> argparse.ArgumentParser:
     chemistry.add_argument("--output", type=Path, default=None)
     chemistry.add_argument("--update-index", action="store_true")
     chemistry.set_defaults(func=run_chemistry)
+
+    transverse_ising = subparsers.add_parser(
+        "transverse-ising",
+        help="Generate an analytic sparse transverse-field Ising Hamiltonian.",
+    )
+    transverse_ising.add_argument("--system", default="TransverseIsing")
+    transverse_ising.add_argument("--distance", default="1.0", help="Stored distance/control token.")
+    transverse_ising.add_argument("--num-qubits", type=int, required=True)
+    transverse_ising.add_argument("--x-field", type=float, default=1.0)
+    transverse_ising.add_argument("--zz-coupling", type=float, default=1.0)
+    transverse_ising.add_argument("--z-field", type=float, default=0.0)
+    transverse_ising.add_argument("--identity-shift", type=float, default=0.0)
+    transverse_ising.add_argument(
+        "--field-gradient",
+        type=float,
+        default=0.0,
+        help="Optional deterministic linear inhomogeneity for one-body fields.",
+    )
+    transverse_ising.add_argument(
+        "--coupling-gradient",
+        type=float,
+        default=0.0,
+        help="Optional deterministic linear inhomogeneity for ZZ couplings.",
+    )
+    transverse_ising.add_argument("--periodic", action="store_true")
+    transverse_ising.add_argument("--drop-tol", type=float, default=1e-10)
+    transverse_ising.add_argument("--organized-dir", type=Path, default=DEFAULT_ORGANIZED_DIR)
+    transverse_ising.add_argument("--output", type=Path, default=None)
+    transverse_ising.add_argument("--update-index", action="store_true")
+    transverse_ising.set_defaults(func=run_transverse_ising)
     return parser
 
 

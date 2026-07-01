@@ -284,6 +284,13 @@ class ScalableAGPPINN(nn.Module):
         generator = 1.0j * d_h_d_lambda - self.algebra.commutator(agp, h_ad)
         return self.algebra.commutator(generator, h_ad)
 
+    def euler_lagrange_reference_residual(self, t: torch.Tensor) -> torch.Tensor:
+        """Residual for the same projection with ``A_lambda=0``."""
+
+        operators = self.sparse_operators(t)
+        generator = 1.0j * operators["d_h_d_lambda"]
+        return self.algebra.commutator(generator, operators["h_ad"])
+
     def counterdiabatic_hamiltonian(self, t: torch.Tensor) -> torch.Tensor:
         """Return sparse coefficients for ``H_AD + dot(lambda) A``."""
 
@@ -314,6 +321,12 @@ class ScalableAGPPINN(nn.Module):
         prediction = self.forward(t_collocation)
         residual = self.euler_lagrange_residual(t_collocation)
         residual_loss = self.algebra.norm_sq(residual)
+        reference_residual = self.euler_lagrange_reference_residual(t_collocation)
+        reference_loss = self.algebra.norm_sq(reference_residual)
+        eps = torch.finfo(residual_loss.dtype).eps
+        relative_residual = residual_loss / torch.clamp(reference_loss, min=eps)
+        residual_per_term = residual_loss / max(self.algebra.size, 1)
+        reference_residual_per_term = reference_loss / max(self.algebra.size, 1)
 
         if self.fixed_schedule:
             velocity_loss = torch.zeros((), dtype=t_collocation.dtype, device=t_collocation.device)
@@ -345,6 +358,10 @@ class ScalableAGPPINN(nn.Module):
         diagnostics = {
             "total": total.detach(),
             "residual": residual_loss.detach(),
+            "reference_residual": reference_loss.detach(),
+            "relative_residual": relative_residual.detach(),
+            "residual_per_term": residual_per_term.detach(),
+            "reference_residual_per_term": reference_residual_per_term.detach(),
             "boundary": boundary_loss.detach(),
             "velocity": velocity_loss.detach(),
             "agp_l2": agp_l2_loss.detach(),
@@ -506,6 +523,13 @@ class ProjectedSparseAGPPINN(nn.Module):
         generator = 1.0j * operators["d_h_d_lambda"] - commutator_1
         return self.second_commutator.commutator(generator, operators["h_ad_sparse"])
 
+    def euler_lagrange_reference_residual(self, t: torch.Tensor) -> torch.Tensor:
+        """Projected residual for the same Hamiltonian path with ``A_lambda=0``."""
+
+        operators = self.sparse_operators(t)
+        generator = 1.0j * operators["d_h_d_lambda"]
+        return self.second_commutator.commutator(generator, operators["h_ad_sparse"])
+
     def loss(
         self,
         t_collocation: torch.Tensor,
@@ -517,6 +541,12 @@ class ProjectedSparseAGPPINN(nn.Module):
         prediction = self.forward(t_collocation)
         residual = self.euler_lagrange_residual(t_collocation)
         residual_loss = PauliAlgebra.norm_sq(residual)
+        reference_residual = self.euler_lagrange_reference_residual(t_collocation)
+        reference_loss = PauliAlgebra.norm_sq(reference_residual)
+        eps = torch.finfo(residual_loss.dtype).eps
+        relative_residual = residual_loss / torch.clamp(reference_loss, min=eps)
+        residual_per_term = residual_loss / max(len(self.residual_labels), 1)
+        reference_residual_per_term = reference_loss / max(len(self.residual_labels), 1)
         agp_l2_loss = torch.mean(prediction["agp_coefficients"].pow(2))
         total = weights.residual * residual_loss
         if weights.agp_l2 != 0.0:
@@ -524,6 +554,10 @@ class ProjectedSparseAGPPINN(nn.Module):
         diagnostics = {
             "total": total.detach(),
             "residual": residual_loss.detach(),
+            "reference_residual": reference_loss.detach(),
+            "relative_residual": relative_residual.detach(),
+            "residual_per_term": residual_per_term.detach(),
+            "reference_residual_per_term": reference_residual_per_term.detach(),
             "agp_l2": agp_l2_loss.detach(),
             "agp_terms": torch.tensor(float(len(self.agp_labels)), device=t_collocation.device),
             "hamiltonian_terms": torch.tensor(float(len(self.hamiltonian_labels)), device=t_collocation.device),
@@ -669,6 +703,13 @@ class FullPauliAGPPINN(nn.Module):
         generator = 1.0j * operators["d_h_d_lambda"] - commutator_1
         return self.right_commutator.commutator(generator, operators["h_ad_sparse"])
 
+    def euler_lagrange_reference_residual(self, t: torch.Tensor) -> torch.Tensor:
+        """Residual for the same Hamiltonian path with ``A_lambda=0``."""
+
+        operators = self.sparse_operators(t)
+        generator = 1.0j * operators["d_h_d_lambda"]
+        return self.right_commutator.commutator(generator, operators["h_ad_sparse"])
+
     def counterdiabatic_hamiltonian(self, t: torch.Tensor) -> torch.Tensor:
         operators = self.sparse_operators(t)
         d_lambda_dt = operators["d_lambda_dt"].to(operators["agp"].dtype)
@@ -694,6 +735,12 @@ class FullPauliAGPPINN(nn.Module):
         prediction = self.forward(t_collocation)
         residual = self.euler_lagrange_residual(t_collocation)
         action_loss = PauliAlgebra.norm_sq(residual)
+        reference_residual = self.euler_lagrange_reference_residual(t_collocation)
+        reference_loss = PauliAlgebra.norm_sq(reference_residual)
+        eps = torch.finfo(action_loss.dtype).eps
+        relative_residual = action_loss / torch.clamp(reference_loss, min=eps)
+        residual_per_term = action_loss / max(len(self.pauli_labels), 1)
+        reference_residual_per_term = reference_loss / max(len(self.pauli_labels), 1)
         agp_l2_loss = torch.mean(prediction["agp_coefficients"].pow(2))
         total = weights.residual * action_loss
         if weights.agp_l2 != 0.0:
@@ -702,6 +749,10 @@ class FullPauliAGPPINN(nn.Module):
             "total": total.detach(),
             "action": action_loss.detach(),
             "residual": action_loss.detach(),
+            "reference_residual": reference_loss.detach(),
+            "relative_residual": relative_residual.detach(),
+            "residual_per_term": residual_per_term.detach(),
+            "reference_residual_per_term": reference_residual_per_term.detach(),
             "agp_l2": agp_l2_loss.detach(),
             "basis_size": torch.tensor(float(len(self.pauli_labels)), device=t_collocation.device),
             "agp_terms": torch.tensor(float(len(self.agp_labels)), device=t_collocation.device),

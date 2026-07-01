@@ -26,3 +26,21 @@ and include the nuclear-repulsion constant as an identity shift.
 These are Hamiltonian-input examples only. A full-Pauli AGP PINN with `4**q`
 outputs is not practical for the largest entries; these files are meant to
 support sparse/support-selected AGP experiments.
+
+## Analytic Sparse Spin-Model Examples
+
+The generator also supports large-qubit analytic sparse Pauli inputs for smoke
+tests, without constructing dense Hilbert-space matrices and without running a
+large chemistry backend:
+
+```bash
+conda run -n torch-mps python tools/generate_qiskit_pauli_hamiltonian.py transverse-ising ...
+```
+
+| Pair id | Model | Qubits | Initial terms | Final terms |
+| --- | --- | ---: | ---: | ---: |
+| `TransverseIsing_156_qubits_1_0` | open-chain transverse-field Ising with weak deterministic inhomogeneity | 156 | 155 | 311 |
+
+The q=156 example is intended to exercise the projected sparse AGP machinery at
+the target qubit count. It is not a chemistry Hamiltonian and it is not a
+full-basis AGP experiment.

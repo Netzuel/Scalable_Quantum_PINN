@@ -13,7 +13,7 @@
   },
   "drop_tol": 1e-08,
   "format": "pauli_hamiltonian_index_v1",
-  "pair_count": 25,
+  "pair_count": 26,
   "pairs": {
     "Hidrogen_10_qubits_1_0": {
       "basis_size": 1048576,
@@ -289,6 +289,17 @@
       "initial_term_count": 16,
       "n_qubits": 4,
       "system": "Li"
+    },
+    "TransverseIsing_156_qubits_1_0": {
+      "basis_size": 8343699359066055009355553539724812947666814540455674882605631280555545803830627148527195652096,
+      "distance": "1_0",
+      "file": "TransverseIsing/156_qubits/distance_1_0.json",
+      "final_key": "analytic_transverse_field_ising_sparse_pauli",
+      "final_term_count": 311,
+      "initial_key": "diagonal_projection_of_final",
+      "initial_term_count": 155,
+      "n_qubits": 156,
+      "system": "TransverseIsing"
     }
   },
   "source_dense_hdf5": "Hamiltonians_to_use/Hamiltonians.h5"

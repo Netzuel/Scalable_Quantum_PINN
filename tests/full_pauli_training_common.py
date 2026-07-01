@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from models import FullPauliAGPPINN, FullPauliLossWeights
-from utils import SafeMPSSOAP, load_pauli_hamiltonian_pair, pytorch_optimizer
+from utils import FULL_PAULI_EXACT_MAX_QUBITS, SafeMPSSOAP, load_pauli_hamiltonian_pair, pytorch_optimizer
 
 
 OKABE_ITO = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442"]
@@ -405,13 +405,17 @@ def export_importance_table(
     top_k: int,
 ) -> list[dict[str, object]]:
     ranked = rank_coefficients(coefficients, labels)
+    nonidentity_ranked = [row for row in ranked if row["order"] > 0]
+    least_nonidentity_terms = list(reversed(nonidentity_ranked))[:top_k]
     payload = {
         "coefficient_kind": "counterdiabatic_hamiltonian",
         "coefficient_definition": "d_lambda_dt * C_P(t)",
         "ranking_metric": "rms_over_time",
         "top_k": top_k,
         "all_terms": ranked,
-        "top_nonidentity_terms": [row for row in ranked if row["order"] > 0][:top_k],
+        "top_nonidentity_terms": nonidentity_ranked[:top_k],
+        "least_nonidentity_terms": least_nonidentity_terms,
+        "least_terms_note": "Identity is excluded because it is gauge-trivial in the AGP commutator loss.",
     }
     with (data_dir / "coefficient_importance.json").open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
@@ -443,6 +447,7 @@ def export_plot_numerics(
     coefficients: torch.Tensor,
     labels: list[str],
     top_terms: list[dict[str, object]],
+    least_terms: list[dict[str, object]],
     ranked_terms: list[dict[str, object]],
     data_dir: Path,
 ) -> None:
@@ -466,6 +471,20 @@ def export_plot_numerics(
                 "values": [float(value) for value in coeff_np[:, idx]],
             }
         )
+    least_payload = []
+    for row in least_terms:
+        idx = int(row["index"])
+        least_payload.append(
+            {
+                "label": row["label"],
+                "index": idx,
+                "order": row["order"],
+                "rms": row["rms"],
+                "mean_abs": row["mean_abs"],
+                "max_abs": row["max_abs"],
+                "values": [float(value) for value in coeff_np[:, idx]],
+            }
+        )
     payload = {
         "coefficient_kind": "counterdiabatic_hamiltonian",
         "coefficient_definition": "d_lambda_dt * C_P(t)",
@@ -475,6 +494,9 @@ def export_plot_numerics(
         "ranking_metric": "rms_over_time",
         "top_coefficients": top_payload,
         "support_map_terms": top_payload[: min(len(top_payload), 16)],
+        "least_coefficients": least_payload,
+        "least_support_map_terms": least_payload[: min(len(least_payload), 16)],
+        "least_terms_note": "Identity is excluded because it is gauge-trivial in the AGP commutator loss.",
         "pairwise_participation": pair_matrix.tolist(),
         "importance_by_order": {
             str(order): float(value)
@@ -541,9 +563,13 @@ def plot_top_coefficients(
 
 
 def plot_support_map(
-    top_terms: list[dict[str, object]],
+    terms: list[dict[str, object]],
     n_qubits: int,
     images_dir: Path,
+    *,
+    title: str = "Top operator hyperedges",
+    stem: str = "hcd_coefficient_support_map",
+    bar_color: str = "#0072B2",
 ) -> None:
     import matplotlib
 
@@ -553,7 +579,7 @@ def plot_support_map(
     from matplotlib.ticker import ScalarFormatter
 
     set_paper_style(plt)
-    selected = top_terms[: min(len(top_terms), 16)]
+    selected = terms[: min(len(terms), 16)]
     if not selected:
         return
     code = {"I": 0, "X": 1, "Y": 2, "Z": 3}
@@ -586,7 +612,7 @@ def plot_support_map(
     ax_map.set_yticks(np.arange(len(selected)) + 0.5)
     ax_map.set_yticklabels([pauli_math_label(label) for label in labels], fontsize=TICK_FS)
     ax_map.set_xlabel("qubit", fontsize=LABEL_FS)
-    ax_map.set_title("Top operator hyperedges", fontsize=TITLE_FS)
+    ax_map.set_title(title, fontsize=TITLE_FS)
     ax_map.tick_params(axis="both", length=TICK_LENGTH, width=TICK_WIDTH)
     for row_idx, label in enumerate(labels):
         for qubit_idx, symbol in enumerate(label):
@@ -601,7 +627,7 @@ def plot_support_map(
             )
 
     y = np.arange(len(selected))
-    ax_bar.barh(y, importance, color="#0072B2")
+    ax_bar.barh(y, importance, color=bar_color)
     ax_bar.invert_yaxis()
     ax_bar.set_yticks([])
     ax_bar.set_xlabel(r"$\mathrm{RMS}_\tau(\dot{\lambda}C_P)$", fontsize=LABEL_FS)
@@ -609,7 +635,7 @@ def plot_support_map(
     ax_bar.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
     ax_bar.tick_params(axis="x", labelsize=TICK_FS, length=TICK_LENGTH, width=TICK_WIDTH)
     fig.subplots_adjust(top=0.88, left=0.22, right=0.98, bottom=0.16, wspace=0.34)
-    save_pdf(fig, images_dir, "hcd_coefficient_support_map")
+    save_pdf(fig, images_dir, stem)
     plt.close(fig)
 
 
@@ -698,12 +724,21 @@ def export_coefficient_plots(
     *,
     top_k: int,
 ) -> None:
-    top_terms = export_importance_table(coefficients, labels, data_dir, top_k=top_k)
     ranked_terms = rank_coefficients(coefficients, labels)
+    top_terms = export_importance_table(coefficients, labels, data_dir, top_k=top_k)
+    least_terms = list(reversed([row for row in ranked_terms if row["order"] > 0]))[:top_k]
     n_qubits = len(labels[0])
-    export_plot_numerics(tau, t, d_lambda_dt, coefficients, labels, top_terms, ranked_terms, data_dir)
+    export_plot_numerics(tau, t, d_lambda_dt, coefficients, labels, top_terms, least_terms, ranked_terms, data_dir)
     plot_top_coefficients(tau, coefficients, top_terms, images_dir)
     plot_support_map(top_terms, n_qubits, images_dir)
+    plot_support_map(
+        least_terms,
+        n_qubits,
+        images_dir,
+        title="Least important operator hyperedges",
+        stem="hcd_least_important_coefficient_support_map",
+        bar_color="#999999",
+    )
     plot_connection_summary(ranked_terms, n_qubits, images_dir)
 
 
@@ -754,6 +789,11 @@ def regenerate_plots_from_saved_run(settings: RunSettings, run_dir: Path) -> Non
 
 def run_training(settings: RunSettings, run_dir: Path) -> dict[str, float]:
     config = settings.model
+    if config.n_qubits > FULL_PAULI_EXACT_MAX_QUBITS:
+        raise ValueError(
+            f"FullPauliAGPPINN is limited to q <= {FULL_PAULI_EXACT_MAX_QUBITS}. "
+            "Use the projected sparse adaptive runner for larger systems."
+        )
     torch.manual_seed(settings.seed)
     device = select_device(settings.device)
     hamiltonian_path = Path(config.hamiltonian_source)

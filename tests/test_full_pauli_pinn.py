@@ -47,6 +47,8 @@ class FullPauliPINNTests(unittest.TestCase):
                 loss.backward()
                 self.assertTrue(torch.isfinite(loss))
                 self.assertIn("action", diagnostics)
+                self.assertIn("reference_residual", diagnostics)
+                self.assertIn("relative_residual", diagnostics)
                 self.assertNotIn("boundary", diagnostics)
                 self.assertNotIn("velocity", diagnostics)
                 self.assertEqual(int(diagnostics["agp_terms"].item()), 4**n_qubits)
