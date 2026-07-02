@@ -157,6 +157,7 @@ def evaluate_one_run(
         intermediate_top_k=intermediate_top_k,
         residual_top_k=residual_top_k,
         agp_labels=trained_agp_labels,
+        residual_labels=common_residual_labels,
         stage=0,
     )
     if common_residual_labels is not None:

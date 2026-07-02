@@ -21,7 +21,8 @@ from utils import (
     FULL_PAULI_EXACT_MAX_QUBITS,
     SafeMPSSOAP,
     SparsePauliOperator,
-    commutator_pauli_labels,
+    _commutator_pauli_codes_unchecked,
+    _encode_pauli_label,
     load_pauli_hamiltonian_pair,
     pauli_weight,
     pytorch_optimizer,
@@ -294,13 +295,23 @@ def commutator_generated_scores(
     right_scores: dict[str, float],
 ) -> dict[str, float]:
     scores: defaultdict[str, float] = defaultdict(float)
-    for left_label, left_score in left_scores.items():
+    left_items = [
+        (left_label, float(left_score), _encode_pauli_label(left_label))
+        for left_label, left_score in left_scores.items()
+        if left_score > 0.0
+    ]
+    right_items = [
+        (right_label, float(right_score), _encode_pauli_label(right_label))
+        for right_label, right_score in right_scores.items()
+        if right_score > 0.0
+    ]
+    for _, left_score, left_code in left_items:
         if left_score <= 0.0:
             continue
-        for right_label, right_score in right_scores.items():
+        for _, right_score, right_code in right_items:
             if right_score <= 0.0:
                 continue
-            item = commutator_pauli_labels(left_label, right_label)
+            item = _commutator_pauli_codes_unchecked(left_code, right_code)
             if item is None:
                 continue
             phase, out_label = item
@@ -316,6 +327,7 @@ def build_projected_support(
     intermediate_top_k: int,
     residual_top_k: int,
     agp_labels: list[str] | None = None,
+    residual_labels: list[str] | None = None,
     stage: int = 0,
 ) -> dict[str, object]:
     h_labels = sort_pauli_labels(set(h0.labels) | set(h1.labels))
@@ -343,15 +355,22 @@ def build_projected_support(
     bounded_intermediate_scores = {label: score for label, score in bounded_intermediate_pairs}
     intermediate_extra = [label for label, _ in bounded_intermediate_pairs]
     intermediate_labels = sort_pauli_labels(set(h_labels) | set(resolved_agp_labels) | set(intermediate_extra))
-    generator_scores = merge_scores(delta_score, bounded_intermediate_scores)
-    residual_scores = merge_scores(endpoint_score, commutator_generated_scores(generator_scores, h_score))
-    residual_pairs = ranked_label_scores(residual_scores)[:residual_top_k]
-    residual_labels = [label for label, _ in residual_pairs]
+    if residual_labels is None:
+        generator_scores = merge_scores(delta_score, bounded_intermediate_scores)
+        residual_scores = merge_scores(endpoint_score, commutator_generated_scores(generator_scores, h_score))
+        residual_pairs = ranked_label_scores(residual_scores)[:residual_top_k]
+        resolved_residual_labels = [label for label, _ in residual_pairs]
+        residual_selection_rule = "ranked_generated_residual_scores"
+        generated_residual_candidate_terms: int | None = len(residual_scores)
+    else:
+        resolved_residual_labels = sort_pauli_labels(residual_labels)
+        residual_selection_rule = "explicit_residual_labels"
+        generated_residual_candidate_terms = None
 
     return {
         "agp_labels": resolved_agp_labels,
         "intermediate_labels": intermediate_labels,
-        "residual_labels": sort_pauli_labels(residual_labels),
+        "residual_labels": sort_pauli_labels(resolved_residual_labels),
         "metadata": {
             "strategy": "adaptive_generated_commutator_projected_residual",
             "selection_rule": (
@@ -363,7 +382,8 @@ def build_projected_support(
             "stage": stage,
             "endpoint_commutator_terms": len(commutator.terms),
             "generated_intermediate_candidate_terms": len(intermediate_scores),
-            "generated_residual_candidate_terms": len(residual_scores),
+            "generated_residual_candidate_terms": generated_residual_candidate_terms,
+            "residual_selection_rule": residual_selection_rule,
             "endpoint_commutator_l1": endpoint_commutator_l1,
             "endpoint_commutator_l2": endpoint_commutator_l2,
             "selected_endpoint_commutator_l1": selected_endpoint_commutator_l1,
@@ -379,7 +399,7 @@ def build_projected_support(
             "hamiltonian_terms": len(h_labels),
             "agp_terms": len(resolved_agp_labels),
             "intermediate_terms": len(intermediate_labels),
-            "residual_terms": len(residual_labels),
+            "residual_terms": len(resolved_residual_labels),
             "agp_top_k": agp_top_k,
             "intermediate_top_k": intermediate_top_k,
             "residual_top_k": residual_top_k,

@@ -44,6 +44,21 @@ _MUL_TABLE: dict[tuple[str, str], tuple[complex, str]] = {
     ("X", "Z"): (0.0 - 1.0j, "Y"),
 }
 
+_PAULI_CODE = {"I": 0, "X": 1, "Y": 2, "Z": 3}
+_PAULI_SYMBOL = "IXYZ"
+_PRODUCT_CODE = (
+    (0, 1, 2, 3),
+    (1, 0, 3, 2),
+    (2, 3, 0, 1),
+    (3, 2, 1, 0),
+)
+_PRODUCT_PHASE = (
+    (1.0 + 0.0j, 1.0 + 0.0j, 1.0 + 0.0j, 1.0 + 0.0j),
+    (1.0 + 0.0j, 1.0 + 0.0j, 0.0 + 1.0j, 0.0 - 1.0j),
+    (1.0 + 0.0j, 0.0 - 1.0j, 1.0 + 0.0j, 0.0 + 1.0j),
+    (1.0 + 0.0j, 0.0 + 1.0j, 0.0 - 1.0j, 1.0 + 0.0j),
+)
+
 
 if pytorch_optimizer is not None:
 
@@ -141,7 +156,7 @@ def validate_pauli_label(label: str, n_qubits: int | None = None) -> str:
     if not isinstance(label, str) or not label:
         raise ValueError("Pauli labels must be non-empty strings.")
     label = label.upper()
-    invalid = sorted(set(label) - set(PAULI_ALPHABET))
+    invalid = sorted({symbol for symbol in label if symbol not in _PAULI_CODE})
     if invalid:
         raise ValueError(f"Invalid Pauli symbols {invalid} in label {label!r}.")
     if n_qubits is not None and len(label) != n_qubits:
@@ -197,10 +212,46 @@ def commutator_pauli_labels(left: str, right: str) -> tuple[complex, str] | None
     return phase, label_lr
 
 
+def _commutator_pauli_labels_unchecked(left: str, right: str) -> tuple[complex, str] | None:
+    """Fast commutator for labels already validated to the same length."""
+
+    return _commutator_pauli_codes_unchecked(_encode_pauli_label(left), _encode_pauli_label(right))
+
+
+def _encode_pauli_label(label: str) -> tuple[int, ...]:
+    return tuple(_PAULI_CODE[symbol] for symbol in label)
+
+
+def _commutator_pauli_codes_unchecked(
+    left_codes: tuple[int, ...],
+    right_codes: tuple[int, ...],
+) -> tuple[complex, str] | None:
+    phase = 1.0 + 0.0j
+    anticommute_parity = 0
+    out_codes: list[int] = []
+    for left_code, right_code in zip(left_codes, right_codes):
+        if left_code != 0 and right_code != 0 and left_code != right_code:
+            anticommute_parity ^= 1
+        phase *= _PRODUCT_PHASE[left_code][right_code]
+        out_codes.append(_PRODUCT_CODE[left_code][right_code])
+    if anticommute_parity == 0:
+        return None
+    return 2.0 * phase, "".join(_PAULI_SYMBOL[code] for code in out_codes)
+
+
 def sort_pauli_labels(labels: Iterable[str]) -> list[str]:
     """Sort labels by locality first, then lexicographically."""
 
-    return sorted({validate_pauli_label(label) for label in labels}, key=lambda x: (pauli_weight(x), x))
+    normalized: set[str] = set()
+    for label in labels:
+        if not isinstance(label, str) or not label:
+            raise ValueError("Pauli labels must be non-empty strings.")
+        upper = label.upper()
+        invalid = sorted({symbol for symbol in upper if symbol not in _PAULI_CODE})
+        if invalid:
+            raise ValueError(f"Invalid Pauli symbols {invalid} in label {upper!r}.")
+        normalized.add(upper)
+    return sorted(normalized, key=lambda x: (sum(symbol != "I" for symbol in x), x))
 
 
 def all_pauli_labels(n_qubits: int) -> list[str]:
@@ -754,9 +805,11 @@ class ProjectedCommutator:
         right_idx: list[int] = []
         out_idx: list[int] = []
         coeffs: list[complex] = []
-        for left_position, left_label in enumerate(self.left_labels):
-            for right_position, right_label in enumerate(self.right_labels):
-                item = commutator_pauli_labels(left_label, right_label)
+        left_codes = [_encode_pauli_label(label) for label in self.left_labels]
+        right_codes = [_encode_pauli_label(label) for label in self.right_labels]
+        for left_position, left_code in enumerate(left_codes):
+            for right_position, right_code in enumerate(right_codes):
+                item = _commutator_pauli_codes_unchecked(left_code, right_code)
                 if item is None:
                     continue
                 phase, out_label = item

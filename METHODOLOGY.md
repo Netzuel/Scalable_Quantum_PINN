@@ -365,6 +365,83 @@ AGP-support curriculum:
 
 The current q20 feedback experiment implements the first level.
 
+The exploratory q20 experiment implements a coupled version:
+
+```text
+residual curriculum:
+    grow the Euler-Lagrange residual equations enforced in the loss
+
+AGP-support curriculum:
+    grow the Pauli strings allowed in A_lambda
+```
+
+The AGP growth is not random. After each round, the code inspects the largest
+remaining holdout residual components and proposes new AGP strings through
+symbolic inverse-commutator paths:
+
+```text
+P -> [P, H_AD] -> [[P, H_AD], H_AD]
+```
+
+If such a path can generate a high-RMS residual Pauli string, the candidate `P`
+receives a score proportional to the residual RMS and to the endpoint
+Hamiltonian coefficients participating in the path. The best candidates are
+added to the AGP support, the old network output rows are copied into the
+expanded output layer, and the new rows are initialized near zero before
+fine-tuning.
+
+The coupled curriculum now uses a step-level validation gate. Four residual
+sets are kept separate:
+
+```text
+S_R_train:
+    residual equations used directly in the loss
+
+S_R_feedback:
+    fixed larger residual pool used to choose hard residual equations
+
+S_R_probe:
+    deprecated shorthand for the two fixed probe pools below
+
+S_R_probe_gate:
+    fixed disjoint residual pool used to accept or reject a trained curriculum
+    step
+
+S_R_probe_test:
+    fixed disjoint residual pool reported after every round but never used for
+    accept/reject decisions
+```
+
+The AGP proposal score is allowed to inspect both the feedback spectrum and the
+probe-gate spectrum, but a proposed support expansion is only accepted after a
+trained candidate round is evaluated. The gate checks both the relative and
+absolute probe-gate residuals, plus the feedback residual. If a candidate
+worsens these beyond configured tolerances, the whole step is rejected and the
+code retries smaller residual batches before falling back to an AGP-only or
+no-op round.
+
+This distinction matters because when `S_AGP` changes, a residual basis
+generated from the current AGP support is a moving target. A decreasing moving
+"unseen" curve can be misleading, and an increasing one can mix true
+generalization failure with basis drift. The probe-gate and probe-test bases are
+cleaner diagnostics: both are selected once, kept disjoint from feedback and
+training labels, and evaluated consistently after every round. Only the
+probe-gate basis participates in decisions, leaving the probe-test basis as an
+external diagnostic.
+
+New AGP rows are also warmed up before full fine-tuning. During this short
+warm-up, hidden layers and old output rows are frozen, and gradients are allowed
+only on the newly introduced output rows. The full network is then unfrozen for
+the rest of the round. This reduces abrupt changes in previously learned
+coefficients when `K` grows.
+
+The current coupled implementation also adds a trust-region retention term on
+the already accepted AGP coefficient functions. During fine-tuning, the model is
+penalized if the old coefficient functions drift too far from the previously
+accepted network on the common AGP support. This does not freeze learning; it
+turns support growth into a smaller local update instead of a full rewrite of
+the old AGP.
+
 ## 10. q20 Feedback Configuration
 
 The current q20 default configuration is:
@@ -413,6 +490,58 @@ i = 10: R_train = 12288
 The final feedback round still leaves `13312 - 12288 = 1024` configured holdout
 residual equations unseen. Therefore the unseen residual in the final plot is a
 real diagnostic on the selected holdout pool, not an empty-set zero.
+
+The default coupled configuration is:
+
+```text
+q = 20
+initial K = 1024
+maximum K = 1664
+AGP proposals per iteration = 64
+Q = auto = 4864
+probe-gate residual terms = 2048
+probe-test residual terms = 4096
+initial R_train = 2048
+feedback iterations = 10
+residual additions per iteration = 256 residual terms
+residual backtracking counts = 256, 128, 64, 0
+new AGP row warm-up = 100 epochs per accepted growth attempt
+trust-region weight = 1e-4
+fine-tuning epochs per iteration = 1000
+learning rate = 1e-5
+```
+
+Therefore, if every round passes the probe gate and finds enough useful AGP
+candidates:
+
+```text
+i = 0: K = 1024
+i = 1: K = 1088
+i = 2: K = 1152
+i = 3: K = 1216
+i = 4: K = 1280
+i = 5: K = 1344
+i = 6: K = 1408
+i = 7: K = 1472
+i = 8: K = 1536
+i = 9: K = 1600
+i = 10: K = 1664
+```
+
+This gives the method exploratory capability: the initial `K=1024` ansatz is no
+longer final, but the expansion is still symbolic, sparse, and driven by the
+remaining projected Euler-Lagrange residual.
+
+For the coupled configuration, the accepted residual training basis grows more
+slowly:
+
+```text
+R_train = 2048 + 256 * accepted_residual_steps
+```
+
+If all ten residual steps are accepted, the final training residual basis has
+`4608` terms and the automatic `Q=4864` budget leaves `256` configured feedback
+residual equations unseen.
 
 The first one-round feedback test produced:
 
@@ -511,6 +640,9 @@ holdout_study.py
 
 holdout_feedback_training.py
     performs holdout-feedback fine-tuning at fixed K
+
+coupled_curriculum_training.py
+    performs holdout-feedback fine-tuning while expanding K
 ```
 
 The default feedback command reads the `K=1024`, `Q=auto`, `i=10` curriculum
@@ -525,6 +657,16 @@ The feedback summary exports round-wise residual plots and, for the final round,
 copies these two AGP-structure plots into the main feedback `Images/` folder:
 
 ```text
+hcd_coefficient_support_map.pdf
+hcd_connection_summary.pdf
+```
+
+The coupled curriculum additionally exports:
+
+```text
+coupled_curriculum_support_growth.pdf
+coupled_curriculum_residuals_vs_agp_terms.pdf
+coupled_curriculum_probe_gate.pdf
 hcd_coefficient_support_map.pdf
 hcd_connection_summary.pdf
 ```

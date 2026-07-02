@@ -98,6 +98,7 @@ def make_support_with_residual_labels(
         intermediate_top_k=settings.intermediate_top_k,
         residual_top_k=max(settings.residual_top_k, len(residual_labels)),
         agp_labels=agp_labels,
+        residual_labels=residual_labels,
         stage=stage,
     )
     support = dict(support)
