@@ -629,7 +629,14 @@ def main() -> None:
         else 2048
     )
     summary = payload.get("summary", {})
-    runs_dir = RUN_DIR / str(summary.get("runs_dir", "runs/")) if isinstance(summary, dict) else RUN_DIR / "runs"
+    support_output_root = support.get("output_root") if isinstance(support, dict) else None
+    runs_dir = RUN_DIR / str(
+        support_output_root
+        if support_output_root is not None
+        else summary.get("runs_dir", "runs/")
+        if isinstance(summary, dict)
+        else "runs"
+    )
     images_dir = RUN_DIR / str(summary.get("path_images", "Images/")) if isinstance(summary, dict) else RUN_DIR / "Images"
     data_dir = RUN_DIR / str(summary.get("path_data", "Models_Data/")) if isinstance(summary, dict) else RUN_DIR / "Models_Data"
     thresholds = Thresholds(

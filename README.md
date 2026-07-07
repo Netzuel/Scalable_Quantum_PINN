@@ -96,6 +96,9 @@ the model or loss. No endpoint loss is added for the fixed schedule:
 - `tests/`: correctness checks plus self-contained `full_pauli_{2,4,6}_qubits`
   training folders.
 - `documentation/`: manuscript PDF and project notes.
+- `AGP_CERTIFICATION_CRITERIA.md`: required gate checklist for deciding whether
+  a sparse large-`q` AGP is certified, promising, or only a projected sparse
+  experiment.
 - `Rules.md`: criteria for declaring an AGP support large enough, including
   holdout residuals, top-term stability, pruning, and reporting requirements.
 - `AGENTS.md`: working instructions for future agents.
@@ -115,6 +118,11 @@ mode is deliberate for low-size experiments up to `q=8` and should not be
 treated as a large-`q` strategy. The projected sparse runner refuses `q <= 8`
 by default, and the full-basis runner refuses `q > 8`, so accidental regime
 mixing is caught at runtime.
+
+Large-`q` AGP results must be classified with
+`AGP_CERTIFICATION_CRITERIA.md`. A result is not certified unless the support
+size, support content, and training representativeness gates all pass
+simultaneously on training, holdout, unseen, and fixed probe residual bases.
 
 ## Full-Pauli Training Starts
 

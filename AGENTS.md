@@ -47,6 +47,10 @@ projected/local exactness statement, not a generic exact AGP guarantee.
   Pauli supports.
 - Track both `agp_terms` and residual `basis_size` in every experiment.
 - Never silently expand to the full `4**N` basis for large `N`.
+- For every large-`N` sparse AGP task, re-read
+  `AGP_CERTIFICATION_CRITERIA.md` before accepting a result or making a
+  sufficiency claim. Mark every certification gate as `pass`, `fail`, or
+  `not tested`.
 - Do not commit generated `results/`, `outputs/`, `runs/`, `.pt`, `.h5`, or
   notebook checkpoint files.
 

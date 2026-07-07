@@ -102,8 +102,25 @@ space matrices.
 
 ## 3. Choosing the AGP Support `K`
 
-The AGP support is selected before training. In the current q20 experiments, the
-rule is:
+The AGP support is a fixed-budget object. The full Pauli basis is available only
+for small enough systems:
+
+```text
+q <= 7: K_full = 4**q is still a trainable output budget.
+q = 8: K_full = 4**8 is possible as an exact-output diagnostic, but expensive.
+q > 7: the active trainable AGP support is capped at K_active = 4**7.
+```
+
+For large `q`, the default active AGP support is therefore:
+
+```text
+K_active = 4**7 = 16384.
+```
+
+This is not a claim that the exact AGP contains only 16384 terms. It is the
+maximum active output budget that the method is designed to optimize.
+
+The first support-selection rule is:
 
 1. Load `H_initial` and `H_final` in sparse Pauli form.
 2. Compute the symbolic endpoint commutator:
@@ -114,21 +131,54 @@ rule is:
 
 3. Rank the generated Pauli strings by the absolute value of their commutator
 coefficient.
-4. Keep the largest `K` terms.
+4. Keep the largest `K_active` terms as the initial active AGP pool.
 
-For the example run:
+For the q20 support-refinement run:
 
 ```text
 q = 20
-K = 1024
+K_active = 16384
+K_explore <= 4**8 = 65536 generated outside candidates
 ```
 
-This means the PINN outputs 1024 coefficient functions, not `4**20`
+This means the PINN outputs 16384 coefficient functions, not `4**20`
 coefficient functions.
 
-Important caveat: this does not prove that these are the best possible 1024
-Pauli strings out of the full basis. It is a physically motivated sparse
-selection rule based on endpoint noncommutativity.
+Important caveat: this does not prove that these are the best possible 16384
+Pauli strings out of the full basis. It is a physically motivated initial pool.
+The curriculum is responsible for improving that pool by looking for strong
+outside candidates generated from missed residual directions.
+
+## 3.1 Fixed-Budget Support Refinement
+
+For `q > 7`, the AGP support should not grow without bound. Each curriculum
+iteration keeps exactly `K_active` trainable terms:
+
+```text
+|S_AGP| = K_active.
+```
+
+The iteration is:
+
+1. Train or fine-tune the current active support.
+2. Rank active terms by direct counterdiabatic coefficient importance:
+
+```text
+I_P = RMS_tau(dot(lambda)(tau) C_P(tau)).
+```
+
+3. Evaluate fixed residual bases and identify hard missed residual equations.
+4. Generate outside AGP candidates from inverse double-commutator paths.
+5. Score those candidates by their projected ability to reduce the current
+   residual.
+6. Replace weak active terms by stronger outside terms.
+7. Accept the replacement only if the fixed validation quotients improve or
+   remain within configured tolerances.
+
+The goal is not to discover the perfect unrestricted AGP. For q20 and certainly
+for q156, most Pauli strings are never enumerated. The goal is to make the
+fixed active support progressively more representative of the important AGP
+directions that can be found from the Hamiltonian and the observed residuals.
 
 ## 4. Training Residual Basis
 
@@ -141,14 +191,14 @@ H_initial, H_final, S_AGP
 
 through symbolic commutator closure and coefficient ranking.
 
-For the q20 baseline example:
+For the current q20 baseline example:
 
 ```text
-K = 1024 AGP terms
-R_train = 2048 residual terms
+K = 16384 AGP terms
+R_train = 8192 residual terms
 ```
 
-The PINN is trained to reduce the Euler-Lagrange residual only on those 2048
+The PINN is trained to reduce the Euler-Lagrange residual only on those 8192
 residual equations.
 
 This is a projected training problem. A low training residual means:
@@ -390,7 +440,7 @@ added to the AGP support, the old network output rows are copied into the
 expanded output layer, and the new rows are initialized near zero before
 fine-tuning.
 
-The coupled curriculum now uses a step-level validation gate. Four residual
+The coupled curriculum now uses a step-level validation gate. Five residual
 sets are kept separate:
 
 ```text
@@ -407,27 +457,31 @@ S_R_probe_gate:
     fixed disjoint residual pool used to accept or reject a trained curriculum
     step
 
+S_R_probe_watch:
+    second fixed disjoint residual pool used to accept or reject a trained
+    curriculum step
+
 S_R_probe_test:
     fixed disjoint residual pool reported after every round but never used for
     accept/reject decisions
 ```
 
-The AGP proposal score is allowed to inspect both the feedback spectrum and the
-probe-gate spectrum, but a proposed support expansion is only accepted after a
-trained candidate round is evaluated. The gate checks both the relative and
-absolute probe-gate residuals, plus the feedback residual. If a candidate
-worsens these beyond configured tolerances, the whole step is rejected and the
-code retries smaller residual batches before falling back to an AGP-only or
-no-op round.
+The AGP proposal score is allowed to inspect the feedback spectrum plus the
+fixed validation probe spectra. In the robust q20 configuration, a proposed AGP
+term must be supported by either `S_R_probe_gate` or `S_R_probe_watch`. A
+proposed support expansion is only accepted after a trained candidate round is
+evaluated. The gate checks feedback residuals plus both relative and absolute
+residuals on `probe_gate` and `probe_watch`. If a candidate worsens these beyond
+configured tolerances, the whole step is rejected and the code retries smaller
+residual and AGP batches before falling back to an AGP-only or no-op round.
 
 This distinction matters because when `S_AGP` changes, a residual basis
 generated from the current AGP support is a moving target. A decreasing moving
 "unseen" curve can be misleading, and an increasing one can mix true
-generalization failure with basis drift. The probe-gate and probe-test bases are
-cleaner diagnostics: both are selected once, kept disjoint from feedback and
-training labels, and evaluated consistently after every round. Only the
-probe-gate basis participates in decisions, leaving the probe-test basis as an
-external diagnostic.
+generalization failure with basis drift. The probe-gate, probe-watch, and
+probe-test bases are cleaner diagnostics: all are selected once and kept
+disjoint from feedback and training labels. The gate and watch probes
+participate in decisions; the probe-test basis remains an external diagnostic.
 
 New AGP rows are also warmed up before full fine-tuning. During this short
 warm-up, hidden layers and old output rows are frozen, and gradients are allowed
@@ -491,46 +545,102 @@ The final feedback round still leaves `13312 - 12288 = 1024` configured holdout
 residual equations unseen. Therefore the unseen residual in the final plot is a
 real diagnostic on the selected holdout pool, not an empty-set zero.
 
-The default coupled configuration is:
+The improved coupled configuration separates three decisions:
+
+1. how large the initial AGP support should be,
+2. which and how many new terms may enter per curriculum round,
+3. how the already accepted coefficient functions are improved without losing
+   probe generalization.
+
+For the initial support, `K` is no longer treated as a blind fixed number. The
+default q20 coupled run uses an endpoint-commutator coverage rule:
+
+```text
+choose the smallest rounded K such that
+
+sum_{j <= K} |c_j([H_initial, H_final])|^2
+/
+sum_j |c_j([H_initial, H_final])|^2
+>= target coverage,
+```
+
+with the current q20 bounds
+
+```text
+target coverage = 0.99
+minimum K       = 1536
+maximum K       = 2048
+rounding        = multiples of 64
+```
+
+For the current q20 Hamiltonian this resolves to the configured maximum
+`K=2048`, because the endpoint commutator L2 coverage at `K=2048` is about
+`0.9885`, just below the configured `0.99` target. The chosen Pauli strings are
+still the largest endpoint-commutator strings; only the number of strings is
+selected automatically.
+
+The default coupled configuration is now:
 
 ```text
 q = 20
-initial K = 1024
-maximum K = 1664
-AGP proposals per iteration = 64
-Q = auto = 4864
-probe-gate residual terms = 2048
-probe-test residual terms = 4096
-initial R_train = 2048
+initial K = auto endpoint-commutator coverage, resolving to 2048 here
+maximum K = 4096
+AGP proposals per iteration = 128
+Q = auto = 9728
+probe-gate residual terms = 8192
+probe-watch residual terms = 8192
+probe-test residual terms = 16384
+initial R_train = 4096
 feedback iterations = 10
-residual additions per iteration = 256 residual terms
-residual backtracking counts = 256, 128, 64, 0
-new AGP row warm-up = 100 epochs per accepted growth attempt
-trust-region weight = 1e-4
-fine-tuning epochs per iteration = 1000
-learning rate = 1e-5
+residual additions per iteration = 512 residual terms
+support-admission schedule =
+    (R=512, A=128), (R=512, A=64), (R=256, A=64),
+    (R=256, A=32), (R=128, A=32), (R=128, A=16),
+    (R=128, A=0), (R=0, A=32), (R=0, A=16)
+new AGP row warm-up = 400 epochs per accepted growth attempt
+trust-region weight = 1e-2
+fine-tuning epochs per iteration = 2000
+learning rate = 5e-6
+```
+
+Candidate AGP terms are still generated by symbolic inverse-commutator paths,
+but ranking is now validation-probe-aware. The candidate score combines
+selection residual support with fixed `probe_gate` and `probe_watch` support.
+Terms that appear useful to both moving and fixed sources receive a
+source-diversity bonus, and by default a term must have nonzero validation-probe
+support to be admitted into the proposed batch. This makes the proposal stage
+less likely to chase terms that only repair one moving selection pool.
+
+The gate is also stricter. A candidate step must satisfy feedback, probe-gate,
+and probe-watch worsening bounds. If either validation probe is still larger
+than the no-AGP baseline, the candidate must improve it. In the default
+configuration:
+
+```text
+probe-gate improvement is required while probe_gate_relative_residual > 1.0
+candidate_probe_gate <= 0.99 * previous_probe_gate
+probe-watch improvement is required while probe_watch_relative_residual > 1.0
+candidate_probe_watch <= 0.99 * previous_probe_watch
 ```
 
 Therefore, if every round passes the probe gate and finds enough useful AGP
 candidates:
 
 ```text
-i = 0: K = 1024
-i = 1: K = 1088
-i = 2: K = 1152
-i = 3: K = 1216
-i = 4: K = 1280
-i = 5: K = 1344
-i = 6: K = 1408
-i = 7: K = 1472
-i = 8: K = 1536
-i = 9: K = 1600
-i = 10: K = 1664
+i = 0: K = 1536
+i = 1: K <= 1600
+i = 2: K <= 1664
+i = 3: K <= 1728
+i = 4: K <= 1792
+i = 5: K <= 1856
+i = 6: K <= 1920
+i = 7: K <= 1984
+i = 8: K <= 2048
 ```
 
-This gives the method exploratory capability: the initial `K=1024` ansatz is no
-longer final, but the expansion is still symbolic, sparse, and driven by the
-remaining projected Euler-Lagrange residual.
+This gives the method exploratory capability: the endpoint-selected initial
+support is no longer final, but the expansion is still symbolic, sparse, and
+driven by the remaining projected Euler-Lagrange residual.
 
 For the coupled configuration, the accepted residual training basis grows more
 slowly:
@@ -573,6 +683,10 @@ important residual equations that were initially missing from the loss.
 A sparse AGP support should not be accepted only because the training residual
 is small.
 
+The full certification checklist is maintained in
+`AGP_CERTIFICATION_CRITERIA.md`. Future large-`q` results must be classified
+with that checklist before they are called sufficient or representative.
+
 A robust candidate should satisfy:
 
 1. Low training residual on the active residual basis.
@@ -607,11 +721,17 @@ R_train at each feedback iteration
 selection rule for S_AGP
 selection rule for S_R_train
 selection rule for S_R_holdout
+selection rule and size for S_R_probe_gate
+selection rule and size for S_R_probe_watch
+selection rule and size for S_R_probe_test
 number of feedback iterations
 number of residual terms added per iteration
 training relative residual
 holdout relative residual
 unseen relative residual
+probe_gate relative residual
+probe_watch relative residual
+probe_test relative residual
 top learned AGP coefficients
 least important learned AGP coefficients
 coefficient-ranking stability

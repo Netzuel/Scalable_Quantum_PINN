@@ -53,7 +53,7 @@ def norm_sq_subset(values: torch.Tensor, indices: list[int]) -> torch.Tensor:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a trained q=20 AGP on a larger residual holdout basis.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--trained-run", type=Path, default=RUN_DIR / "runs" / "agp_1536")
+    parser.add_argument("--trained-run", type=Path, default=RUN_DIR / "runs" / "baselines" / "agp_16384")
     parser.add_argument("--residual-top-k", type=int, default=8192)
     parser.add_argument("--intermediate-top-k", type=int, default=None)
     parser.add_argument("--device", default="cpu")

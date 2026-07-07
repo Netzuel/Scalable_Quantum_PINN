@@ -390,6 +390,9 @@ class ProjectedSparseLossWeights:
 
     residual: float = 1.0
     agp_l2: float = 1e-8
+    residual_block_normalization: str = "none"
+    agp_smoothness: float = 0.0
+    agp_curvature: float = 0.0
 
 
 class ProjectedSparseAGPPINN(nn.Module):
@@ -430,6 +433,16 @@ class ProjectedSparseAGPPINN(nn.Module):
         self.intermediate_labels = sort_pauli_labels(set(intermediate_labels) | set(self.hamiltonian_labels))
         self.residual_labels = sort_pauli_labels(residual_labels)
         self.intermediate_index = {label: idx for idx, label in enumerate(self.intermediate_labels)}
+        residual_order_counts: dict[int, int] = {}
+        for label in self.residual_labels:
+            weight = sum(symbol != "I" for symbol in label)
+            residual_order_counts[weight] = residual_order_counts.get(weight, 0) + 1
+        residual_block_weights = []
+        block_count = max(len(residual_order_counts), 1)
+        for label in self.residual_labels:
+            weight = sum(symbol != "I" for symbol in label)
+            residual_block_weights.append(1.0 / (block_count * max(residual_order_counts.get(weight, 1), 1)))
+        self.register_buffer("residual_block_weights", torch.tensor(residual_block_weights, dtype=torch.float32))
 
         missing_agp = sorted(set(self.agp_labels) - set(self.intermediate_labels))
         if missing_agp:
@@ -540,17 +553,40 @@ class ProjectedSparseAGPPINN(nn.Module):
         t_collocation = self._time_column(t_collocation)
         prediction = self.forward(t_collocation)
         residual = self.euler_lagrange_residual(t_collocation)
-        residual_loss = PauliAlgebra.norm_sq(residual)
         reference_residual = self.euler_lagrange_reference_residual(t_collocation)
-        reference_loss = PauliAlgebra.norm_sq(reference_residual)
+        if str(weights.residual_block_normalization).lower() in {"pauli_order", "order", "by_order"}:
+            block_weights = self.residual_block_weights.to(device=residual.device, dtype=residual.real.dtype)
+            residual_loss = torch.mean(torch.sum(torch.abs(residual) ** 2 * block_weights, dim=-1).real)
+            reference_loss = torch.mean(torch.sum(torch.abs(reference_residual) ** 2 * block_weights, dim=-1).real)
+        else:
+            residual_loss = PauliAlgebra.norm_sq(residual)
+            reference_loss = PauliAlgebra.norm_sq(reference_residual)
         eps = torch.finfo(residual_loss.dtype).eps
         relative_residual = residual_loss / torch.clamp(reference_loss, min=eps)
         residual_per_term = residual_loss / max(len(self.residual_labels), 1)
         reference_residual_per_term = reference_loss / max(len(self.residual_labels), 1)
         agp_l2_loss = torch.mean(prediction["agp_coefficients"].pow(2))
+        agp_smoothness_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
+        agp_curvature_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
+        if (weights.agp_smoothness != 0.0 or weights.agp_curvature != 0.0) and t_collocation.shape[0] > 1:
+            tau = self._normalized_time(t_collocation).squeeze(-1)
+            order = torch.argsort(tau)
+            sorted_tau = tau.index_select(0, order)
+            sorted_coefficients = prediction["agp_coefficients"].index_select(0, order)
+            dtau = torch.diff(sorted_tau).clamp_min(torch.finfo(sorted_tau.dtype).eps)
+            first_diff = torch.diff(sorted_coefficients, dim=0) / dtau[:, None]
+            agp_smoothness_loss = torch.mean(first_diff.pow(2))
+            if t_collocation.shape[0] > 2:
+                mid_dtau = ((dtau[1:] + dtau[:-1]) / 2.0).clamp_min(torch.finfo(sorted_tau.dtype).eps)
+                second_diff = torch.diff(first_diff, dim=0) / mid_dtau[:, None]
+                agp_curvature_loss = torch.mean(second_diff.pow(2))
         total = weights.residual * residual_loss
         if weights.agp_l2 != 0.0:
             total = total + weights.agp_l2 * agp_l2_loss
+        if weights.agp_smoothness != 0.0:
+            total = total + weights.agp_smoothness * agp_smoothness_loss
+        if weights.agp_curvature != 0.0:
+            total = total + weights.agp_curvature * agp_curvature_loss
         diagnostics = {
             "total": total.detach(),
             "residual": residual_loss.detach(),
@@ -559,6 +595,8 @@ class ProjectedSparseAGPPINN(nn.Module):
             "residual_per_term": residual_per_term.detach(),
             "reference_residual_per_term": reference_residual_per_term.detach(),
             "agp_l2": agp_l2_loss.detach(),
+            "agp_smoothness": agp_smoothness_loss.detach(),
+            "agp_curvature": agp_curvature_loss.detach(),
             "agp_terms": torch.tensor(float(len(self.agp_labels)), device=t_collocation.device),
             "hamiltonian_terms": torch.tensor(float(len(self.hamiltonian_labels)), device=t_collocation.device),
             "intermediate_terms": torch.tensor(float(len(self.intermediate_labels)), device=t_collocation.device),

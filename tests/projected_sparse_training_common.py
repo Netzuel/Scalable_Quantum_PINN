@@ -79,6 +79,9 @@ class ProjectedRunSettings:
     top_coefficients: int = 8
     residual_weight: float = 1.0
     agp_l2_weight: float = 1e-8
+    residual_block_normalization: str = "none"
+    agp_smoothness_weight: float = 0.0
+    agp_curvature_weight: float = 0.0
     path_images: str = "Images/"
     path_data: str = "Models_Data/"
 
@@ -166,6 +169,9 @@ def default_config_payload(config: ProjectedTrainingConfig) -> dict[str, object]
             "loss": {
                 "residual": 1.0,
                 "agp_l2": 1e-8,
+                "residual_block_normalization": "none",
+                "agp_smoothness": 0.0,
+                "agp_curvature": 0.0,
             },
             "export": {
                 "path_images": "Images/",
@@ -244,6 +250,9 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
         top_coefficients=int(training_export.get("top_coefficients", 8)),
         residual_weight=float(training_loss.get("residual", 1.0)),
         agp_l2_weight=float(training_loss.get("agp_l2", 1e-8)),
+        residual_block_normalization=str(training_loss.get("residual_block_normalization", "none")),
+        agp_smoothness_weight=float(training_loss.get("agp_smoothness", 0.0)),
+        agp_curvature_weight=float(training_loss.get("agp_curvature", 0.0)),
         path_images=str(training_export.get("path_images", "Images/")),
         path_data=str(training_export.get("path_data", "Models_Data/")),
     )
@@ -657,6 +666,19 @@ def qubit_ticks(n_qubits: int, *, max_ticks: int = 32) -> tuple[np.ndarray, list
     return np.asarray(sites, dtype=float) + 0.5, [rf"$q_{{{idx}}}$" for idx in sites]
 
 
+def sparse_integer_ticks(max_value: int, *, max_ticks: int = 9) -> np.ndarray:
+    if max_value <= max_ticks:
+        return np.arange(1, max_value + 1, dtype=int)
+    step = int(np.ceil(max_value / max_ticks))
+    ticks = list(range(1, max_value + 1, step))
+    if ticks[-1] != max_value:
+        if max_value - ticks[-1] <= max(1, step // 2):
+            ticks[-1] = max_value
+        else:
+            ticks.append(max_value)
+    return np.asarray(ticks, dtype=int)
+
+
 def rank_coefficients(coefficients: torch.Tensor, labels: list[str]) -> list[dict[str, object]]:
     values = coefficients.detach().cpu().numpy()
     rms = np.sqrt(np.mean(values * values, axis=0))
@@ -963,10 +985,13 @@ def plot_connection_summary(
     ax_order.yaxis.set_label_position("right")
     ax_order.yaxis.tick_right()
     ax_order.set_title("Importance by order", fontsize=TITLE_FS)
-    ax_order.set_xticks(orders)
+    ax_order.set_xlim(0.5, n_qubits + 0.5)
+    ax_order.set_xticks(sparse_integer_ticks(n_qubits))
+    ax_order.set_xticks(orders, minor=True)
     ax_order.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
     ax_order.tick_params(axis="both", labelsize=TICK_FS, length=TICK_LENGTH, width=TICK_WIDTH)
-    fig.subplots_adjust(top=0.84, left=0.09, right=0.90, bottom=0.20, wspace=0.58)
+    ax_order.tick_params(axis="x", which="minor", labelbottom=False, length=0.55 * TICK_LENGTH, width=TICK_WIDTH)
+    fig.subplots_adjust(top=0.84, left=0.09, right=0.90, bottom=0.22, wspace=0.58)
     save_pdf(fig, images_dir, "hcd_connection_summary")
     plt.close(fig)
 
@@ -1162,7 +1187,13 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
         n_qubits=config.n_qubits,
         distance=config.distance,
     )
-    loss_weights = ProjectedSparseLossWeights(residual=settings.residual_weight, agp_l2=settings.agp_l2_weight)
+    loss_weights = ProjectedSparseLossWeights(
+        residual=settings.residual_weight,
+        agp_l2=settings.agp_l2_weight,
+        residual_block_normalization=settings.residual_block_normalization,
+        agp_smoothness=settings.agp_smoothness_weight,
+        agp_curvature=settings.agp_curvature_weight,
+    )
     tau = torch.linspace(0.0, 1.0, settings.num_points, device=device).view(-1, 1)
     t = config.t_initial + config.physical_time * tau
     history: list[dict[str, float]] = []

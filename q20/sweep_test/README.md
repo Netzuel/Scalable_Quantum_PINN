@@ -1,120 +1,140 @@
 # q20 Sparse AGP Curriculum
 
-This folder runs the q20 sparse AGP curriculum outside `tests/`.
-
-The default configuration is:
-
-```text
-K = 1024 AGP output terms
-Q = auto holdout residual terms
-i = 10 holdout-feedback iterations
-```
-
-The AGP support is fixed during feedback. The curriculum adds the largest unseen
-holdout residual equations back into the training residual basis and fine-tunes
-the same `K=1024` coefficient functions. In automatic mode,
+This folder runs the q20 sparse AGP curriculum outside `tests/`. The default
+methodology is again the fixed-`K` holdout-feedback curriculum:
 
 ```text
-Q = initial_residual_terms + (i + unseen_batches_after_final_iteration)
-    * add_residual_terms_per_iteration
+K = 4**7 = 16384 trainable AGP outputs
+i = 10 feedback iterations
 ```
 
-For the default q20 settings this resolves to `Q = 13312`, leaving 1024
-configured holdout residual equations unseen after round 10.
+For `q > 7`, the code does not attempt to enumerate or train the full `4**q`
+Pauli basis. The research choice is the explicit AGP subset `S_AGP` with
+`|S_AGP| = 16384`. The baseline support is selected from the largest generated
+symbolic endpoint-commutator terms in `|[H_initial, H_final]|`, which is the
+matrix-free proxy used here for initially important AGP directions.
 
-The coupled curriculum extends this by also growing the AGP support:
+The feedback curriculum keeps this AGP support fixed. Each round evaluates the
+current model on a larger residual holdout basis, selects the largest unseen
+residual equations, adds those equations to the training residual basis, and
+fine-tunes the same coefficient functions:
 
 ```text
-K = 1024 -> at most 1664 by default
-propose 64 AGP terms per round
-try up to 256 residual equations per round
+round 0: train fixed S_AGP on Q0 residual equations
+round r: add hard residual equations from holdout, keep S_AGP unchanged
 ```
 
-New AGP terms are proposed from high-RMS holdout residual strings using symbolic
-inverse-commutator paths of the form `P -> [P, H] -> [[P, H], H]`.
-The current coupled run is gated at the whole-step level. It keeps two fixed
-probe bases disjoint from the feedback residual pool:
+With the current config:
 
 ```text
-probe_gate = validation basis used for accept/reject decisions
-probe_test = diagnostic basis reported but not used for decisions
+Q0 = 2048
+add_residual_terms_per_iteration = 1024
+i = 10
+Q_holdout(auto) = 2048 + (10 + 1) * 1024 = 13312
 ```
 
-Candidate residual/AGP expansions are accepted only if the feedback residual and
-the `probe_gate` residual remain within configured relative and absolute
-worsening tolerances. Rejected steps are retried with smaller residual batches
-(`256 -> 128 -> 64 -> 0` by default), and the accepted trajectory is rolled back
-if no safe step is found. A small trust-region penalty keeps previously learned
-AGP coefficient functions from drifting during fine-tuning.
+The final trained round therefore uses 12288 residual equations and leaves one
+1024-term unseen residual batch for the final diagnostic. This is the intended
+monotone-feedback test: the learned AGP is judged by whether adding hard
+projected residual equations improves the residual quotients relative to
+`AGP = 0`.
 
-Generated artifacts are ignored by git and written to:
+Generated artifacts are ignored by git and written under:
 
 ```text
-runs/agp_<N>/
-Images/
-Models_Data/
+runs/baselines/agp_16384/
+runs/fixed_k_holdout_feedback_v2/agp_16384_residual_13312_add_1024_rounds_10/
+runs/support_sweep_summary/Images/
+runs/support_sweep_summary/Models_Data/
 ```
 
-Clean generated artifacts and recreate empty output folders:
+The top-level `Images/` and `Models_Data/` scratch folders are not created.
+For completed feedback runs, canonical report figures are kept in the run-level
+`Images/` folder. Per-round checkpoints and data are kept under `rounds/`;
+per-round figure folders are pruned by default to avoid repeated copies of the
+same diagnostics.
+
+## Clean
+
+Clean generated artifacts and recreate only the run root:
 
 ```bash
 conda run -n torch-mps python q20/sweep_test/restart_folders.py
 ```
 
-Train the baseline `K=1024` AGP model:
+## Train
 
-```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/training_script.py
-```
-
-Rebuild only the baseline summary from completed runs with:
-
-```bash
-conda run -n torch-mps python q20/sweep_test/training_script.py --summary-only
-```
-
-Evaluate a trained support on a larger residual holdout basis without retraining:
-
-```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/evaluate_holdout_residual.py \
-  --trained-run q20/sweep_test/runs/agp_1536 \
-  --residual-top-k 8192 \
-  --device cpu
-```
-
-Run the full holdout study across all trained support sizes and rebuild the
-summary plots. By default this evaluates every trained support on the same
-8192-term holdout residual basis, generated from the union of the trained AGP
-supports:
-
-```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_study.py \
-  --residual-top-k 8192 \
-  --device cpu
-```
-
-Run the default ten-iteration holdout-feedback curriculum. If the baseline
-`runs/agp_1024/` checkpoint is missing, this command trains it first using
-`config.json`.
+Run the default end-to-end pipeline. If the baseline
+`runs/baselines/agp_16384/` checkpoint is missing, this command trains it first
+and then executes the ten holdout-feedback rounds:
 
 ```bash
 conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_feedback_training.py
 ```
 
-The feedback summary exports the round-wise residual plots plus the final-round
-`hcd_coefficient_support_map.pdf` and `hcd_connection_summary.pdf` in the main
-feedback `Images/` folder.
+Train only the baseline `K=16384` AGP model:
 
-Run the coupled residual/AGP-support curriculum:
+```bash
+conda run --no-capture-output -n torch-mps python q20/sweep_test/training_script.py
+```
+
+Rebuild only the baseline summary from completed runs:
+
+```bash
+conda run -n torch-mps python q20/sweep_test/training_script.py --summary-only
+```
+
+Evaluate a trained support on a larger residual holdout basis without
+retraining:
+
+```bash
+conda run --no-capture-output -n torch-mps python q20/sweep_test/evaluate_holdout_residual.py \
+  --trained-run q20/sweep_test/runs/baselines/agp_16384 \
+  --residual-top-k 13312 \
+  --device cpu
+```
+
+Run the holdout study across all trained support sizes and rebuild the summary
+plots:
+
+```bash
+conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_study.py \
+  --residual-top-k 13312 \
+  --device cpu
+```
+
+## Optional Diagnostics
+
+The fixed-budget residual/AGP-support refinement scripts are retained as
+diagnostics, but they are not the default q20 methodology. They can be useful
+after the fixed-`K` feedback run to check whether excluded AGP terms look
+promising enough to justify a separate support-selection experiment.
+
+Run the diagnostic fixed-budget support-refinement curriculum:
 
 ```bash
 conda run --no-capture-output -n torch-mps python q20/sweep_test/coupled_curriculum_training.py
 ```
 
-The coupled summary exports all feedback plots plus:
+With the current config this writes under:
 
 ```text
-coupled_curriculum_support_growth.pdf
-coupled_curriculum_residuals_vs_agp_terms.pdf
-coupled_curriculum_probe_gate.pdf
+runs/diagnostic_fixed_budget_support_refinement_v1/
 ```
+
+Build pruned support candidates from the final coefficient ranking:
+
+```bash
+conda run -n torch-mps python q20/sweep_test/prune_support.py
+```
+
+Classify the latest diagnostic coupled result against
+`AGP_CERTIFICATION_CRITERIA.md`:
+
+```bash
+conda run -n torch-mps python q20/sweep_test/certify_sparse_agp.py
+```
+
+The certification script writes `certification_summary.json` and marks each gate
+as `pass`, `fail`, or `not tested`. Any `fail` or `not tested` downgrades the
+claim level.

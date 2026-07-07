@@ -73,6 +73,9 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
         top_coefficients=int(export.get("top_coefficients", 16)),
         residual_weight=float(loss.get("residual", 1.0)),
         agp_l2_weight=float(loss.get("agp_l2", 1e-8)),
+        residual_block_normalization=str(loss.get("residual_block_normalization", "none")),
+        agp_smoothness_weight=float(loss.get("agp_smoothness", 0.0)),
+        agp_curvature_weight=float(loss.get("agp_curvature", 0.0)),
         path_images=str(export.get("path_images", "Images/")),
         path_data=str(export.get("path_data", "Models_Data/")),
     )
@@ -154,7 +157,7 @@ def save_summary_plot(rows: list[dict[str, object]], images_dir: Path) -> None:
     plt.close(fig)
 
 
-def write_sweep_summary(payload: dict[str, object], rows: list[dict[str, object]]) -> None:
+def write_sweep_summary(payload: dict[str, object], rows: list[dict[str, object]]) -> Path:
     summary = payload.get("summary", {})
     images_dir = RUN_DIR / str(summary.get("path_images", "Images/"))
     data_dir = RUN_DIR / str(summary.get("path_data", "Models_Data/"))
@@ -164,10 +167,12 @@ def write_sweep_summary(payload: dict[str, object], rows: list[dict[str, object]
         "description": "q=20 fixed-support AGP sweep. Adaptive growth is disabled; support size is the controlled variable.",
         "rows": rows,
     }
-    with (data_dir / "sweep_summary.json").open("w", encoding="utf-8") as handle:
+    output_path = data_dir / "sweep_summary.json"
+    with output_path.open("w", encoding="utf-8") as handle:
         json.dump(output, handle, indent=2)
         handle.write("\n")
     save_summary_plot(rows, images_dir)
+    return output_path
 
 
 def parse_support_sizes(raw: str | None, default: list[int]) -> list[int]:
@@ -190,7 +195,8 @@ def main() -> None:
     default_sizes = [int(value) for value in support.get("agp_terms", [576, 768, 1024, 1536, 2048])] if isinstance(support, dict) else [576, 768, 1024, 1536, 2048]
     support_sizes = parse_support_sizes(args.support_sizes, default_sizes)
     summary = payload.get("summary", {})
-    runs_dir = RUN_DIR / str(summary.get("runs_dir", "runs/"))
+    support_output_root = support.get("output_root") if isinstance(support, dict) else None
+    runs_dir = RUN_DIR / str(support_output_root if support_output_root is not None else summary.get("runs_dir", "runs/"))
     overlap_k = int(summary.get("top_k_overlap", 32))
     runs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -212,8 +218,8 @@ def main() -> None:
 
     rows = [read_run_summary(runs_dir / f"agp_{support_size}", support_size, overlap_k=overlap_k) for support_size in support_sizes]
     add_overlap_metrics(rows, overlap_k=overlap_k)
-    write_sweep_summary(payload, rows)
-    print("sweep_summary=q20/sweep_test/Models_Data/sweep_summary.json")
+    summary_path = write_sweep_summary(payload, rows)
+    print(f"sweep_summary={summary_path.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

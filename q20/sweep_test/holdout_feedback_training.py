@@ -38,6 +38,9 @@ from projected_sparse_training_common import (  # noqa: E402
     export_results,
     make_optimizer,
     make_projected_model,
+    plot_connection_summary,
+    plot_support_map,
+    rank_coefficients,
     select_device,
     set_paper_style,
     sort_pauli_labels,
@@ -46,6 +49,22 @@ from projected_sparse_training_common import (  # noqa: E402
 )
 from training_script import DEFAULT_CONFIG, RUN_DIR, model_config_from_payload, settings_for_support  # noqa: E402
 from utils import load_pauli_hamiltonian_pair  # noqa: E402
+
+
+ROUND_RUNS_DIRNAME = "rounds"
+LEGACY_ROUND_RUNS_DIRNAME = "runs"
+
+
+def round_run_dir(output_dir: Path, round_index: int) -> Path:
+    return output_dir / ROUND_RUNS_DIRNAME / f"round_{round_index:02d}"
+
+
+def normalize_round_run_label(label: object) -> str:
+    raw = str(label)
+    legacy_prefix = f"{LEGACY_ROUND_RUNS_DIRNAME}/round_"
+    if raw.startswith(legacy_prefix):
+        return f"{ROUND_RUNS_DIRNAME}/{raw[len(LEGACY_ROUND_RUNS_DIRNAME) + 1:]}"
+    return raw
 
 
 def load_body_state_from_checkpoint(checkpoint_path: Path) -> dict[str, torch.Tensor]:
@@ -482,6 +501,12 @@ def load_existing_feedback_state(
     round_rows = [row for row in payload.get("rounds", []) if isinstance(row, dict)]
     if not rows:
         return None
+    for row in rows:
+        if "run_dir" in row:
+            row["run_dir"] = normalize_round_run_label(row["run_dir"])
+    for row in round_rows:
+        if "run_dir" in row:
+            row["run_dir"] = normalize_round_run_label(row["run_dir"])
     completed_round = max(int(row.get("feedback_round", 0)) for row in rows)
     spectra = {
         round_index: load_feedback_spectrum(data_dir, round_index=round_index, residual_top_k=residual_top_k)
@@ -503,6 +528,7 @@ def write_feedback_summary(
     residual_top_k: int,
     thresholds: Thresholds,
     residual_budget: dict[str, object],
+    keep_round_images: bool = True,
 ) -> None:
     images_dir = output_dir / "Images"
     data_dir = output_dir / "Models_Data"
@@ -555,10 +581,21 @@ def write_feedback_summary(
     plot_feedback_added_terms(round_rows, images_dir)
     if round_rows:
         final_round_dir = output_dir / str(round_rows[-1]["run_dir"])
-        for filename in ("hcd_coefficient_support_map.pdf", "hcd_connection_summary.pdf"):
-            source = final_round_dir / "Images" / filename
-            if source.is_file():
-                shutil.copy2(source, images_dir / filename)
+        coefficient_path = final_round_dir / "Models_Data" / "final_agp_coefficients.pt"
+        if coefficient_path.is_file():
+            coefficient_payload = torch.load(coefficient_path, map_location="cpu")
+            labels = [str(label) for label in coefficient_payload["pauli_labels"]]
+            ranked = rank_coefficients(coefficient_payload["counterdiabatic_coefficients"], labels)
+            plot_support_map(ranked[:16], len(labels[0]), images_dir)
+            plot_connection_summary(ranked, len(labels[0]), images_dir)
+        else:
+            for filename in ("hcd_coefficient_support_map.pdf", "hcd_connection_summary.pdf"):
+                source = final_round_dir / "Images" / filename
+                if source.is_file():
+                    shutil.copy2(source, images_dir / filename)
+    if not keep_round_images:
+        for round_images in sorted((output_dir / ROUND_RUNS_DIRNAME).glob("round_*/Images")):
+            shutil.rmtree(round_images, ignore_errors=True)
 
 
 def main() -> None:
@@ -576,8 +613,10 @@ def main() -> None:
     parser.add_argument("--min-rms", type=float, default=None)
     parser.add_argument("--unseen-residual-batches", type=int, default=None)
     parser.add_argument("--output-root", type=Path, default=None)
+    parser.add_argument("--baseline-root", type=Path, default=None)
     parser.add_argument("--holdout-threshold", type=float, default=None)
     parser.add_argument("--unseen-threshold", type=float, default=None)
+    parser.add_argument("--keep-round-images", action="store_true")
     args = parser.parse_args()
 
     payload = load_json(args.config)
@@ -611,6 +650,8 @@ def main() -> None:
     device_name = str(args.device if args.device is not None else feedback.get("device", "auto"))
     min_rms = float(args.min_rms if args.min_rms is not None else feedback.get("min_rms", 0.0))
     output_root_arg = args.output_root if args.output_root is not None else Path(str(feedback.get("output_root", "runs/holdout_feedback")))
+    baseline_root_arg = args.baseline_root if args.baseline_root is not None else Path(str(feedback.get("baseline_root", "runs/baselines")))
+    keep_round_images = bool(args.keep_round_images or feedback.get("keep_round_images", False))
     holdout_threshold = float(
         args.holdout_threshold if args.holdout_threshold is not None else feedback.get("holdout_threshold", 0.10)
     )
@@ -634,8 +675,16 @@ def main() -> None:
         intermediate_top_k=intermediate_top_k,
         device=device_name,
     )
-    base_run = RUN_DIR / "runs" / f"agp_{base_agp_terms}"
+    baseline_root = baseline_root_arg if baseline_root_arg.is_absolute() else RUN_DIR / baseline_root_arg
+    base_run = baseline_root / f"agp_{base_agp_terms}"
+    legacy_base_run = RUN_DIR / "runs" / f"agp_{base_agp_terms}"
     base_checkpoint = base_run / "Models_Data" / "training_checkpoint.pt"
+    if not base_checkpoint.is_file() and legacy_base_run != base_run:
+        legacy_checkpoint = legacy_base_run / "Models_Data" / "training_checkpoint.pt"
+        if legacy_checkpoint.is_file():
+            print(f"use_legacy_baseline source={legacy_base_run.relative_to(RUN_DIR)}")
+            base_run = legacy_base_run
+            base_checkpoint = legacy_checkpoint
     if not base_checkpoint.is_file():
         print(
             f"train_missing_baseline agp_terms={base_agp_terms} "
@@ -665,7 +714,12 @@ def main() -> None:
         if isinstance(sweep_support, dict)
         else [base_agp_terms]
     )
-    sweep_run_dirs = [RUN_DIR / "runs" / f"agp_{support_size}" for support_size in support_sizes]
+    sweep_run_dirs = [
+        base_run
+        if support_size == base_agp_terms
+        else baseline_root / f"agp_{support_size}"
+        for support_size in support_sizes
+    ]
     common_residual_labels, holdout_basis_agp_terms = build_common_holdout_residual_labels(
         run_dirs=sweep_run_dirs,
         config_payload=payload,
@@ -741,10 +795,11 @@ def main() -> None:
                 residual_top_k=residual_top_k,
                 thresholds=thresholds,
                 residual_budget=residual_budget,
+                keep_round_images=keep_round_images,
             )
             print(f"feedback_already_complete rounds={rounds}")
             return
-        last_checkpoint = output_dir / "runs" / f"round_{completed_round:02d}" / "Models_Data" / "training_checkpoint.pt"
+        last_checkpoint = round_run_dir(output_dir, completed_round) / "Models_Data" / "training_checkpoint.pt"
         if completed_round > 0:
             agp_labels, residual_labels = load_checkpoint_labels(last_checkpoint)
             current_residual_labels = set(residual_labels)
@@ -759,7 +814,7 @@ def main() -> None:
         )
         current_residual_labels.update(str(row["label"]) for row in additions)
         residual_labels = sort_pauli_labels(current_residual_labels)
-        round_run = output_dir / "runs" / f"round_{round_index:02d}"
+        round_run = round_run_dir(output_dir, round_index)
         print(
             f"train_feedback_round={round_index} agp_terms={len(agp_labels)} "
             f"residual_terms={len(residual_labels)} added={len(additions)} epochs={feedback_settings.epochs}"
@@ -827,6 +882,7 @@ def main() -> None:
         residual_top_k=residual_top_k,
         thresholds=thresholds,
         residual_budget=residual_budget,
+        keep_round_images=keep_round_images,
     )
     summary_path = output_dir / "Models_Data" / f"holdout_feedback_summary_residual_{residual_top_k}.json"
     try:

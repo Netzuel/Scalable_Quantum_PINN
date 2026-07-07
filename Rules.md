@@ -25,6 +25,10 @@ A support is considered sufficient only if it also generalizes to a larger
 holdout residual basis and remains stable under pruning of small learned
 coefficients.
 
+The detailed mandatory checklist is `AGP_CERTIFICATION_CRITERIA.md`. When the
+two documents overlap, use that file as the stricter operational gate for
+classifying a large-`q` result as projected, promising, or certified.
+
 ## Definitions
 
 The learned AGP is
