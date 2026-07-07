@@ -13,11 +13,8 @@ import numpy as np
 import torch
 
 
-ROOT = Path(__file__).resolve().parents[3]
-TESTS_DIR = ROOT / "tests"
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
-if str(TESTS_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTS_DIR))
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
@@ -34,12 +31,12 @@ from agp_holdout_feedback import (  # noqa: E402
     write_feedback_spectrum,
 )
 from agp_holdout_study import Thresholds, build_common_holdout_residual_labels, evaluate_one_run, load_json  # noqa: E402
-from oracle_tools import (  # noqa: E402
+from agp_oracle_tools import (  # noqa: E402
     projected_linear_oracle,
     projected_residual_matrix,
     score_candidates_with_omp,
 )
-from support_refinement import (  # noqa: E402
+from agp_support_refinement import (  # noqa: E402
     fixed_budget_swap_labels,
     resolve_active_agp_budget,
     resolve_exploratory_agp_budget,
@@ -64,8 +61,17 @@ from projected_sparse_training_common import (  # noqa: E402
     sort_pauli_labels,
     run_training,
 )
-from agp_baseline_train import DEFAULT_CONFIG, RUN_DIR, model_config_from_payload, settings_for_support  # noqa: E402
+from agp_baseline_train import model_config_from_payload, settings_for_support  # noqa: E402
 from utils import _commutator_pauli_labels_unchecked, load_pauli_hamiltonian_pair, pauli_weight  # noqa: E402
+
+
+DEFAULT_CONFIG = ROOT / "tests" / "q20" / "sweep_test" / "config.json"
+RUN_DIR = DEFAULT_CONFIG.parent
+
+
+def configure_run_dir(config_path: Path) -> None:
+    global RUN_DIR
+    RUN_DIR = config_path.resolve().parent
 
 
 PAULI_PRODUCT = {
@@ -1454,7 +1460,7 @@ def write_coupled_summary(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train q=20 with coupled residual and AGP-support curricula.")
+    parser = argparse.ArgumentParser(description="Train a configured coupled residual and AGP-support curriculum.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--base-agp-terms", default=None)
     parser.add_argument("--rounds", type=int, default=None)
@@ -1507,6 +1513,7 @@ def main() -> None:
     parser.add_argument("--max-consecutive-no-safe-steps", type=int, default=None)
     args = parser.parse_args()
 
+    configure_run_dir(args.config)
     payload = load_json(args.config)
     if not isinstance(payload, dict):
         raise TypeError("config.json must contain a JSON object.")

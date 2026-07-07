@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from dataclasses import asdict, replace
 from decimal import Decimal, getcontext
 from pathlib import Path
@@ -11,9 +10,6 @@ import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TESTS_DIR = ROOT / "tests"
-if str(TESTS_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTS_DIR))
 
 from projected_sparse_training_common import (  # noqa: E402
     ProjectedSparseAGPPINN,

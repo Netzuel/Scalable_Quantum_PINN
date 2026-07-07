@@ -235,7 +235,7 @@ def evolve_state(
         lam, dlam_dt = schedule_sin2(t, total_time)
         out = (1.0 - lam) * apply_pauli_sum(state, h0.terms, h0_actions)
         out += lam * final_energies * state
-        if protocol == "nested_l1":
+        if protocol in {"nested_l1", "kipu_dqfm_l1"}:
             agp = variational_l1_agp(h0, h1_global, lam)
             if agp.terms and abs(dlam_dt) > 0.0:
                 l1_actions = build_action_cache(list(agp.terms))
@@ -347,7 +347,11 @@ def final_run_from_summary(config: dict[str, object]) -> Path:
     add_terms = int(feedback.get("add_residual_terms_per_iteration", 1024))
     initial_residual = int(config.get("support_sweep", {}).get("residual_top_k", 2048))  # type: ignore[union-attr]
     unseen_batches = int(feedback.get("unseen_residual_batches_after_final_iteration", 1))
-    residual_top_k = initial_residual + (rounds + unseen_batches) * add_terms
+    residual_request = feedback.get("holdout_residual_top_k", "auto")
+    if str(residual_request).lower() == "auto":
+        residual_top_k = initial_residual + (rounds + unseen_batches) * add_terms
+    else:
+        residual_top_k = int(residual_request)
     output_root = RUN_DIR / str(feedback.get("output_root", "runs/fixed_k_holdout_feedback_v1"))
     expected = (
         output_root
@@ -426,7 +430,7 @@ def main() -> None:
     learned_actions = build_action_cache(list(learned["labels"]))
 
     results: dict[str, dict[str, float]] = {}
-    for protocol in ("no_cd", "nested_l1", "learned_sparse_agp"):
+    for protocol in ("no_cd", "kipu_dqfm_l1", "learned_sparse_agp"):
         print(f"evolve_protocol={protocol} steps={steps}")
         psi = evolve_state(
             protocol=protocol,
@@ -449,8 +453,9 @@ def main() -> None:
 
     payload = {
         "description": (
-            "Statevector physical diagnostic comparing no-CD, l=1 nested-commutator CD, "
-            "and the learned sparse AGP. This is intentionally not a scalable large-q path."
+            "Statevector physical diagnostic comparing no-CD, the Kipu/DQFM-style first-order "
+            "nested-commutator CD approximator, and the learned sparse AGP. This is intentionally "
+            "not a scalable large-q path."
         ),
         "trained_run": str(trained_run.relative_to(RUN_DIR) if trained_run.is_relative_to(RUN_DIR) else trained_run),
         "n_qubits": n_qubits,

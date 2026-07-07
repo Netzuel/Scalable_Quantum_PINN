@@ -26,12 +26,12 @@
     "name": "q15_fixed_k_holdout_feedback_physical_validation",
     "entrypoint": "scripts/agp_holdout_feedback.py",
     "agp_terms": 16384,
-    "description": "Fixed K=4**7 AGP support selected from a bounded nested-commutator Krylov pool; ten feedback iterations add hard residual equations without growing AGP outputs."
+    "description": "Fixed K=4**7 AGP support selected from a bounded nested-commutator Krylov pool; ten feedback iterations add hard residual equations from a larger Q=32768 residual holdout pool without growing AGP outputs."
   },
   "support_sweep": {
     "agp_terms": [16384],
     "output_root": "runs/baselines",
-    "intermediate_top_k": 2048,
+    "intermediate_top_k": 16384,
     "residual_top_k": 2048,
     "residual_projection": "largest_generated_commutator_terms",
     "agp_support_selection": {
@@ -47,9 +47,9 @@
   },
   "holdout_feedback": {
     "base_agp_terms": 16384,
-    "holdout_residual_top_k": "auto",
+    "holdout_residual_top_k": 32768,
     "iterations": 10,
-    "add_residual_terms_per_iteration": 1024,
+    "add_residual_terms_per_iteration": 2048,
     "unseen_residual_batches_after_final_iteration": 1,
     "epochs_per_iteration": 1000,
     "lr": 1e-5,
@@ -84,12 +84,12 @@
   },
   "physical_validation": {
     "entrypoint": "scripts/agp_physical_validation.py",
-    "protocols": ["no_cd", "nested_l1", "learned_sparse_agp"],
+    "protocols": ["no_cd", "kipu_dqfm_l1", "learned_sparse_agp"],
     "schedule": "sinusoidal_sin2",
     "statevector_qubits": 15,
     "evolution_steps": 96,
     "learned_top_terms": 1024,
-    "description": "Post-training q15 statevector diagnostic comparing final observables under no counterdiabatic drive, l=1 nested-commutator CD, and the learned sparse AGP."
+    "description": "Post-training q15 statevector diagnostic comparing final observables under no counterdiabatic drive, the Kipu/DQFM-style l=1 nested-commutator CD approximator, and the learned sparse AGP."
   },
   "summary": {
     "top_k_overlap": 32,

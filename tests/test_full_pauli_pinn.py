@@ -86,13 +86,5 @@ class FullPauliPINNTests(unittest.TestCase):
         self.assertEqual(h0.terms, legacy_h0.terms)
         self.assertEqual(h1.terms, legacy_h1.terms)
 
-    def test_self_contained_training_folders_exist(self):
-        for name in ("full_pauli_2_qubits", "full_pauli_4_qubits", "full_pauli_6_qubits"):
-            run_dir = ROOT / "tests" / name
-            self.assertTrue((run_dir / "training_script.py").is_file())
-            self.assertTrue((run_dir / "restart_folders.py").is_file())
-            self.assertTrue((run_dir / "config.json").is_file())
-
-
 if __name__ == "__main__":
     unittest.main()

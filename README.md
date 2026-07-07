@@ -93,9 +93,11 @@ the model or loss. No endpoint loss is added for the fixed schedule:
   Pauli-coordinate Hamiltonian pairs, including optional Qiskit Nature/PySCF
   chemistry inputs and analytic spin-model smoke inputs.
 - `examples/`: short smoke examples, not paper-scale training runs.
-- `tests/`: correctness checks plus self-contained `full_pauli_{2,4,6}_qubits`
-  training folders.
-- `documentation/`: manuscript PDF and project notes.
+- `scripts/`: reusable AGP training, holdout, evaluation, support-selection,
+  restart, physical-validation, and optional diagnostic entrypoints.
+- `tests/`: unit and regression tests, plus benchmark configuration folders
+  under `tests/q*/sweep_test/`. Python training logic does not live here.
+- `docs/`: manuscript PDF and project notes.
 - `AGP_CERTIFICATION_CRITERIA.md`: required gate checklist for deciding whether
   a sparse large-`q` AGP is certified, promising, or only a projected sparse
   experiment.
@@ -124,82 +126,48 @@ Large-`q` AGP results must be classified with
 size, support content, and training representativeness gates all pass
 simultaneously on training, holdout, unseen, and fixed probe residual bases.
 
-## Full-Pauli Training Starts
+## Benchmark Studies
 
-Each folder is a runnable experiment scaffold:
+The retained AGP benchmark studies are configuration folders, not script
+forks:
 
 ```text
-tests/full_pauli_2_qubits/
-tests/full_pauli_4_qubits/
-tests/full_pauli_6_qubits/
+tests/q15/sweep_test/
+tests/q20/sweep_test/
 ```
 
-Each run folder has a root `config.json` with `physical`, `neural`, and
-`training` blocks. The `physical.hamiltonian_source` field points to the
-Pauli-coordinate Hamiltonian index, not to the dense HDF5 source. The neural
-default is a 3x56 QRes-style quadratic MLP, using quadratic residual layers
-instead of plain linear layers. The default optimizer is SOAP; if the selected
-device is MPS, the runner uses `SafeMPSSOAP`, which moves SOAP's unsupported
-preconditioner eigendecomposition/QR operations to CPU. Automatic device
-selection follows `cuda > mps > cpu`. The default physical time is `T=1.0`, but
-the runner samples `tau in [0,1]` and converts it to physical time
-`t=t_initial+T tau`, so changing `T` only requires editing the config or
-passing `--physical-time`.
+Each folder contains `config.json` and a README. The same script entrypoints are
+used for any `q`, `K`, residual budget `Q`, and feedback iteration count `i`.
+The study config chooses the Hamiltonian, support-selection policy, residual
+budget, output root, and physical-validation protocol.
 
-Example:
+Default fixed-`K` curriculum:
 
 ```bash
-conda run -n torch-mps python tests/full_pauli_2_qubits/training_script.py --epochs 10 --num-points 32
+conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
+  --config tests/q20/sweep_test/config.json
 ```
 
-Use `restart_folders.py` inside a run folder to clear `Images/` and
-`Models_Data/` before another run.
+Baseline only:
 
-At the end of training, each run exports PDF-only vector figures:
-
-- `Images/losses.pdf`: training loss and Euler-Lagrange action-residual
-  histories.
-- `Images/top_hcd_coefficients.pdf`: time traces of the largest direct
-  counterdiabatic coefficients `d lambda / dt * C_P(t)`, ranked by
-  `sqrt(mean_tau((d lambda / dt * C_P(t))^2))`.
-- `Images/hcd_coefficient_support_map.pdf`: top Pauli strings as operator
-  hyperedges, with one row per learned term and one column per qubit.
-- `Images/hcd_least_important_coefficient_support_map.pdf`: the same support
-  view for the smallest non-identity coefficients by RMS over time.
-- `Images/hcd_connection_summary.pdf`: pairwise qubit participation induced by
-  all learned Pauli strings, plus total importance by Pauli-string order.
-
-Numerical artifacts and weights are stored under `Models_Data/`:
-
-- `loss_history.json`
-- `config.json`
-- `model_weights.pt`
-- `training_checkpoint.pt`
-- `final_agp_coefficients.pt`: raw AGP coefficients, direct counterdiabatic
-  coefficients, `tau`, physical `t`, `lambda`, and `d lambda / dt`.
-- `Models_Data/coefficient_importance.json`: machine-readable ranking for all
-  `4**q` direct counterdiabatic coefficients.
-- `Models_Data/coefficient_plot_data.json`: numerical arrays behind the
-  coefficient, hyperedge, and connection-summary plots.
-
-These plots do not impose a connectivity ansatz. Zero or small coefficients are
-allowed to emerge from training; the figures only rank what the PINN learned.
-
-## Projected Sparse Large-q Starts
-
-The q=20 Hamiltonian examples are meant for sparse/support-selected AGP
-experiments. The first runnable q=20 scaffold is:
-
-```text
-tests/sparse_agp_20_qubits/
+```bash
+conda run --no-capture-output -n torch-mps python scripts/agp_baseline_train.py \
+  --config tests/q20/sweep_test/config.json
 ```
 
-It uses the full sparse q=20 chemistry Hamiltonian pair, but the PINN emits a
-bounded AGP support. The current default starts with 512 AGP outputs, uses a
-generated commutator residual projection with 2048 residual terms, and enables
-two-stage adaptive support growth by adding up to 64 high-residual Pauli strings
-before retraining. This is a projected approximation to the unrestricted AGP
-problem, not a full `4**20` coefficient model.
+Clean generated artifacts for one configured study:
+
+```bash
+conda run -n torch-mps python scripts/agp_restart.py \
+  --config tests/q20/sweep_test/config.json
+```
+
+The q15 study adds a statevector physical-validation diagnostic:
+
+```bash
+conda run --no-capture-output -n torch-mps python scripts/agp_physical_validation.py \
+  --config tests/q15/sweep_test/config.json
+```
 
 The exported diagnostics include raw and normalized Euler-Lagrange residuals.
 The normalized residual is computed against the no-AGP baseline on the same
@@ -213,13 +181,18 @@ This is the preferred cross-size diagnostic because raw residual magnitudes
 depend on Hamiltonian scale and residual-basis size. Values below one mean the
 learned AGP improves over doing nothing on the selected projection.
 
-Projected sparse runs export `losses.pdf`,
-`top_projected_hcd_coefficients.pdf`, `hcd_coefficient_support_map.pdf`,
-`hcd_least_important_coefficient_support_map.pdf`,
-`hcd_connection_summary.pdf`, and `projected_support_summary.pdf`, plus the
-numerical plot data under `Models_Data/`. Adaptive runs also write
-`Models_Data/adaptive_support_history.json`, which records the top residual
-terms inspected after each stage and the Pauli strings added to the AGP support.
+Generated runs, checkpoints, figures, and data are written under the configured
+study `runs/` folder and are ignored by git. The repository does not keep
+tracked `Images/`, `Models_Data/`, `.pt`, or `.h5` result artifacts.
+
+Optional support-certification and coupled-curriculum diagnostics live under:
+
+```text
+scripts/diagnostics/
+```
+
+They are not the default benchmark methodology. Use them only when explicitly
+auditing support robustness or exploratory support swaps.
 
 ## New Hamiltonian Generation
 
@@ -267,10 +240,9 @@ conda run -n torch-mps python tools/generate_qiskit_pauli_hamiltonian.py transve
   --update-index
 ```
 
-The q=156 scaffold is `tests/sparse_agp_156_qubits/`. For the generated
-transverse-Ising pair it starts from the 310-term endpoint-commutator support
-and uses adaptive projected sparse training with a larger residual projection,
-still far from a full `4**156` output layer.
+For large generated Hamiltonians such as `q=156`, create a new
+`tests/q156/sweep_test/config.json` and reuse the same `scripts/` entrypoints.
+Do not add a new script fork for each qubit count.
 
 ## Quick Validation
 

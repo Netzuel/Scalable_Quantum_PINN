@@ -5,7 +5,14 @@ import json
 from pathlib import Path
 
 
-RUN_DIR = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG = ROOT / "tests" / "q20" / "sweep_test" / "config.json"
+RUN_DIR = DEFAULT_CONFIG.parent
+
+
+def configure_run_dir(config_path: Path) -> None:
+    global RUN_DIR
+    RUN_DIR = config_path.resolve().parent
 
 
 def coupled_output_roots() -> list[Path]:
@@ -60,11 +67,13 @@ def accepted_run_from_summary(summary_path: Path) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build pruned AGP support candidates from coefficient importance.")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--epsilons", default="1e-2,1e-3,1e-4")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
+    configure_run_dir(args.config)
     if args.run_dir is None:
         coupled_dir = latest_coupled_run()
         summary_paths = sorted((coupled_dir / "Models_Data").glob("coupled_curriculum_summary_residual_*.json"))

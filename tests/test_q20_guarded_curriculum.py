@@ -8,17 +8,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 Q20_DIR = ROOT / "tests" / "q20" / "sweep_test"
 SCRIPTS_DIR = ROOT / "scripts"
+DIAGNOSTICS_DIR = SCRIPTS_DIR / "diagnostics"
 TESTS_DIR = ROOT / "tests"
-for path in (Q20_DIR, SCRIPTS_DIR, TESTS_DIR):
+for path in (DIAGNOSTICS_DIR, SCRIPTS_DIR, TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from coupled_curriculum_training import merge_agp_candidate_additions, step_gate_decision
+from agp_coupled_curriculum import merge_agp_candidate_additions, step_gate_decision
 import agp_restart
-import certify_sparse_agp
-import certify_support_robustness
-import prune_support
-from support_refinement import (
+import agp_certify_coupled
+import agp_certify_support
+import agp_prune_support
+from agp_support_refinement import (
     fixed_budget_swap_labels,
     resolve_active_agp_budget,
     resolve_exploratory_agp_budget,
@@ -72,17 +73,17 @@ class Q20GuardedCurriculumTests(unittest.TestCase):
             summary_path.parent.mkdir(parents=True)
             summary_path.write_text(json.dumps({"rows": [{"agp_terms": 1}]}) + "\n", encoding="utf-8")
 
-            prune_run_dir = prune_support.RUN_DIR
-            certify_run_dir = certify_sparse_agp.RUN_DIR
+            prune_run_dir = agp_prune_support.RUN_DIR
+            certify_run_dir = agp_certify_coupled.RUN_DIR
             try:
-                prune_support.RUN_DIR = fake_q20
-                certify_sparse_agp.RUN_DIR = fake_q20
+                agp_prune_support.RUN_DIR = fake_q20
+                agp_certify_coupled.RUN_DIR = fake_q20
 
-                self.assertEqual(prune_support.latest_coupled_run(), summary_path.parents[1])
-                self.assertEqual(certify_sparse_agp.latest_summary(), summary_path)
+                self.assertEqual(agp_prune_support.latest_coupled_run(), summary_path.parents[1])
+                self.assertEqual(agp_certify_coupled.latest_summary(), summary_path)
             finally:
-                prune_support.RUN_DIR = prune_run_dir
-                certify_sparse_agp.RUN_DIR = certify_run_dir
+                agp_prune_support.RUN_DIR = prune_run_dir
+                agp_certify_coupled.RUN_DIR = certify_run_dir
 
     def test_q20_fixed_budget_uses_q7_output_cap(self):
         self.assertEqual(resolve_active_agp_budget(n_qubits=6, cap_qubits=7), 4**6)
@@ -205,7 +206,7 @@ class Q20GuardedCurriculumTests(unittest.TestCase):
             ("XYZI", 40.0),
         ]
 
-        selected = certify_support_robustness.select_order_stratified_labels(
+        selected = agp_certify_support.select_order_stratified_labels(
             scored,
             count=4,
             excluded={"XXII", "IIII"},
@@ -216,8 +217,8 @@ class Q20GuardedCurriculumTests(unittest.TestCase):
         self.assertNotIn("XXII", selected)
         self.assertNotIn("IIII", selected)
         self.assertIn("YYII", selected)
-        self.assertTrue(any(certify_support_robustness.pauli_weight(label) == 1 for label in selected))
-        self.assertTrue(any(certify_support_robustness.pauli_weight(label) == 4 for label in selected))
+        self.assertTrue(any(agp_certify_support.pauli_weight(label) == 1 for label in selected))
+        self.assertTrue(any(agp_certify_support.pauli_weight(label) == 4 for label in selected))
 
     def test_support_certification_claim_requires_no_failures_or_gaps_for_certified(self):
         checks = {
@@ -231,17 +232,17 @@ class Q20GuardedCurriculumTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            certify_support_robustness.classify_claim_level(checks),
+            agp_certify_support.classify_claim_level(checks),
             "candidate_robust_sparse_agp",
         )
         checks["physical_validation"] = {"status": "pass"}
         self.assertEqual(
-            certify_support_robustness.classify_claim_level(checks),
+            agp_certify_support.classify_claim_level(checks),
             "certified_sparse_agp_for_this_path_and_tolerance",
         )
         checks["omitted_term_pressure"] = {"status": "fail"}
         self.assertEqual(
-            certify_support_robustness.classify_claim_level(checks),
+            agp_certify_support.classify_claim_level(checks),
             "projected_sparse_agp_experiment",
         )
 

@@ -5,7 +5,14 @@ import json
 from pathlib import Path
 
 
-RUN_DIR = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG = ROOT / "tests" / "q20" / "sweep_test" / "config.json"
+RUN_DIR = DEFAULT_CONFIG.parent
+
+
+def configure_run_dir(config_path: Path) -> None:
+    global RUN_DIR
+    RUN_DIR = config_path.resolve().parent
 
 
 def coupled_output_roots() -> list[Path]:
@@ -58,7 +65,8 @@ def pct_improvement(previous: float | None, current: float | None) -> float | No
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Classify a q20 sparse AGP run against AGP_CERTIFICATION_CRITERIA.md.")
+    parser = argparse.ArgumentParser(description="Classify a sparse AGP diagnostic run against AGP_CERTIFICATION_CRITERIA.md.")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--summary", type=Path, default=None)
     parser.add_argument("--target-train", type=float, default=0.10)
     parser.add_argument("--target-holdout", type=float, default=0.10)
@@ -67,6 +75,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
+    configure_run_dir(args.config)
     summary_path = args.summary or latest_summary()
     payload = json.loads(summary_path.read_text())
     rows = list(payload.get("rows", []))
@@ -124,7 +133,7 @@ def main() -> None:
             "note": (
                 "Pruned support candidates exist but must be retrained or re-evaluated on fixed probes."
                 if pruning_candidates is not None
-                else "Run prune_support.py after training, then retest retained supports."
+                else "Run scripts/diagnostics/agp_prune_support.py after training, then retest retained supports."
             ),
         },
         "projected_linear_oracle": {

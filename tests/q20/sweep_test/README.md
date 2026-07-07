@@ -119,7 +119,8 @@ promising enough to justify a separate support-selection experiment.
 Run the diagnostic fixed-budget support-refinement curriculum:
 
 ```bash
-conda run --no-capture-output -n torch-mps python tests/q20/sweep_test/coupled_curriculum_training.py
+conda run --no-capture-output -n torch-mps python scripts/diagnostics/agp_coupled_curriculum.py \
+  --config tests/q20/sweep_test/config.json
 ```
 
 With the current config this writes under:
@@ -131,14 +132,16 @@ runs/diagnostic_fixed_budget_support_refinement_v1/
 Build pruned support candidates from the final coefficient ranking:
 
 ```bash
-conda run -n torch-mps python tests/q20/sweep_test/prune_support.py
+conda run -n torch-mps python scripts/diagnostics/agp_prune_support.py \
+  --config tests/q20/sweep_test/config.json
 ```
 
 Classify the latest diagnostic coupled result against
 `AGP_CERTIFICATION_CRITERIA.md`:
 
 ```bash
-conda run -n torch-mps python tests/q20/sweep_test/certify_sparse_agp.py
+conda run -n torch-mps python scripts/diagnostics/agp_certify_coupled.py \
+  --config tests/q20/sweep_test/config.json
 ```
 
 The certification script writes `certification_summary.json` and marks each gate

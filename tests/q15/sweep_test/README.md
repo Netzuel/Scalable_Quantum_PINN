@@ -5,6 +5,7 @@ This folder runs a q15 sparse AGP curriculum above the exact-output regime
 
 ```text
 K = 4**7 = 16384 trainable AGP outputs
+Q = 32768 generated residual holdout terms
 i = 10 holdout-feedback iterations
 ```
 
@@ -24,13 +25,10 @@ Feedback keeps the AGP support fixed. Each round evaluates a larger residual
 holdout basis, adds the highest-RMS unseen residual equations to the training
 residual basis, and fine-tunes the same coefficient functions.
 
-The residual-feedback budget is fitted automatically after the generated
-holdout pool is known. If the requested schedule would exhaust the generated
-residual labels before the requested `i` iterations, the script keeps `i`
-fixed and reduces `add_residual_terms_per_iteration` so the final round still
-has an unseen residual batch. For the current q15 Hamiltonian, the generated
-pool has 6737 residual labels, so the default request
-`add_residual_terms_per_iteration = 1024` is fitted to `426`.
+The current residual-feedback budget uses `intermediate_top_k = 16384`,
+`Q = 32768`, and `add_residual_terms_per_iteration = 2048`. The final trained
+round therefore uses 22528 residual equations and keeps a 10240-term unseen
+residual batch for the final diagnostic.
 
 Unseen relative residuals are reported only when the AGP=0 reference residual
 on the unseen subset is nonzero. If that reference is zero, the quotient is
@@ -41,7 +39,7 @@ Generated artifacts are ignored by git and written under:
 
 ```text
 runs/baselines/agp_16384/
-runs/fixed_k_holdout_feedback_v1/agp_16384_residual_6737_add_426_rounds_10/
+runs/fixed_k_holdout_feedback_v1/agp_16384_residual_32768_add_2048_rounds_10/
 runs/support_sweep_summary/
 ```
 
@@ -97,7 +95,7 @@ This compares final observables for:
 
 ```text
 no_cd
-nested_l1
+kipu_dqfm_l1
 learned_sparse_agp
 ```
 

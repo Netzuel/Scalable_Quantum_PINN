@@ -8,7 +8,7 @@ potentials for larger qubit systems without dense matrices and without emitting
 the full `4**N` Pauli basis.
 
 The final MLST manuscript PDF from the original work is retained under
-`documentation/` for context. Do not copy old result folders, checkpoints, or
+`docs/` for context. Do not copy old result folders, checkpoints, or
 scratch runs into this repository.
 
 ## Core Rule

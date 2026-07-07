@@ -743,34 +743,35 @@ AGP experiment, not as evidence that the unrestricted AGP has been solved.
 
 ## 13. Current Implementation
 
-The q20 workflow lives under:
+The retained q20 workflow is configured under:
 
 ```text
-q20/sweep_test/
+tests/q20/sweep_test/
 ```
 
 Main scripts:
 
 ```text
-training_script.py
+scripts/agp_baseline_train.py
     trains the fixed-support q20 baseline
 
-holdout_study.py
+scripts/agp_holdout_study.py
     evaluates trained supports on a common holdout residual basis
 
-holdout_feedback_training.py
+scripts/agp_holdout_feedback.py
     performs holdout-feedback fine-tuning at fixed K
 
-coupled_curriculum_training.py
+scripts/diagnostics/agp_coupled_curriculum.py
     performs holdout-feedback fine-tuning while expanding K
 ```
 
-The default feedback command reads the `K=1024`, `Q=auto`, `i=10` curriculum
-from `q20/sweep_test/config.json`. If the cleaned folder has no baseline
+The default feedback command reads the configured `K`, `Q=auto`, `i=10`
+curriculum from `tests/q20/sweep_test/config.json`. If the cleaned folder has no baseline
 checkpoint, this command trains the baseline first:
 
 ```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_feedback_training.py
+conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
+  --config tests/q20/sweep_test/config.json
 ```
 
 The feedback summary exports round-wise residual plots and, for the final round,

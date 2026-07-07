@@ -13,17 +13,14 @@ import numpy as np
 import torch
 
 
-ROOT = Path(__file__).resolve().parents[3]
-TESTS_DIR = ROOT / "tests"
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
-if str(TESTS_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTS_DIR))
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from coupled_curriculum_training import select_agp_additions_from_residual  # noqa: E402
+from agp_coupled_curriculum import select_agp_additions_from_residual  # noqa: E402
 from agp_holdout_study import load_body_weights, load_json, norm_sq_subset, rms_per_label, scalar  # noqa: E402
-from oracle_tools import score_candidates_with_omp  # noqa: E402
+from agp_oracle_tools import score_candidates_with_omp  # noqa: E402
 from projected_sparse_training_common import (  # noqa: E402
     LABEL_FS,
     LEGEND_FS,
@@ -44,11 +41,18 @@ from projected_sparse_training_common import (  # noqa: E402
     select_device,
     set_paper_style,
 )
-from agp_baseline_train import DEFAULT_CONFIG, RUN_DIR, model_config_from_payload  # noqa: E402
+from agp_baseline_train import model_config_from_payload  # noqa: E402
 from utils import load_pauli_hamiltonian_pair, sort_pauli_labels  # noqa: E402
 
 
+DEFAULT_CONFIG = ROOT / "tests" / "q20" / "sweep_test" / "config.json"
+RUN_DIR = DEFAULT_CONFIG.parent
 CERTIFICATION_FILENAME = "sparse_agp_support_certification.json"
+
+
+def configure_run_dir(config_path: Path) -> None:
+    global RUN_DIR
+    RUN_DIR = config_path.resolve().parent
 
 
 def gate(value: float | None, threshold: float, *, lower_is_better: bool = True) -> dict[str, object]:
@@ -287,7 +291,8 @@ def generated_support_cache(
     }
 
 
-def relpath(path: Path, base: Path = RUN_DIR) -> str:
+def relpath(path: Path, base: Path | None = None) -> str:
+    base = RUN_DIR if base is None else base
     try:
         return str(path.relative_to(base))
     except ValueError:
@@ -866,7 +871,7 @@ def plot_certification_report(report: dict[str, object], images_dir: Path) -> No
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Certify q20 sparse AGP support robustness without retraining.")
+    parser = argparse.ArgumentParser(description="Certify sparse AGP support robustness without retraining.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--summary", type=Path, default=None)
     parser.add_argument("--intermediate-top-k", type=int, default=None)
@@ -890,6 +895,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
+    configure_run_dir(args.config)
     getcontext().prec = 80
     config_payload = load_json(args.config)
     if not isinstance(config_payload, dict):

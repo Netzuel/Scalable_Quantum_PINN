@@ -7,8 +7,11 @@ import sys
 import torch
 
 TESTS_DIR = Path(__file__).resolve().parent
-if str(TESTS_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTS_DIR))
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = ROOT / "scripts"
+for path in (SCRIPTS_DIR, TESTS_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from models import ProjectedSparseAGPPINN, ScalableAGPPINN
 from projected_sparse_training_common import build_projected_support, export_results, split_epochs
@@ -21,10 +24,6 @@ from utils import (
     pauli_training_regime,
     transverse_field_ising_problem,
 )
-
-
-ROOT = Path(__file__).resolve().parents[1]
-
 
 class SparsePauliTests(unittest.TestCase):
     def test_single_qubit_commutator(self):
@@ -121,18 +120,6 @@ class SparsePauliTests(unittest.TestCase):
         self.assertIn("reference_residual", diagnostics)
         self.assertIn("relative_residual", diagnostics)
         self.assertTrue(any(param.grad is not None for param in model.parameters()))
-
-    def test_sparse_q20_training_folder_exists(self):
-        run_dir = ROOT / "tests" / "sparse_agp_20_qubits"
-        self.assertTrue((run_dir / "training_script.py").is_file())
-        self.assertTrue((run_dir / "restart_folders.py").is_file())
-        self.assertTrue((run_dir / "config.json").is_file())
-
-    def test_sparse_q156_training_folder_exists(self):
-        run_dir = ROOT / "tests" / "sparse_agp_156_qubits"
-        self.assertTrue((run_dir / "training_script.py").is_file())
-        self.assertTrue((run_dir / "restart_folders.py").is_file())
-        self.assertTrue((run_dir / "config.json").is_file())
 
     def test_projected_export_always_writes_connectivity_plots(self):
         h0, h1 = transverse_field_ising_problem(2)
