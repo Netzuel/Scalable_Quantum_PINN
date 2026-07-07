@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = ROOT / "tests"
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
@@ -34,12 +34,17 @@ from projected_sparse_training_common import (  # noqa: E402
     select_device,
     set_paper_style,
 )
-from training_script import model_config_from_payload, parse_support_sizes  # noqa: E402
+from agp_baseline_train import model_config_from_payload, parse_support_sizes  # noqa: E402
 from utils import load_pauli_hamiltonian_pair, sort_pauli_labels  # noqa: E402
 
 
-RUN_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG = RUN_DIR / "config.json"
+RUN_DIR = Path.cwd()
+DEFAULT_CONFIG = Path("config.json")
+
+
+def configure_run_dir(config_path: Path) -> None:
+    global RUN_DIR
+    RUN_DIR = config_path.resolve().parent
 
 
 @dataclass(frozen=True)
@@ -56,7 +61,8 @@ def load_json(path: Path) -> dict[str, object] | list[dict[str, object]]:
         return json.load(handle)
 
 
-def relpath(path: Path, base: Path = RUN_DIR) -> str:
+def relpath(path: Path, base: Path | None = None) -> str:
+    base = RUN_DIR if base is None else base
     try:
         return str(path.relative_to(base))
     except ValueError:
@@ -92,6 +98,44 @@ def rms_per_label(values: torch.Tensor) -> np.ndarray:
 
 def scalar(value: torch.Tensor) -> float:
     return float(value.detach().cpu().item())
+
+
+def relative_metric_with_reference_status(
+    *,
+    residual: torch.Tensor | float,
+    reference: torch.Tensor | float,
+    eps: float,
+    term_count: int | None = None,
+) -> tuple[float | None, dict[str, object]]:
+    residual_value = scalar(residual) if isinstance(residual, torch.Tensor) else float(residual)
+    reference_value = scalar(reference) if isinstance(reference, torch.Tensor) else float(reference)
+    if term_count == 0:
+        return None, {
+            "valid": False,
+            "reason": "empty_subset",
+            "residual": residual_value,
+            "reference_residual": reference_value,
+            "eps": float(eps),
+        }
+    if reference_value <= float(eps):
+        return None, {
+            "valid": False,
+            "reason": "zero_reference",
+            "residual": residual_value,
+            "reference_residual": reference_value,
+            "eps": float(eps),
+        }
+    return residual_value / reference_value, {
+        "valid": True,
+        "reason": "finite_reference",
+        "residual": residual_value,
+        "reference_residual": reference_value,
+        "eps": float(eps),
+    }
+
+
+def optional_float(value: object) -> float:
+    return float("nan") if value is None else float(value)
 
 
 def load_ranked_coefficient_labels(run_dir: Path) -> list[str]:
@@ -183,9 +227,19 @@ def evaluate_one_run(
     seen_reference = norm_sq_subset(reference, seen_indices)
     unseen_residual = norm_sq_subset(residual, unseen_indices)
     unseen_reference = norm_sq_subset(reference, unseen_indices)
-    eps = torch.finfo(seen_residual.dtype).eps
-    seen_relative = seen_residual / torch.clamp(seen_reference, min=eps)
-    unseen_relative = unseen_residual / torch.clamp(unseen_reference, min=eps)
+    eps = float(torch.finfo(seen_residual.dtype).eps)
+    seen_relative, seen_relative_status = relative_metric_with_reference_status(
+        residual=seen_residual,
+        reference=seen_reference,
+        eps=eps,
+        term_count=len(seen_indices),
+    )
+    unseen_relative, unseen_relative_status = relative_metric_with_reference_status(
+        residual=unseen_residual,
+        reference=unseen_reference,
+        eps=eps,
+        term_count=len(unseen_indices),
+    )
 
     residual_rms = rms_per_label(residual)
     reference_rms = rms_per_label(reference)
@@ -245,10 +299,16 @@ def evaluate_one_run(
         "holdout_relative_residual": scalar(diagnostics["relative_residual"]),
         "seen_residual": scalar(seen_residual),
         "seen_reference_residual": scalar(seen_reference),
-        "seen_relative_residual": scalar(seen_relative),
+        "seen_relative_residual": seen_relative,
+        "seen_relative_residual_status": seen_relative_status,
+        "seen_residual_per_term": scalar(seen_residual) / max(len(seen_indices), 1),
+        "seen_reference_residual_per_term": scalar(seen_reference) / max(len(seen_indices), 1),
         "unseen_residual": scalar(unseen_residual),
         "unseen_reference_residual": scalar(unseen_reference),
-        "unseen_relative_residual": scalar(unseen_relative),
+        "unseen_relative_residual": unseen_relative,
+        "unseen_relative_residual_status": unseen_relative_status,
+        "unseen_residual_per_term": scalar(unseen_residual) / max(len(unseen_indices), 1),
+        "unseen_reference_residual_per_term": scalar(unseen_reference) / max(len(unseen_indices), 1),
         "top_holdout_residual_terms": spectrum[:64],
         "spectrum_export": relpath(spectrum_path),
         "residual_basis_note": (
@@ -338,6 +398,9 @@ def add_stability_and_criteria(
             bool(stability_value is not None and float(stability_value) >= thresholds.top_stability)
         )
 
+        unseen_relative = row.get("unseen_relative_residual")
+        unseen_status = row.get("unseen_relative_residual_status", {})
+        unseen_valid = bool(isinstance(unseen_status, dict) and unseen_status.get("valid", unseen_relative is not None))
         criteria = {
             "training_plateau": {
                 "value": improvement,
@@ -351,9 +414,11 @@ def add_stability_and_criteria(
                 "pass": float(row["holdout_relative_residual"]) <= thresholds.holdout,
             },
             "unseen_relative_residual": {
-                "value": float(row["unseen_relative_residual"]),
+                "value": unseen_relative,
                 "threshold": thresholds.unseen,
-                "pass": float(row["unseen_relative_residual"]) <= thresholds.unseen,
+                "pass": unseen_valid and unseen_relative is not None and float(unseen_relative) <= thresholds.unseen,
+                "valid": unseen_valid,
+                "note": "Invalid when the AGP=0 reference residual on the unseen subset is zero.",
             },
             "top_term_stability": {
                 "value": stability_value,
@@ -403,7 +468,7 @@ def plot_relative_residuals(rows: list[dict[str, object]], images_dir: Path, thr
     series = [
         ("training", [float(row["training_final_relative_residual"]) for row in rows], OKABE_ITO[0], "o"),
         ("holdout", [float(row["holdout_relative_residual"]) for row in rows], OKABE_ITO[1], "s"),
-        ("unseen", [float(row["unseen_relative_residual"]) for row in rows], OKABE_ITO[2], "^"),
+        ("unseen", [optional_float(row["unseen_relative_residual"]) for row in rows], OKABE_ITO[2], "^"),
     ]
     fig, ax = plt.subplots(figsize=(5.8, 3.5))
     for label, values, color, marker in series:
@@ -412,7 +477,8 @@ def plot_relative_residuals(rows: list[dict[str, object]], images_dir: Path, thr
     ax.axhline(thresholds.unseen, color="0.55", linestyle=":", linewidth=0.8)
     ax.set_xlabel("AGP support size $K$", fontsize=LABEL_FS)
     ax.set_ylabel("relative residual", fontsize=LABEL_FS)
-    ax.set_title(r"$q=20$ residual generalization", fontsize=TITLE_FS)
+    n_qubits = rows[0]["n_qubits"] if rows else "?"
+    ax.set_title(fr"$q={n_qubits}$ residual generalization", fontsize=TITLE_FS)
     ax.tick_params(axis="both", labelsize=TICK_FS, length=TICK_LENGTH, width=TICK_WIDTH)
     fig.legend(loc="upper center", ncol=3, frameon=False, fontsize=LEGEND_FS, bbox_to_anchor=(0.53, 1.02))
     fig.subplots_adjust(top=0.80, left=0.13, right=0.98, bottom=0.16)
@@ -431,8 +497,8 @@ def plot_seen_unseen(rows: list[dict[str, object]], images_dir: Path) -> None:
     width = 58.0
     seen = np.asarray([float(row["seen_residual"]) for row in rows])
     unseen = np.asarray([float(row["unseen_residual"]) for row in rows])
-    seen_rel = np.asarray([float(row["seen_relative_residual"]) for row in rows])
-    unseen_rel = np.asarray([float(row["unseen_relative_residual"]) for row in rows])
+    seen_rel = np.asarray([optional_float(row["seen_relative_residual"]) for row in rows])
+    unseen_rel = np.asarray([optional_float(row["unseen_relative_residual"]) for row in rows])
 
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.3))
     axes[0].bar(x - width / 2.0, seen, width=width, color=OKABE_ITO[0], label="seen")
@@ -563,7 +629,7 @@ def write_outputs(
     data_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "description": (
-            "q=20 support-size holdout study. Each trained model is evaluated without retraining on an "
+            "Sparse AGP support-size holdout study. Each trained model is evaluated without retraining on an "
             "enlarged projected residual basis. By default this is a common holdout basis shared by all K."
         ),
         "holdout_residual_terms": residual_top_k,
@@ -589,7 +655,7 @@ def write_outputs(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the q=20 sweep holdout residual study.")
+    parser = argparse.ArgumentParser(description="Run a configured sparse AGP holdout residual study.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--support-sizes", default=None, help="Comma or space separated AGP support sizes.")
     parser.add_argument("--residual-top-k", type=int, default=8192)
@@ -611,7 +677,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    payload = load_json(args.config)
+    config_path = args.config.resolve()
+    configure_run_dir(config_path)
+    payload = load_json(config_path)
     if not isinstance(payload, dict):
         raise TypeError("config.json must contain a JSON object.")
     support = payload.get("support_sweep", {})
@@ -682,7 +750,7 @@ def main() -> None:
         print(
             f"done_holdout agp_terms={row['agp_terms']} "
             f"holdout_relative={row['holdout_relative_residual']:.6e} "
-            f"unseen_relative={row['unseen_relative_residual']:.6e}"
+            f"unseen_relative={optional_float(row['unseen_relative_residual']):.6e}"
         )
 
     decision = add_stability_and_criteria(rows, run_dirs, thresholds)

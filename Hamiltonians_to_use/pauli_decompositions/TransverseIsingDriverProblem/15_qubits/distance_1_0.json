@@ -1,0 +1,245 @@
+{
+  "basis": {
+    "alphabet": [
+      "I",
+      "X",
+      "Y",
+      "Z"
+    ],
+    "max_order": 15,
+    "ordering": "lexicographic product over I, X, Y, Z",
+    "size": 1073741824
+  },
+  "coefficient_convention": {
+    "coefficient_formula": "Sparse Pauli coefficients, with labels in matrix tensor-product order",
+    "operator_expansion": "H = sum_P C_P P",
+    "pauli_alphabet": [
+      "I",
+      "X",
+      "Y",
+      "Z"
+    ],
+    "pauli_basis": "{I, X, Y, Z}^{tensor n_qubits}",
+    "stored_terms": "Only coefficients with abs(C_P) > drop_tol are stored."
+  },
+  "distance": "1_0",
+  "drop_tol": 1e-10,
+  "format": "pauli_hamiltonian_pair_v1",
+  "hamiltonians": {
+    "final": {
+      "role": "H_problem",
+      "source_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "tau": 1.0,
+      "term_count": 29,
+      "terms": {
+        "IIIIIIIIIIIIIIZ": [
+          -0.40249999999999997,
+          0.0
+        ],
+        "IIIIIIIIIIIIIZI": [
+          -0.39499999999999996,
+          0.0
+        ],
+        "IIIIIIIIIIIIIZZ": [
+          -1.1,
+          0.0
+        ],
+        "IIIIIIIIIIIIZII": [
+          -0.3875,
+          0.0
+        ],
+        "IIIIIIIIIIIIZZI": [
+          -1.0846153846153845,
+          0.0
+        ],
+        "IIIIIIIIIIIZIII": [
+          -0.37999999999999995,
+          0.0
+        ],
+        "IIIIIIIIIIIZZII": [
+          -1.0692307692307692,
+          0.0
+        ],
+        "IIIIIIIIIIZIIII": [
+          -0.3725,
+          0.0
+        ],
+        "IIIIIIIIIIZZIII": [
+          -1.0538461538461539,
+          0.0
+        ],
+        "IIIIIIIIIZIIIII": [
+          -0.365,
+          0.0
+        ],
+        "IIIIIIIIIZZIIII": [
+          -1.0384615384615385,
+          0.0
+        ],
+        "IIIIIIIIZIIIIII": [
+          -0.35749999999999993,
+          0.0
+        ],
+        "IIIIIIIIZZIIIII": [
+          -1.023076923076923,
+          0.0
+        ],
+        "IIIIIIIZIIIIIII": [
+          -0.35,
+          0.0
+        ],
+        "IIIIIIIZZIIIIII": [
+          -1.0076923076923077,
+          0.0
+        ],
+        "IIIIIIZIIIIIIII": [
+          -0.34249999999999997,
+          0.0
+        ],
+        "IIIIIIZZIIIIIII": [
+          -0.9923076923076923,
+          0.0
+        ],
+        "IIIIIZIIIIIIIII": [
+          -0.335,
+          0.0
+        ],
+        "IIIIIZZIIIIIIII": [
+          -0.9769230769230769,
+          0.0
+        ],
+        "IIIIZIIIIIIIIII": [
+          -0.32749999999999996,
+          0.0
+        ],
+        "IIIIZZIIIIIIIII": [
+          -0.9615384615384616,
+          0.0
+        ],
+        "IIIZIIIIIIIIIII": [
+          -0.31999999999999995,
+          0.0
+        ],
+        "IIIZZIIIIIIIIII": [
+          -0.9461538461538461,
+          0.0
+        ],
+        "IIZIIIIIIIIIIII": [
+          -0.3125,
+          0.0
+        ],
+        "IIZZIIIIIIIIIII": [
+          -0.9307692307692308,
+          0.0
+        ],
+        "IZIIIIIIIIIIIII": [
+          -0.305,
+          0.0
+        ],
+        "IZZIIIIIIIIIIII": [
+          -0.9153846153846154,
+          0.0
+        ],
+        "ZIIIIIIIIIIIIII": [
+          -0.2975,
+          0.0
+        ],
+        "ZZIIIIIIIIIIIII": [
+          -0.9,
+          0.0
+        ]
+      },
+      "terms_by_order": {
+        "1": 15,
+        "2": 14
+      }
+    },
+    "initial": {
+      "role": "H_diagonal",
+      "source_key": "analytic_transverse_driver_sparse_pauli",
+      "tau": 0.0,
+      "term_count": 15,
+      "terms": {
+        "IIIIIIIIIIIIIIX": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIXI": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIXII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIXIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIXIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIXIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIXIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIXIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIXIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIXIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIXIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIXIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIXIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IXIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "XIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ]
+      },
+      "terms_by_order": {
+        "1": 15
+      }
+    }
+  },
+  "n_qubits": 15,
+  "source": {
+    "backend": "analytic_driver_to_problem_transverse_ising",
+    "coupling_gradient": 0.1,
+    "dense_usage": "None; analytic Pauli strings are exported directly.",
+    "field_gradient": 0.15,
+    "final_construction": "analytic diagonal Ising problem with Z_i and nearest-neighbor Z_i Z_j terms",
+    "generator": "q15/sweep_test/build_driver_problem_hamiltonian.py",
+    "initial_construction": "analytic transverse-field driver H_initial = -sum_i X_i",
+    "num_qubits": 15,
+    "periodic": false,
+    "x_field": 1.0,
+    "z_field": 0.35,
+    "zz_coupling": 1.0
+  },
+  "system": "TransverseIsingDriverProblem"
+}

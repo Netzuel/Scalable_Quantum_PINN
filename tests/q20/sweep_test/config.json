@@ -24,7 +24,7 @@
   },
   "default_pipeline": {
     "name": "fixed_k_holdout_feedback",
-    "entrypoint": "holdout_feedback_training.py",
+    "entrypoint": "scripts/agp_holdout_feedback.py",
     "agp_terms": 16384,
     "description": "Fixed AGP support at 4**7 outputs; curriculum iterations add hard residual equations without swapping or growing AGP outputs."
   },
@@ -34,6 +34,9 @@
     "intermediate_top_k": 2048,
     "residual_top_k": 2048,
     "residual_projection": "largest_generated_commutator_terms",
+    "agp_support_selection": {
+      "strategy": "endpoint_commutator"
+    },
     "adaptive": {
       "enabled": false,
       "stages": 1,

@@ -6,16 +6,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-Q20_DIR = ROOT / "q20" / "sweep_test"
+Q20_DIR = ROOT / "tests" / "q20" / "sweep_test"
+SCRIPTS_DIR = ROOT / "scripts"
 TESTS_DIR = ROOT / "tests"
-for path in (Q20_DIR, TESTS_DIR):
+for path in (Q20_DIR, SCRIPTS_DIR, TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 from coupled_curriculum_training import merge_agp_candidate_additions, step_gate_decision
+import agp_restart
 import certify_sparse_agp
+import certify_support_robustness
 import prune_support
-from restart_folders import configured_paths
 from support_refinement import (
     fixed_budget_swap_labels,
     resolve_active_agp_budget,
@@ -34,7 +36,12 @@ class Q20GuardedCurriculumTests(unittest.TestCase):
             self.assertNotIn(configured, {"Images", "Models_Data"})
 
     def test_restart_folders_does_not_recreate_root_scratch_dirs(self):
-        configured = {path.relative_to(Q20_DIR).as_posix().rstrip("/") for path in configured_paths()}
+        config_path = Q20_DIR / "config.json"
+        agp_restart.configure_run_dir(config_path)
+        configured = {
+            path.relative_to(Q20_DIR).as_posix().rstrip("/")
+            for path in agp_restart.configured_paths(config_path)
+        }
 
         self.assertIn("runs", configured)
         self.assertNotIn("Images", configured)
@@ -186,6 +193,57 @@ class Q20GuardedCurriculumTests(unittest.TestCase):
         self.assertTrue(gate["probe_pass"])
         self.assertFalse(gate["validation_probes"]["probe_watch"]["probe_pass"])
         self.assertFalse(gate["validation_probes"]["probe_watch"]["probe_total_pass"])
+
+    def test_stratified_certification_probe_selection_is_bounded_and_disjoint(self):
+        scored = [
+            ("XXII", 100.0),
+            ("YYII", 90.0),
+            ("XIII", 80.0),
+            ("IXII", 70.0),
+            ("ZZZZ", 60.0),
+            ("IIII", 50.0),
+            ("XYZI", 40.0),
+        ]
+
+        selected = certify_support_robustness.select_order_stratified_labels(
+            scored,
+            count=4,
+            excluded={"XXII", "IIII"},
+        )
+
+        self.assertEqual(len(selected), 4)
+        self.assertEqual(len(set(selected)), 4)
+        self.assertNotIn("XXII", selected)
+        self.assertNotIn("IIII", selected)
+        self.assertIn("YYII", selected)
+        self.assertTrue(any(certify_support_robustness.pauli_weight(label) == 1 for label in selected))
+        self.assertTrue(any(certify_support_robustness.pauli_weight(label) == 4 for label in selected))
+
+    def test_support_certification_claim_requires_no_failures_or_gaps_for_certified(self):
+        checks = {
+            "training_residual": {"status": "pass"},
+            "holdout_residual": {"status": "pass"},
+            "unseen_residual": {"status": "pass"},
+            "multi_holdout": {"status": "pass"},
+            "q_sweep_plateau": {"status": "pass"},
+            "omitted_term_pressure": {"status": "pass"},
+            "physical_validation": {"status": "not tested"},
+        }
+
+        self.assertEqual(
+            certify_support_robustness.classify_claim_level(checks),
+            "candidate_robust_sparse_agp",
+        )
+        checks["physical_validation"] = {"status": "pass"}
+        self.assertEqual(
+            certify_support_robustness.classify_claim_level(checks),
+            "certified_sparse_agp_for_this_path_and_tolerance",
+        )
+        checks["omitted_term_pressure"] = {"status": "fail"}
+        self.assertEqual(
+            certify_support_robustness.classify_claim_level(checks),
+            "projected_sparse_agp_experiment",
+        )
 
 
 if __name__ == "__main__":

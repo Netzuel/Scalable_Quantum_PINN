@@ -1,7 +1,7 @@
 # q20 Sparse AGP Curriculum
 
-This folder runs the q20 sparse AGP curriculum outside `tests/`. The default
-methodology is again the fixed-`K` holdout-feedback curriculum:
+This folder configures the q20 sparse AGP curriculum under `tests/`. The
+default methodology is the fixed-`K` holdout-feedback curriculum:
 
 ```text
 K = 4**7 = 16384 trainable AGP outputs
@@ -59,7 +59,7 @@ same diagnostics.
 Clean generated artifacts and recreate only the run root:
 
 ```bash
-conda run -n torch-mps python q20/sweep_test/restart_folders.py
+conda run -n torch-mps python scripts/agp_restart.py --config tests/q20/sweep_test/config.json
 ```
 
 ## Train
@@ -69,27 +69,32 @@ Run the default end-to-end pipeline. If the baseline
 and then executes the ten holdout-feedback rounds:
 
 ```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_feedback_training.py
+conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
+  --config tests/q20/sweep_test/config.json
 ```
 
 Train only the baseline `K=16384` AGP model:
 
 ```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/training_script.py
+conda run --no-capture-output -n torch-mps python scripts/agp_baseline_train.py \
+  --config tests/q20/sweep_test/config.json
 ```
 
 Rebuild only the baseline summary from completed runs:
 
 ```bash
-conda run -n torch-mps python q20/sweep_test/training_script.py --summary-only
+conda run -n torch-mps python scripts/agp_baseline_train.py \
+  --config tests/q20/sweep_test/config.json \
+  --summary-only
 ```
 
 Evaluate a trained support on a larger residual holdout basis without
 retraining:
 
 ```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/evaluate_holdout_residual.py \
-  --trained-run q20/sweep_test/runs/baselines/agp_16384 \
+conda run --no-capture-output -n torch-mps python scripts/agp_evaluate_holdout.py \
+  --config tests/q20/sweep_test/config.json \
+  --trained-run tests/q20/sweep_test/runs/baselines/agp_16384 \
   --residual-top-k 13312 \
   --device cpu
 ```
@@ -98,7 +103,8 @@ Run the holdout study across all trained support sizes and rebuild the summary
 plots:
 
 ```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/holdout_study.py \
+conda run --no-capture-output -n torch-mps python scripts/agp_holdout_study.py \
+  --config tests/q20/sweep_test/config.json \
   --residual-top-k 13312 \
   --device cpu
 ```
@@ -113,7 +119,7 @@ promising enough to justify a separate support-selection experiment.
 Run the diagnostic fixed-budget support-refinement curriculum:
 
 ```bash
-conda run --no-capture-output -n torch-mps python q20/sweep_test/coupled_curriculum_training.py
+conda run --no-capture-output -n torch-mps python tests/q20/sweep_test/coupled_curriculum_training.py
 ```
 
 With the current config this writes under:
@@ -125,14 +131,14 @@ runs/diagnostic_fixed_budget_support_refinement_v1/
 Build pruned support candidates from the final coefficient ranking:
 
 ```bash
-conda run -n torch-mps python q20/sweep_test/prune_support.py
+conda run -n torch-mps python tests/q20/sweep_test/prune_support.py
 ```
 
 Classify the latest diagnostic coupled result against
 `AGP_CERTIFICATION_CRITERIA.md`:
 
 ```bash
-conda run -n torch-mps python q20/sweep_test/certify_sparse_agp.py
+conda run -n torch-mps python tests/q20/sweep_test/certify_sparse_agp.py
 ```
 
 The certification script writes `certification_summary.json` and marks each gate

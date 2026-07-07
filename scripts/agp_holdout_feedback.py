@@ -12,16 +12,17 @@ import numpy as np
 import torch
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = ROOT / "tests"
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
-from holdout_study import (  # noqa: E402
+from agp_holdout_study import (  # noqa: E402
     Thresholds,
     build_common_holdout_residual_labels,
     evaluate_one_run,
     load_json,
+    optional_float,
 )
 from projected_sparse_training_common import (  # noqa: E402
     LABEL_FS,
@@ -44,15 +45,27 @@ from projected_sparse_training_common import (  # noqa: E402
     select_device,
     set_paper_style,
     sort_pauli_labels,
-    run_training,
     train_stage,
 )
-from training_script import DEFAULT_CONFIG, RUN_DIR, model_config_from_payload, settings_for_support  # noqa: E402
+from agp_baseline_train import (  # noqa: E402
+    configure_run_dir as configure_baseline_run_dir,
+    model_config_from_payload,
+    run_training,
+    settings_for_support,
+)
 from utils import load_pauli_hamiltonian_pair  # noqa: E402
 
 
+RUN_DIR = Path.cwd()
+DEFAULT_CONFIG = Path("config.json")
 ROUND_RUNS_DIRNAME = "rounds"
 LEGACY_ROUND_RUNS_DIRNAME = "runs"
+
+
+def configure_run_dir(config_path: Path) -> None:
+    global RUN_DIR
+    RUN_DIR = config_path.resolve().parent
+    configure_baseline_run_dir(config_path)
 
 
 def round_run_dir(output_dir: Path, round_index: int) -> Path:
@@ -313,6 +326,62 @@ def resolve_holdout_residual_top_k(
     }
 
 
+def fit_residual_budget_to_available(
+    *,
+    residual_top_k: int,
+    add_residual_terms: int,
+    residual_budget: dict[str, object],
+    available_residual_terms: int,
+    initial_residual_terms: int,
+    rounds: int,
+    unseen_batches_after_final_iteration: int,
+) -> tuple[int, int, dict[str, object]]:
+    if available_residual_terms < initial_residual_terms:
+        raise ValueError(
+            f"Available residual labels ({available_residual_terms}) are fewer than the initial "
+            f"training residual labels ({initial_residual_terms})."
+        )
+    fitted = dict(residual_budget)
+    requested_residual_top_k = int(residual_top_k)
+    requested_add = int(add_residual_terms)
+    unseen_batches = max(int(unseen_batches_after_final_iteration), 0)
+    effective_residual_top_k = min(requested_residual_top_k, int(available_residual_terms))
+    effective_add = requested_add
+    status = "unchanged"
+
+    denominator = int(rounds) + unseen_batches
+    if denominator > 0:
+        max_add_preserving_rounds = max(
+            (effective_residual_top_k - int(initial_residual_terms)) // denominator,
+            0,
+        )
+        if effective_add > max_add_preserving_rounds:
+            effective_add = max_add_preserving_rounds
+            status = "auto_reduced_additions_to_preserve_rounds"
+
+    minimum_budget_before_final_unseen_exhaustion = int(initial_residual_terms) + int(rounds) * effective_add
+    final_unseen_terms = max(effective_residual_top_k - minimum_budget_before_final_unseen_exhaustion, 0)
+    fitted.update(
+        {
+            "residual_budget_fit_status": status,
+            "requested_holdout_residual_top_k": requested_residual_top_k,
+            "requested_add_residual_terms_per_iteration": requested_add,
+            "available_generated_residual_terms": int(available_residual_terms),
+            "resolved_holdout_residual_top_k": effective_residual_top_k,
+            "effective_add_residual_terms_per_iteration": effective_add,
+            "add_residual_terms_per_iteration": effective_add,
+            "minimum_budget_before_final_unseen_exhaustion": minimum_budget_before_final_unseen_exhaustion,
+            "final_round_expected_unseen_terms": final_unseen_terms,
+            "automatic_fit_rule": (
+                "After generated residual labels are known, use all available holdout labels but reduce "
+                "the per-round addition size when needed so feedback_iterations rounds and the requested "
+                "post-final unseen batches remain nonempty."
+            ),
+        }
+    )
+    return effective_residual_top_k, effective_add, fitted
+
+
 def plot_feedback_added_terms(rounds: list[dict[str, object]], images_dir: Path) -> None:
     import matplotlib
 
@@ -353,8 +422,8 @@ def plot_feedback_relative_residuals(rows: list[dict[str, object]], images_dir: 
     x = np.asarray([int(row["feedback_round"]) for row in rows], dtype=float)
     unseen_values = [
         np.nan
-        if int(row.get("unseen_residual_terms", 1)) == 0
-        else float(row["unseen_relative_residual"])
+        if int(row.get("unseen_residual_terms", 1)) == 0 or row.get("unseen_relative_residual") is None
+        else optional_float(row["unseen_relative_residual"])
         for row in rows
     ]
     series = [
@@ -369,7 +438,8 @@ def plot_feedback_relative_residuals(rows: list[dict[str, object]], images_dir: 
     ax.axhline(thresholds.unseen, color="0.55", linestyle=":", linewidth=0.8)
     ax.set_xlabel("feedback round", fontsize=LABEL_FS)
     ax.set_ylabel("relative residual", fontsize=LABEL_FS)
-    ax.set_title(r"$q=20$ holdout-feedback residuals", fontsize=TITLE_FS)
+    n_qubits = int(rows[0].get("n_qubits", 15)) if rows else 15
+    ax.set_title(fr"$q={n_qubits}$ holdout-feedback residuals", fontsize=TITLE_FS)
     ax.set_xticks(x)
     ax.tick_params(axis="both", labelsize=TICK_FS, length=TICK_LENGTH, width=TICK_WIDTH)
     fig.legend(loc="upper center", ncol=3, frameon=False, fontsize=LEGEND_FS, bbox_to_anchor=(0.53, 1.02))
@@ -394,10 +464,12 @@ def plot_feedback_seen_unseen(rows: list[dict[str, object]], images_dir: Path) -
             for row in rows
         ]
     )
-    seen_rel = np.asarray([float(row["seen_relative_residual"]) for row in rows])
+    seen_rel = np.asarray([optional_float(row["seen_relative_residual"]) for row in rows])
     unseen_rel = np.asarray(
         [
-            np.nan if int(row.get("unseen_residual_terms", 1)) == 0 else float(row["unseen_relative_residual"])
+            np.nan
+            if int(row.get("unseen_residual_terms", 1)) == 0 or row.get("unseen_relative_residual") is None
+            else optional_float(row["unseen_relative_residual"])
             for row in rows
         ]
     )
@@ -534,13 +606,19 @@ def write_feedback_summary(
     data_dir = output_dir / "Models_Data"
     images_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
-    accepted = [
-        row
-        for row in rows
-        if float(row["holdout_relative_residual"]) <= thresholds.holdout
-        and float(row["unseen_relative_residual"]) <= thresholds.unseen
-        and int(row.get("unseen_residual_terms", 0)) > 0
-    ]
+    accepted = []
+    for row in rows:
+        unseen_value = row.get("unseen_relative_residual")
+        unseen_status = row.get("unseen_relative_residual_status", {})
+        unseen_valid = bool(isinstance(unseen_status, dict) and unseen_status.get("valid", unseen_value is not None))
+        if (
+            float(row["holdout_relative_residual"]) <= thresholds.holdout
+            and unseen_valid
+            and unseen_value is not None
+            and float(unseen_value) <= thresholds.unseen
+            and int(row.get("unseen_residual_terms", 0)) > 0
+        ):
+            accepted.append(row)
     if accepted:
         decision = {
             "status": "found_feedback_round",
@@ -599,7 +677,7 @@ def write_feedback_summary(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train q=20 with holdout-residual feedback.")
+    parser = argparse.ArgumentParser(description="Train a configured sparse AGP with holdout-residual feedback.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--base-agp-terms", type=int, default=None)
     parser.add_argument("--rounds", type=int, default=None)
@@ -619,7 +697,9 @@ def main() -> None:
     parser.add_argument("--keep-round-images", action="store_true")
     args = parser.parse_args()
 
-    payload = load_json(args.config)
+    config_path = args.config.resolve()
+    configure_run_dir(config_path)
+    payload = load_json(config_path)
     if not isinstance(payload, dict):
         raise TypeError("config.json must contain a JSON object.")
     feedback = payload.get("holdout_feedback", {})
@@ -690,7 +770,7 @@ def main() -> None:
             f"train_missing_baseline agp_terms={base_agp_terms} "
             f"epochs={base_settings.epochs} residual_terms={base_settings.residual_top_k}"
         )
-        run_training(base_settings, base_run)
+        run_training(base_settings, base_run, payload)
     agp_labels, residual_labels = load_checkpoint_labels(base_checkpoint)
     current_residual_labels = set(residual_labels)
     body_state = load_body_state_from_checkpoint(base_checkpoint)
@@ -728,17 +808,26 @@ def main() -> None:
     )
     if len(common_residual_labels) < residual_top_k:
         print(
-            "resolved_feedback_residual_budget_clipped "
+            "resolved_feedback_residual_budget_available "
             f"requested={residual_top_k} available={len(common_residual_labels)}"
         )
-        residual_top_k = len(common_residual_labels)
-        residual_budget = dict(residual_budget)
-        residual_budget["resolved_holdout_residual_top_k"] = residual_top_k
-        residual_budget["available_generated_residual_terms"] = len(common_residual_labels)
-        residual_budget["final_round_expected_unseen_terms"] = max(
-            residual_top_k - int(residual_budget["minimum_budget_before_final_unseen_exhaustion"]),
-            0,
-        )
+    residual_top_k, add_residual_terms, residual_budget = fit_residual_budget_to_available(
+        residual_top_k=residual_top_k,
+        add_residual_terms=add_residual_terms,
+        residual_budget=residual_budget,
+        available_residual_terms=len(common_residual_labels),
+        initial_residual_terms=len(residual_labels),
+        rounds=rounds,
+        unseen_batches_after_final_iteration=unseen_residual_batches,
+    )
+    if len(common_residual_labels) > residual_top_k:
+        common_residual_labels = common_residual_labels[:residual_top_k]
+    print(
+        "fitted_feedback_residual_budget "
+        f"Q={residual_top_k} add={add_residual_terms} "
+        f"status={residual_budget['residual_budget_fit_status']} "
+        f"final_unseen_budget={residual_budget['final_round_expected_unseen_terms']}"
+    )
     output_root = output_root_arg if output_root_arg.is_absolute() else RUN_DIR / output_root_arg
     output_dir = output_root / f"agp_{base_agp_terms}_residual_{residual_top_k}_add_{add_residual_terms}_rounds_{rounds}"
     data_dir = output_dir / "Models_Data"
@@ -858,7 +947,11 @@ def main() -> None:
                 "train_residual_terms": len(residual_labels),
                 "training_final_relative_residual": float(final["relative_residual"]),
                 "holdout_relative_residual": float(row["holdout_relative_residual"]),
-                "unseen_relative_residual": float(row["unseen_relative_residual"]),
+                "unseen_relative_residual": row["unseen_relative_residual"],
+                "unseen_relative_residual_status": row.get("unseen_relative_residual_status"),
+                "unseen_residual": row.get("unseen_residual"),
+                "unseen_reference_residual": row.get("unseen_reference_residual"),
+                "unseen_residual_per_term": row.get("unseen_residual_per_term"),
                 "first_added_terms": additions[:32],
                 "support_metadata": {
                     "first_commutator_nnz": metadata["first_commutator_nnz"],
@@ -871,7 +964,8 @@ def main() -> None:
         print(
             f"done_feedback_round={round_index} train_relative={final['relative_residual']:.6e} "
             f"holdout_relative={row['holdout_relative_residual']:.6e} "
-            f"unseen_relative={row['unseen_relative_residual']:.6e}"
+            f"unseen_relative={optional_float(row['unseen_relative_residual']):.6e} "
+            f"unseen_status={row.get('unseen_relative_residual_status', {}).get('reason', 'unknown')}"
         )
 
     write_feedback_summary(

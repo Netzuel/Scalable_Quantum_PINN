@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = ROOT / "tests"
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
@@ -19,12 +19,18 @@ from projected_sparse_training_common import (  # noqa: E402
     make_projected_model,
     select_device,
 )
-from training_script import model_config_from_payload  # noqa: E402
+from agp_baseline_train import model_config_from_payload  # noqa: E402
+from agp_holdout_study import relative_metric_with_reference_status  # noqa: E402
 from utils import load_pauli_hamiltonian_pair  # noqa: E402
 
 
-RUN_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG = RUN_DIR / "config.json"
+RUN_DIR = Path.cwd()
+DEFAULT_CONFIG = Path("config.json")
+
+
+def configure_run_dir(config_path: Path) -> None:
+    global RUN_DIR
+    RUN_DIR = config_path.resolve().parent
 
 
 def load_json(path: Path) -> dict[str, object]:
@@ -51,16 +57,18 @@ def norm_sq_subset(values: torch.Tensor, indices: list[int]) -> torch.Tensor:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate a trained q=20 AGP on a larger residual holdout basis.")
+    parser = argparse.ArgumentParser(description="Evaluate a trained sparse AGP on a larger residual holdout basis.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--trained-run", type=Path, default=RUN_DIR / "runs" / "baselines" / "agp_16384")
+    parser.add_argument("--trained-run", type=Path, default=None)
     parser.add_argument("--residual-top-k", type=int, default=8192)
     parser.add_argument("--intermediate-top-k", type=int, default=None)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
-    payload = load_json(args.config)
+    config_path = args.config.resolve()
+    configure_run_dir(config_path)
+    payload = load_json(config_path)
     config = model_config_from_payload(payload)
     training = payload.get("training", {})
     parameters = training.get("parameters", {}) if isinstance(training, dict) else {}
@@ -74,9 +82,12 @@ def main() -> None:
     )
     num_points = int(parameters.get("num_points", 16))
 
-    checkpoint_path = args.trained_run / "Models_Data" / "training_checkpoint.pt"
-    train_metadata_path = args.trained_run / "Models_Data" / "support_metadata.json"
-    train_history_path = args.trained_run / "Models_Data" / "loss_history.json"
+    trained_run = args.trained_run or (RUN_DIR / "runs" / "baselines" / "agp_16384")
+    if not trained_run.is_absolute():
+        trained_run = RUN_DIR / trained_run
+    checkpoint_path = trained_run / "Models_Data" / "training_checkpoint.pt"
+    train_metadata_path = trained_run / "Models_Data" / "support_metadata.json"
+    train_history_path = trained_run / "Models_Data" / "loss_history.json"
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     trained_agp_labels = list(checkpoint["agp_labels"])
     trained_residual_labels = set(checkpoint["residual_labels"])
@@ -119,12 +130,17 @@ def main() -> None:
     unseen_indices = [idx for idx, label in enumerate(residual_labels) if label not in trained_residual_labels]
     unseen_residual = norm_sq_subset(residual, unseen_indices)
     unseen_reference = norm_sq_subset(reference, unseen_indices)
-    eps = torch.finfo(unseen_residual.dtype).eps
-    unseen_relative = unseen_residual / torch.clamp(unseen_reference, min=eps)
+    eps = float(torch.finfo(unseen_residual.dtype).eps)
+    unseen_relative, unseen_status = relative_metric_with_reference_status(
+        residual=unseen_residual,
+        reference=unseen_reference,
+        eps=eps,
+        term_count=len(unseen_indices),
+    )
     full_basis_size = 4 ** config.n_qubits
 
     result = {
-        "trained_run": str(args.trained_run.relative_to(RUN_DIR) if args.trained_run.is_relative_to(RUN_DIR) else args.trained_run),
+        "trained_run": str(trained_run.relative_to(RUN_DIR) if trained_run.is_relative_to(RUN_DIR) else trained_run),
         "n_qubits": config.n_qubits,
         "agp_terms": len(model.agp_labels),
         "agp_fraction_of_full_basis": len(model.agp_labels) / full_basis_size,
@@ -142,7 +158,8 @@ def main() -> None:
         "holdout_relative_residual": float(diagnostics["relative_residual"].detach().cpu().item()),
         "unseen_residual": float(unseen_residual.detach().cpu().item()),
         "unseen_reference_residual": float(unseen_reference.detach().cpu().item()),
-        "unseen_relative_residual": float(unseen_relative.detach().cpu().item()),
+        "unseen_relative_residual": unseen_relative,
+        "unseen_relative_residual_status": unseen_status,
         "residual_basis_note": (
             "The model weights are unchanged. Only the projected residual basis is enlarged; "
             "unseen metrics are computed on residual labels absent from the original training projection."

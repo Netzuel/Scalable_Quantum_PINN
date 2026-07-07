@@ -13,12 +13,15 @@ import numpy as np
 import torch
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 TESTS_DIR = ROOT / "tests"
+SCRIPTS_DIR = ROOT / "scripts"
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
-from holdout_feedback_training import (  # noqa: E402
+from agp_holdout_feedback import (  # noqa: E402
     load_body_state_from_checkpoint,
     load_checkpoint_labels,
     make_support_with_residual_labels,
@@ -30,7 +33,7 @@ from holdout_feedback_training import (  # noqa: E402
     select_residual_additions,
     write_feedback_spectrum,
 )
-from holdout_study import Thresholds, build_common_holdout_residual_labels, evaluate_one_run, load_json  # noqa: E402
+from agp_holdout_study import Thresholds, build_common_holdout_residual_labels, evaluate_one_run, load_json  # noqa: E402
 from oracle_tools import (  # noqa: E402
     projected_linear_oracle,
     projected_residual_matrix,
@@ -61,7 +64,7 @@ from projected_sparse_training_common import (  # noqa: E402
     sort_pauli_labels,
     run_training,
 )
-from training_script import DEFAULT_CONFIG, RUN_DIR, model_config_from_payload, settings_for_support  # noqa: E402
+from agp_baseline_train import DEFAULT_CONFIG, RUN_DIR, model_config_from_payload, settings_for_support  # noqa: E402
 from utils import _commutator_pauli_labels_unchecked, load_pauli_hamiltonian_pair, pauli_weight  # noqa: E402
 
 
