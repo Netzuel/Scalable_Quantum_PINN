@@ -84,6 +84,11 @@ conda run --no-capture-output -n torch-mps python scripts/agp_baseline_train.py 
 
 ## Physical Validation
 
+The configured AGP calibration is trained jointly during the baseline and all
+holdout-feedback curriculum rounds. It trains a global AGP scale plus soft
+Pauli gates using only the projected Euler-Lagrange residual; it does not use
+the final ground-state energy, fidelity, or exact final observables.
+
 After training, run the q15 statevector diagnostic:
 
 ```bash
@@ -101,5 +106,8 @@ learned_sparse_agp
 
 The diagnostic reports final energy, excitation probability, ground-state
 fidelity, `<Z_i>` RMSE, nearest-neighbor `<Z_i Z_{i+1}>` RMSE, and improvement
-ratios relative to the no-CD evolution. The statevector code is intentionally
-kept as a script-level diagnostic because it is not a scalable library path.
+ratios relative to the no-CD evolution. The q15 ground truth is used only here,
+after training, to benchmark the learned AGP.
+
+The statevector code is intentionally kept as a script-level diagnostic because
+it is not a scalable library path.

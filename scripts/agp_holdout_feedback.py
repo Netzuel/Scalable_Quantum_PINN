@@ -37,7 +37,11 @@ from projected_sparse_training_common import (  # noqa: E402
     make_projected_model,
     plot_connection_summary,
     plot_support_map,
+    preferred_calibration_labels_from_support,
+    projected_trainable_state,
+    projected_trainable_state_from_checkpoint,
     rank_coefficients,
+    restore_projected_trainable_state,
     select_device,
     set_paper_style,
     sort_pauli_labels,
@@ -76,18 +80,17 @@ def normalize_round_run_label(label: object) -> str:
     return raw
 
 
-def load_body_state_from_checkpoint(checkpoint_path: Path) -> dict[str, torch.Tensor]:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    return {
-        key.removeprefix("body."): value
-        for key, value in checkpoint["model_state_dict"].items()
-        if key.startswith("body.")
-    }
-
-
 def load_checkpoint_labels(checkpoint_path: Path) -> tuple[list[str], list[str]]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     return [str(label) for label in checkpoint["agp_labels"]], [str(label) for label in checkpoint["residual_labels"]]
+
+
+def load_body_state_from_checkpoint(checkpoint_path: Path) -> dict[str, torch.Tensor]:
+    state = projected_trainable_state_from_checkpoint(checkpoint_path)
+    body_state = state.get("body", {})
+    if not isinstance(body_state, dict):
+        raise TypeError(f"Missing body state in {checkpoint_path}.")
+    return {str(key): value for key, value in body_state.items() if isinstance(value, torch.Tensor)}
 
 
 def select_residual_additions(
@@ -146,10 +149,10 @@ def train_feedback_round(
     settings: ProjectedRunSettings,
     agp_labels: list[str],
     residual_labels: list[str],
-    body_state: dict[str, torch.Tensor],
+    trainable_state: dict[str, object],
     round_index: int,
     additions: list[dict[str, object]],
-) -> tuple[dict[str, torch.Tensor], dict[str, float], dict[str, object]]:
+) -> tuple[dict[str, object], dict[str, float], dict[str, object]]:
     config = settings.model
     torch.manual_seed(settings.seed + round_index)
     device = select_device(settings.device)
@@ -171,10 +174,24 @@ def train_feedback_round(
         stage=round_index,
     )
     model = make_projected_model(h0, h1, support, config, device)
-    model.body.load_state_dict({key: value.to(device) for key, value in body_state.items()})
+    restore_projected_trainable_state(
+        model,
+        trainable_state,
+        settings=settings,
+        preferred_active_labels=preferred_calibration_labels_from_support(support),
+    )
 
     optimizer, optimizer_info = make_optimizer(model, settings)
-    loss_weights = ProjectedSparseLossWeights(residual=settings.residual_weight, agp_l2=settings.agp_l2_weight)
+    loss_weights = ProjectedSparseLossWeights(
+        residual=settings.residual_weight,
+        agp_l2=settings.agp_l2_weight,
+        residual_block_normalization=settings.residual_block_normalization,
+        agp_smoothness=settings.agp_smoothness_weight,
+        agp_curvature=settings.agp_curvature_weight,
+        calibration_budget=settings.calibration_budget_weight,
+        calibration_binary=settings.calibration_binary_weight,
+        calibration_scale_l2=settings.calibration_scale_l2_weight,
+    )
     tau = torch.linspace(0.0, 1.0, settings.num_points, device=device).view(-1, 1)
     t = config.t_initial + config.physical_time * tau
     history: list[dict[str, float]] = []
@@ -203,6 +220,15 @@ def train_feedback_round(
     metadata["final_residual_terms"] = len(model.residual_labels)
     metadata["first_commutator_nnz"] = model.first_commutator.nnz
     metadata["second_commutator_nnz"] = model.second_commutator.nnz
+    if model.has_agp_calibration():
+        metadata["agp_calibration"] = {
+            "enabled": True,
+            "training_mode": "joint_in_curriculum",
+            "target_active_terms": int(getattr(model, "agp_target_active_terms", len(model.agp_labels))),
+            "gate_temperature": float(getattr(model, "agp_gate_temperature", 1.0)),
+            "uses_ground_truth_observables": False,
+            "objective": "projected_euler_lagrange_residual_with_trainable_scale_and_gates",
+        }
 
     images_dir = run_dir / settings.path_images
     data_dir = run_dir / settings.path_data
@@ -253,8 +279,8 @@ def train_feedback_round(
         history,
         top_k=settings.top_coefficients,
     )
-    next_body_state = {key: value.detach().cpu() for key, value in model.body.state_dict().items()}
-    return next_body_state, history[-1], metadata
+    next_trainable_state = projected_trainable_state(model)
+    return next_trainable_state, history[-1], metadata
 
 
 def read_spectrum(path: Path) -> list[dict[str, object]]:
@@ -769,7 +795,7 @@ def main() -> None:
         run_training(base_settings, base_run, payload)
     agp_labels, residual_labels = load_checkpoint_labels(base_checkpoint)
     current_residual_labels = set(residual_labels)
-    body_state = load_body_state_from_checkpoint(base_checkpoint)
+    trainable_state = projected_trainable_state_from_checkpoint(base_checkpoint)
     residual_top_k, residual_budget = resolve_holdout_residual_top_k(
         residual_top_k_request,
         initial_residual_terms=len(residual_labels),
@@ -888,7 +914,7 @@ def main() -> None:
         if completed_round > 0:
             agp_labels, residual_labels = load_checkpoint_labels(last_checkpoint)
             current_residual_labels = set(residual_labels)
-            body_state = load_body_state_from_checkpoint(last_checkpoint)
+            trainable_state = projected_trainable_state_from_checkpoint(last_checkpoint)
 
     for round_index in range(completed_round + 1, rounds + 1):
         additions = select_residual_additions(
@@ -904,13 +930,13 @@ def main() -> None:
             f"train_feedback_round={round_index} agp_terms={len(agp_labels)} "
             f"residual_terms={len(residual_labels)} added={len(additions)} epochs={feedback_settings.epochs}"
         )
-        body_state, final, metadata = train_feedback_round(
+        trainable_state, final, metadata = train_feedback_round(
             run_dir=round_run,
             payload=payload,
             settings=feedback_settings,
             agp_labels=agp_labels,
             residual_labels=residual_labels,
-            body_state=body_state,
+            trainable_state=trainable_state,
             round_index=round_index,
             additions=additions,
         )

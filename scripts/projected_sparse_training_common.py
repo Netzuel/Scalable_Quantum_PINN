@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections import defaultdict
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import torch
@@ -82,6 +84,17 @@ class ProjectedRunSettings:
     residual_block_normalization: str = "none"
     agp_smoothness_weight: float = 0.0
     agp_curvature_weight: float = 0.0
+    calibration_enabled: bool = False
+    calibration_target_active_terms: int | None = None
+    calibration_gate_temperature: float = 1.0
+    calibration_initial_gamma: float = 1.0
+    calibration_active_logit: float = 4.0
+    calibration_inactive_logit: float = -8.0
+    calibration_gamma_lr: float | None = None
+    calibration_gate_lr: float | None = None
+    calibration_budget_weight: float = 0.0
+    calibration_binary_weight: float = 0.0
+    calibration_scale_l2_weight: float = 0.0
     path_images: str = "Images/"
     path_data: str = "Models_Data/"
 
@@ -181,6 +194,19 @@ def default_config_payload(config: ProjectedTrainingConfig) -> dict[str, object]
                 "format": "pdf",
             },
         },
+        "agp_calibration": {
+            "enabled": False,
+            "target_active_terms": None,
+            "gate_temperature": 1.0,
+            "initial_gamma": 1.0,
+            "active_logit": 4.0,
+            "inactive_logit": -8.0,
+            "gamma_lr": None,
+            "gate_lr": None,
+            "budget_weight": 0.0,
+            "binary_weight": 0.0,
+            "scale_l2_weight": 0.0,
+        },
     }
 
 
@@ -203,6 +229,7 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
     training_loss = training.get("loss", {}) if isinstance(training, dict) else {}
     training_export = training.get("export", {}) if isinstance(training, dict) else {}
     support_adaptive = support.get("adaptive", {}) if isinstance(support, dict) else {}
+    calibration = calibration_payload(payload)
 
     model_name = neural.get("model", "ProjectedSparseAGPPINN") if isinstance(neural, dict) else "ProjectedSparseAGPPINN"
     if model_name != "ProjectedSparseAGPPINN":
@@ -253,28 +280,236 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
         residual_block_normalization=str(training_loss.get("residual_block_normalization", "none")),
         agp_smoothness_weight=float(training_loss.get("agp_smoothness", 0.0)),
         agp_curvature_weight=float(training_loss.get("agp_curvature", 0.0)),
+        **calibration_kwargs(calibration),
         path_images=str(training_export.get("path_images", "Images/")),
         path_data=str(training_export.get("path_data", "Models_Data/")),
     )
 
 
+def calibration_payload(payload: dict[str, object]) -> dict[str, object]:
+    calibration = payload.get("agp_calibration", {})
+    if isinstance(calibration, dict):
+        return calibration
+    return {}
+
+
+def optional_float_payload(payload: dict[str, object], key: str) -> float | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    return float(value)
+
+
+def calibration_kwargs(calibration: dict[str, object]) -> dict[str, object]:
+    target = calibration.get("target_active_terms")
+    return {
+        "calibration_enabled": bool(calibration.get("enabled", False)),
+        "calibration_target_active_terms": int(target) if target is not None else None,
+        "calibration_gate_temperature": float(calibration.get("gate_temperature", 1.0)),
+        "calibration_initial_gamma": float(calibration.get("initial_gamma", 1.0)),
+        "calibration_active_logit": float(calibration.get("active_logit", 4.0)),
+        "calibration_inactive_logit": float(calibration.get("inactive_logit", -8.0)),
+        "calibration_gamma_lr": optional_float_payload(calibration, "gamma_lr"),
+        "calibration_gate_lr": optional_float_payload(calibration, "gate_lr"),
+        "calibration_budget_weight": float(calibration.get("budget_weight", 0.0)),
+        "calibration_binary_weight": float(calibration.get("binary_weight", 0.0)),
+        "calibration_scale_l2_weight": float(calibration.get("scale_l2_weight", 0.0)),
+    }
+
+
+def preferred_calibration_labels_from_support(support: dict[str, object]) -> list[str]:
+    metadata = support.get("metadata", {})
+    if not isinstance(metadata, dict):
+        return []
+    for key in ("top_generated_agp_candidates", "top_agp_candidates"):
+        rows = metadata.get(key, [])
+        if isinstance(rows, list):
+            labels = [str(row["label"]) for row in rows if isinstance(row, dict) and "label" in row]
+            if labels:
+                return labels
+    return []
+
+
+def initial_gate_logits_for_labels(
+    agp_labels: list[str],
+    *,
+    target_active_terms: int,
+    active_logit: float,
+    inactive_logit: float,
+    preferred_active_labels: Iterable[str] | None = None,
+) -> torch.Tensor:
+    target = max(1, min(int(target_active_terms), len(agp_labels)))
+    logits = torch.full((len(agp_labels),), float(inactive_logit), dtype=torch.float32)
+    label_to_index = {label: idx for idx, label in enumerate(agp_labels)}
+    selected: list[int] = []
+    seen: set[int] = set()
+    for label in preferred_active_labels or []:
+        index = label_to_index.get(str(label))
+        if index is None or index in seen:
+            continue
+        selected.append(index)
+        seen.add(index)
+        if len(selected) >= target:
+            break
+    for index in range(len(agp_labels)):
+        if len(selected) >= target:
+            break
+        if index not in seen:
+            selected.append(index)
+            seen.add(index)
+    if selected:
+        logits[torch.tensor(selected, dtype=torch.long)] = float(active_logit)
+    return logits
+
+
+def enable_projected_agp_calibration(
+    model: ProjectedSparseAGPPINN,
+    settings: ProjectedRunSettings,
+    *,
+    preferred_active_labels: Iterable[str] | None = None,
+    calibration_state: dict[str, object] | None = None,
+) -> None:
+    if not settings.calibration_enabled and calibration_state is None:
+        return
+    target = settings.calibration_target_active_terms
+    if target is None and calibration_state is not None and "target_active_terms" in calibration_state:
+        target = int(calibration_state["target_active_terms"])
+    if target is None:
+        target = len(model.agp_labels)
+    target = max(1, min(int(target), len(model.agp_labels)))
+    gate_temperature = float(settings.calibration_gate_temperature)
+    if calibration_state is not None and "gate_temperature" in calibration_state:
+        gate_temperature = float(calibration_state["gate_temperature"])
+    model.agp_gate_temperature = gate_temperature
+    model.agp_target_active_terms = int(target)
+    device = next(model.parameters()).device
+    log_gamma_value = math.log(max(float(settings.calibration_initial_gamma), 1e-12))
+    gate_logits = initial_gate_logits_for_labels(
+        model.agp_labels,
+        target_active_terms=target,
+        active_logit=settings.calibration_active_logit,
+        inactive_logit=settings.calibration_inactive_logit,
+        preferred_active_labels=preferred_active_labels,
+    )
+    if calibration_state is not None:
+        if "log_gamma" in calibration_state:
+            log_gamma_tensor = calibration_state["log_gamma"]
+            if isinstance(log_gamma_tensor, torch.Tensor):
+                log_gamma_value = float(log_gamma_tensor.detach().cpu().reshape(()))
+        old_logits = calibration_state.get("gate_logits")
+        old_labels = [str(label) for label in calibration_state.get("agp_labels", [])]
+        if isinstance(old_logits, torch.Tensor) and old_labels:
+            old_index = {label: idx for idx, label in enumerate(old_labels)}
+            for new_idx, label in enumerate(model.agp_labels):
+                old_idx = old_index.get(label)
+                if old_idx is not None and old_idx < old_logits.numel():
+                    gate_logits[new_idx] = old_logits.detach().cpu().flatten()[old_idx]
+        elif isinstance(old_logits, torch.Tensor) and old_logits.numel() == len(model.agp_labels):
+            gate_logits = old_logits.detach().cpu().float().flatten()
+    model.agp_log_gamma = torch.nn.Parameter(torch.tensor(log_gamma_value, dtype=torch.float32, device=device))
+    model.agp_gate_logits = torch.nn.Parameter(gate_logits.to(device))
+
+
+def projected_trainable_state(model: ProjectedSparseAGPPINN) -> dict[str, object]:
+    state: dict[str, object] = {
+        "body": {key: value.detach().cpu() for key, value in model.body.state_dict().items()},
+        "agp_labels": list(model.agp_labels),
+    }
+    if model.has_agp_calibration():
+        state["calibration"] = {
+            "log_gamma": model.agp_log_gamma.detach().cpu(),
+            "gate_logits": model.agp_gate_logits.detach().cpu(),
+            "gate_temperature": float(getattr(model, "agp_gate_temperature", 1.0)),
+            "target_active_terms": int(getattr(model, "agp_target_active_terms", len(model.agp_labels))),
+            "agp_labels": list(model.agp_labels),
+        }
+    return state
+
+
+def projected_trainable_state_from_checkpoint(checkpoint_path: Path) -> dict[str, object]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model_state = checkpoint["model_state_dict"]
+    state: dict[str, object] = {
+        "body": {
+            key.removeprefix("body."): value
+            for key, value in model_state.items()
+            if key.startswith("body.")
+        },
+        "agp_labels": [str(label) for label in checkpoint["agp_labels"]],
+    }
+    if "agp_log_gamma" in model_state and "agp_gate_logits" in model_state:
+        metadata = checkpoint.get("config", {}).get("support", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        calibration_metadata = metadata.get("agp_calibration", {})
+        calibration_metadata = calibration_metadata if isinstance(calibration_metadata, dict) else {}
+        state["calibration"] = {
+            "log_gamma": model_state["agp_log_gamma"],
+            "gate_logits": model_state["agp_gate_logits"],
+            "agp_labels": [str(label) for label in checkpoint["agp_labels"]],
+            "gate_temperature": float(calibration_metadata.get("gate_temperature", 1.0)),
+            "target_active_terms": int(calibration_metadata.get("target_active_terms", len(checkpoint["agp_labels"]))),
+        }
+    return state
+
+
+def restore_projected_trainable_state(
+    model: ProjectedSparseAGPPINN,
+    state: dict[str, object],
+    *,
+    settings: ProjectedRunSettings,
+    preferred_active_labels: Iterable[str] | None = None,
+) -> None:
+    body_state = state.get("body", state)
+    if not isinstance(body_state, dict):
+        raise TypeError("Projected trainable state must contain a body state dictionary.")
+    model.body.load_state_dict({str(key): value.to(next(model.parameters()).device) for key, value in body_state.items()})
+    calibration_state = state.get("calibration")
+    if isinstance(calibration_state, dict) or settings.calibration_enabled:
+        enable_projected_agp_calibration(
+            model,
+            settings,
+            preferred_active_labels=preferred_active_labels,
+            calibration_state=calibration_state if isinstance(calibration_state, dict) else None,
+        )
+
+
 def make_optimizer(model: torch.nn.Module, settings: ProjectedRunSettings) -> tuple[torch.optim.Optimizer, dict[str, object]]:
-    params = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    body_params = []
+    gamma_params = []
+    gate_params = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name == "agp_log_gamma":
+            gamma_params.append(parameter)
+        elif name == "agp_gate_logits":
+            gate_params.append(parameter)
+        else:
+            body_params.append(parameter)
+    groups: list[dict[str, object]] = []
+    if body_params:
+        groups.append({"params": body_params, "lr": settings.lr})
+    if gamma_params:
+        groups.append({"params": gamma_params, "lr": settings.calibration_gamma_lr or settings.lr})
+    if gate_params:
+        groups.append({"params": gate_params, "lr": settings.calibration_gate_lr or settings.lr})
+    params = groups if len(groups) > 1 else (groups[0]["params"] if groups else [])
     name = settings.optimizer
     optimizer = name.lower()
     if optimizer == "adam":
         instance = torch.optim.Adam(params, lr=settings.lr)
-        return instance, {"requested": name, "actual": "Adam", "class": type(instance).__name__}
+        return instance, {"requested": name, "actual": "Adam", "class": type(instance).__name__, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled"}
     if optimizer == "adamw":
         instance = torch.optim.AdamW(params, lr=settings.lr)
-        return instance, {"requested": name, "actual": "AdamW", "class": type(instance).__name__}
+        return instance, {"requested": name, "actual": "AdamW", "class": type(instance).__name__, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled"}
     if optimizer in {"soap", "safe_mps_soap", "safempssoap"}:
         if pytorch_optimizer is None:
             instance = torch.optim.AdamW(params, lr=settings.lr)
-            return instance, {"requested": name, "actual": "AdamW", "class": type(instance).__name__, "fallback": True}
-        optimizer_cls = SafeMPSSOAP if any(parameter.device.type == "mps" for parameter in params) else pytorch_optimizer.SOAP
+            return instance, {"requested": name, "actual": "AdamW", "class": type(instance).__name__, "fallback": True, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled"}
+        flat_params = [parameter for group in groups for parameter in group["params"]]
+        optimizer_cls = SafeMPSSOAP if any(parameter.device.type == "mps" for parameter in flat_params) else pytorch_optimizer.SOAP
         instance = optimizer_cls(params, lr=settings.lr)
-        return instance, {"requested": name, "actual": "SOAP", "class": optimizer_cls.__name__, "fallback": False}
+        return instance, {"requested": name, "actual": "SOAP", "class": optimizer_cls.__name__, "fallback": False, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled"}
     raise ValueError(f"Unsupported optimizer {name!r}.")
 
 
@@ -1038,6 +1273,7 @@ def export_results(
     with torch.no_grad():
         prediction = model(t)
         agp_coefficients = prediction["agp_coefficients"].detach().cpu()
+        raw_agp_coefficients = prediction.get("raw_agp_coefficients", prediction["agp_coefficients"]).detach().cpu()
         d_lambda_dt = prediction["d_lambda_dt"].detach().cpu()
         hcd_coefficients = d_lambda_dt * agp_coefficients
         tau_cpu = tau.detach().cpu()
@@ -1045,9 +1281,11 @@ def export_results(
 
     ranked = rank_coefficients(hcd_coefficients, model.agp_labels)
     least_terms = list(reversed([row for row in ranked if row["order"] > 0]))[:top_k]
+    calibrated = model.has_agp_calibration()
+    coefficient_definition = "d_lambda_dt * gamma * g_P * C_P(t)" if calibrated else "d_lambda_dt * C_P(t)"
     importance_payload = {
-        "coefficient_kind": "projected_counterdiabatic_hamiltonian",
-        "coefficient_definition": "d_lambda_dt * C_P(t)",
+        "coefficient_kind": "joint_calibrated_projected_counterdiabatic_hamiltonian" if calibrated else "projected_counterdiabatic_hamiltonian",
+        "coefficient_definition": coefficient_definition,
         "ranking_metric": "rms_over_time",
         "all_terms": ranked,
         "top_terms": ranked[:top_k],
@@ -1064,10 +1302,13 @@ def export_results(
             "tau": tau_cpu,
             "pauli_labels": model.agp_labels,
             "agp_coefficients": agp_coefficients,
+            "raw_agp_coefficients": raw_agp_coefficients,
             "counterdiabatic_coefficients": hcd_coefficients,
-            "counterdiabatic_coefficient_definition": "d_lambda_dt * C_P(t)",
+            "counterdiabatic_coefficient_definition": coefficient_definition,
             "lambda": prediction["lambda"].detach().cpu(),
             "d_lambda_dt": d_lambda_dt,
+            "calibration_gamma": float(model.agp_calibration_gamma().detach().cpu()) if calibrated else 1.0,
+            "calibration_gates": model.agp_calibration_gates().detach().cpu() if calibrated else None,
             "support_metadata": metadata,
         },
         data_dir / "final_agp_coefficients.pt",
@@ -1193,6 +1434,9 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
         agp_curvature=settings.agp_curvature_weight,
+        calibration_budget=settings.calibration_budget_weight,
+        calibration_binary=settings.calibration_binary_weight,
+        calibration_scale_l2=settings.calibration_scale_l2_weight,
     )
     tau = torch.linspace(0.0, 1.0, settings.num_points, device=device).view(-1, 1)
     t = config.t_initial + config.physical_time * tau
@@ -1238,8 +1482,31 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
         model = make_projected_model(h0, h1, support, config, device)
         if previous_model is not None:
             transfer_projected_weights(previous_model, model)
+            previous_state = projected_trainable_state(previous_model)
+            calibration_state = previous_state.get("calibration")
+            enable_projected_agp_calibration(
+                model,
+                settings,
+                preferred_active_labels=preferred_calibration_labels_from_support(support),
+                calibration_state=calibration_state if isinstance(calibration_state, dict) else None,
+            )
+        else:
+            enable_projected_agp_calibration(
+                model,
+                settings,
+                preferred_active_labels=preferred_calibration_labels_from_support(support),
+            )
         metadata["first_commutator_nnz"] = model.first_commutator.nnz
         metadata["second_commutator_nnz"] = model.second_commutator.nnz
+        if model.has_agp_calibration():
+            metadata["agp_calibration"] = {
+                "enabled": True,
+                "training_mode": "joint_in_curriculum",
+                "target_active_terms": int(getattr(model, "agp_target_active_terms", len(model.agp_labels))),
+                "gate_temperature": float(getattr(model, "agp_gate_temperature", 1.0)),
+                "uses_ground_truth_observables": False,
+                "objective": "projected_euler_lagrange_residual_with_trainable_scale_and_gates",
+            }
 
         optimizer, optimizer_info = make_optimizer(model, settings)
         optimizer_stage_info = dict(optimizer_info)

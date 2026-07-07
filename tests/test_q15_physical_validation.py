@@ -15,7 +15,13 @@ for path in (SCRIPTS_DIR, TESTS_DIR, ROOT):
 from agp_support import KrylovSupportConfig, select_krylov_agp_labels
 from agp_holdout_feedback import fit_residual_budget_to_available
 from agp_holdout_study import relative_metric_with_reference_status
-from agp_physical_validation import apply_pauli_sum, build_action_cache, variational_l1_agp
+from agp_physical_validation import (
+    apply_pauli_sum,
+    build_action_cache,
+    build_learned_variant_specs,
+    select_best_learned_variant,
+    variational_l1_agp,
+)
 from utils import SparsePauliOperator, transverse_field_ising_problem
 
 
@@ -93,6 +99,61 @@ class Q15PhysicalValidationTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertFalse(status["valid"])
         self.assertEqual(status["reason"], "zero_reference")
+
+    def test_learned_variant_specs_expand_term_and_scale_sweeps(self):
+        specs = build_learned_variant_specs(
+            {
+                "learned_top_terms": 1024,
+                "learned_top_terms_sweep": [512, 1024],
+                "learned_scale_sweep": [0.75, 1.0],
+            },
+            max_terms_override=None,
+            term_sweep_override=None,
+            scale_sweep_override=None,
+        )
+
+        self.assertEqual(
+            [(spec.name, spec.max_terms, spec.scale, spec.is_default) for spec in specs],
+            [
+                ("learned_sparse_agp_terms_512_scale_0p75", 512, 0.75, False),
+                ("learned_sparse_agp_terms_512_scale_1", 512, 1.0, False),
+                ("learned_sparse_agp", 1024, 1.0, True),
+                ("learned_sparse_agp_terms_1024_scale_0p75", 1024, 0.75, False),
+            ],
+        )
+
+    def test_best_learned_variant_uses_energy_then_fidelity(self):
+        results = {
+            "learned_sparse_agp_terms_512_scale_1": {
+                "energy_error": 3.0,
+                "ground_state_fidelity": 0.7,
+                "excitation_probability": 0.3,
+                "learned_terms": 512,
+                "learned_scale": 1.0,
+                "retained_rms_norm_fraction": 0.8,
+            },
+            "learned_sparse_agp_terms_1024_scale_1": {
+                "energy_error": 2.0,
+                "ground_state_fidelity": 0.5,
+                "excitation_probability": 0.5,
+                "learned_terms": 1024,
+                "learned_scale": 1.0,
+                "retained_rms_norm_fraction": 0.9,
+            },
+            "learned_sparse_agp_terms_2048_scale_1": {
+                "energy_error": 2.0,
+                "ground_state_fidelity": 0.8,
+                "excitation_probability": 0.2,
+                "learned_terms": 2048,
+                "learned_scale": 1.0,
+                "retained_rms_norm_fraction": 0.95,
+            },
+        }
+
+        best = select_best_learned_variant(results, metric="energy_error")
+
+        self.assertEqual(best["name"], "learned_sparse_agp_terms_2048_scale_1")
+        self.assertEqual(best["selection_metric"], "energy_error")
 
 
 if __name__ == "__main__":

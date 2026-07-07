@@ -17,9 +17,14 @@ from projected_sparse_training_common import (  # noqa: E402
     ProjectedRunSettings,
     ProjectedTrainingConfig,
     adaptive_agp_additions,
+    calibration_kwargs,
+    calibration_payload,
+    enable_projected_agp_calibration,
     export_results,
     make_optimizer,
     make_projected_model,
+    preferred_calibration_labels_from_support,
+    projected_trainable_state,
     select_device,
     split_epochs,
     train_stage,
@@ -77,6 +82,7 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
     export = training.get("export", {}) if isinstance(training, dict) else {}
     support = payload.get("support_sweep", {})
     adaptive = support.get("adaptive", {}) if isinstance(support, dict) else {}
+    calibration = calibration_payload(payload)
     return ProjectedRunSettings(
         model=model_config_from_payload(payload),
         epochs=int(parameters.get("epochs", 5000)),
@@ -98,6 +104,7 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
         residual_block_normalization=str(loss.get("residual_block_normalization", "none")),
         agp_smoothness_weight=float(loss.get("agp_smoothness", 0.0)),
         agp_curvature_weight=float(loss.get("agp_curvature", 0.0)),
+        **calibration_kwargs(calibration),
         path_images=str(export.get("path_images", "Images/")),
         path_data=str(export.get("path_data", "Models_Data/")),
     )
@@ -128,6 +135,9 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
         agp_curvature=settings.agp_curvature_weight,
+        calibration_budget=settings.calibration_budget_weight,
+        calibration_binary=settings.calibration_binary_weight,
+        calibration_scale_l2=settings.calibration_scale_l2_weight,
     )
     tau = torch.linspace(0.0, 1.0, settings.num_points, device=device).view(-1, 1)
     t = config.t_initial + config.physical_time * tau
@@ -175,8 +185,31 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
         model = make_projected_model(h0, h1, support, config, device)
         if previous_model is not None:
             transfer_projected_weights(previous_model, model)
+            previous_state = projected_trainable_state(previous_model)
+            calibration_state = previous_state.get("calibration")
+            enable_projected_agp_calibration(
+                model,
+                settings,
+                preferred_active_labels=preferred_calibration_labels_from_support(support),
+                calibration_state=calibration_state if isinstance(calibration_state, dict) else None,
+            )
+        else:
+            enable_projected_agp_calibration(
+                model,
+                settings,
+                preferred_active_labels=preferred_calibration_labels_from_support(support),
+            )
         metadata["first_commutator_nnz"] = model.first_commutator.nnz
         metadata["second_commutator_nnz"] = model.second_commutator.nnz
+        if model.has_agp_calibration():
+            metadata["agp_calibration"] = {
+                "enabled": True,
+                "training_mode": "joint_in_curriculum",
+                "target_active_terms": int(getattr(model, "agp_target_active_terms", len(model.agp_labels))),
+                "gate_temperature": float(getattr(model, "agp_gate_temperature", 1.0)),
+                "uses_ground_truth_observables": False,
+                "objective": "projected_euler_lagrange_residual_with_trainable_scale_and_gates",
+            }
 
         optimizer, optimizer_info = make_optimizer(model, settings)
         optimizer_stage_info = dict(optimizer_info)

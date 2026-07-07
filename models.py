@@ -393,6 +393,9 @@ class ProjectedSparseLossWeights:
     residual_block_normalization: str = "none"
     agp_smoothness: float = 0.0
     agp_curvature: float = 0.0
+    calibration_budget: float = 0.0
+    calibration_binary: float = 0.0
+    calibration_scale_l2: float = 0.0
 
 
 class ProjectedSparseAGPPINN(nn.Module):
@@ -505,11 +508,34 @@ class ProjectedSparseAGPPINN(nn.Module):
         t = self._time_column(t)
         tau = self._normalized_time(t)
         lam, d_lambda_dt = self.schedule(t)
+        raw_agp_coefficients = self.body(tau)
         return {
             "lambda": lam,
             "d_lambda_dt": d_lambda_dt,
-            "agp_coefficients": self.body(tau),
+            "raw_agp_coefficients": raw_agp_coefficients,
+            "agp_coefficients": self.apply_agp_calibration(raw_agp_coefficients),
         }
+
+    def has_agp_calibration(self) -> bool:
+        return hasattr(self, "agp_log_gamma") and hasattr(self, "agp_gate_logits")
+
+    def agp_calibration_gamma(self) -> torch.Tensor:
+        if not self.has_agp_calibration():
+            return torch.ones((), dtype=torch.float32, device=self.h_initial_sparse.device)
+        return torch.exp(self.agp_log_gamma)
+
+    def agp_calibration_gates(self) -> torch.Tensor:
+        if not self.has_agp_calibration():
+            return torch.ones(len(self.agp_labels), dtype=torch.float32, device=self.h_initial_sparse.device)
+        temperature = float(getattr(self, "agp_gate_temperature", 1.0))
+        return torch.sigmoid(self.agp_gate_logits / temperature)
+
+    def apply_agp_calibration(self, raw_agp_coefficients: torch.Tensor) -> torch.Tensor:
+        if not self.has_agp_calibration():
+            return raw_agp_coefficients
+        gamma = self.agp_calibration_gamma().to(raw_agp_coefficients.device)
+        gates = self.agp_calibration_gates().to(raw_agp_coefficients.device)
+        return gamma * raw_agp_coefficients * gates
 
     def sparse_operators(self, t: torch.Tensor) -> dict[str, torch.Tensor]:
         prediction = self.forward(t)
@@ -580,6 +606,25 @@ class ProjectedSparseAGPPINN(nn.Module):
                 mid_dtau = ((dtau[1:] + dtau[:-1]) / 2.0).clamp_min(torch.finfo(sorted_tau.dtype).eps)
                 second_diff = torch.diff(first_diff, dim=0) / mid_dtau[:, None]
                 agp_curvature_loss = torch.mean(second_diff.pow(2))
+        calibration_budget_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
+        calibration_binary_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
+        calibration_scale_l2_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
+        calibration_gamma = torch.ones((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
+        calibration_active_gate_sum = torch.tensor(
+            float(len(self.agp_labels)),
+            dtype=agp_l2_loss.dtype,
+            device=agp_l2_loss.device,
+        )
+        if self.has_agp_calibration():
+            gates = self.agp_calibration_gates().to(device=agp_l2_loss.device, dtype=agp_l2_loss.dtype)
+            calibration_gamma = self.agp_calibration_gamma().to(device=agp_l2_loss.device, dtype=agp_l2_loss.dtype)
+            target_active_terms = float(getattr(self, "agp_target_active_terms", len(self.agp_labels)))
+            calibration_active_gate_sum = torch.sum(gates)
+            calibration_budget_loss = (
+                (calibration_active_gate_sum - target_active_terms) / max(len(self.agp_labels), 1)
+            ) ** 2
+            calibration_binary_loss = torch.mean(gates * (1.0 - gates))
+            calibration_scale_l2_loss = (calibration_gamma - 1.0) ** 2
         total = weights.residual * residual_loss
         if weights.agp_l2 != 0.0:
             total = total + weights.agp_l2 * agp_l2_loss
@@ -587,6 +632,12 @@ class ProjectedSparseAGPPINN(nn.Module):
             total = total + weights.agp_smoothness * agp_smoothness_loss
         if weights.agp_curvature != 0.0:
             total = total + weights.agp_curvature * agp_curvature_loss
+        if weights.calibration_budget != 0.0:
+            total = total + weights.calibration_budget * calibration_budget_loss
+        if weights.calibration_binary != 0.0:
+            total = total + weights.calibration_binary * calibration_binary_loss
+        if weights.calibration_scale_l2 != 0.0:
+            total = total + weights.calibration_scale_l2 * calibration_scale_l2_loss
         diagnostics = {
             "total": total.detach(),
             "residual": residual_loss.detach(),
@@ -597,6 +648,11 @@ class ProjectedSparseAGPPINN(nn.Module):
             "agp_l2": agp_l2_loss.detach(),
             "agp_smoothness": agp_smoothness_loss.detach(),
             "agp_curvature": agp_curvature_loss.detach(),
+            "calibration_gamma": calibration_gamma.detach(),
+            "calibration_active_gate_sum": calibration_active_gate_sum.detach(),
+            "calibration_budget": calibration_budget_loss.detach(),
+            "calibration_binary": calibration_binary_loss.detach(),
+            "calibration_scale_l2": calibration_scale_l2_loss.detach(),
             "agp_terms": torch.tensor(float(len(self.agp_labels)), device=t_collocation.device),
             "hamiltonian_terms": torch.tensor(float(len(self.hamiltonian_labels)), device=t_collocation.device),
             "intermediate_terms": torch.tensor(float(len(self.intermediate_labels)), device=t_collocation.device),

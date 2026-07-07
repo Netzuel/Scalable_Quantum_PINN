@@ -61,6 +61,20 @@
     "keep_round_images": false,
     "output_root": "runs/fixed_k_holdout_feedback_v1"
   },
+  "agp_calibration": {
+    "enabled": true,
+    "gamma_lr": 0.01,
+    "gate_lr": 0.01,
+    "initial_gamma": 1.0,
+    "target_active_terms": 1024,
+    "gate_temperature": 1.0,
+    "active_logit": 4.0,
+    "inactive_logit": -8.0,
+    "budget_weight": 1.0,
+    "binary_weight": 0.001,
+    "scale_l2_weight": 0.0001,
+    "description": "Joint curriculum training of a global AGP scale and soft Pauli gates against the projected Euler-Lagrange residual. It is active from the baseline run through every holdout-feedback round and does not use final ground-state energy, fidelity, or observable targets."
+  },
   "training": {
     "device": "auto",
     "optimizer": "AdamW",
@@ -88,8 +102,12 @@
     "schedule": "sinusoidal_sin2",
     "statevector_qubits": 15,
     "evolution_steps": 96,
+    "prefer_residual_calibrated": false,
     "learned_top_terms": 1024,
-    "description": "Post-training q15 statevector diagnostic comparing final observables under no counterdiabatic drive, the Kipu/DQFM-style l=1 nested-commutator CD approximator, and the learned sparse AGP."
+    "learned_top_terms_sweep": [1024],
+    "learned_scale_sweep": [1.0],
+    "selection_metric": "energy_error",
+    "description": "Post-training q15 statevector diagnostic comparing final observables under no counterdiabatic drive, the Kipu/DQFM-style l=1 nested-commutator CD approximator, and the jointly calibrated learned sparse AGP."
   },
   "summary": {
     "top_k_overlap": 32,

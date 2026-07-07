@@ -42,6 +42,16 @@ def load_body_weights(model: torch.nn.Module, checkpoint: dict[str, object]) -> 
         if key.startswith("body.")
     }
     model.body.load_state_dict(body_state)
+    if "agp_log_gamma" in state and "agp_gate_logits" in state:
+        support_metadata = checkpoint.get("config", {}).get("support", {})
+        support_metadata = support_metadata if isinstance(support_metadata, dict) else {}
+        calibration = support_metadata.get("agp_calibration", {})
+        calibration = calibration if isinstance(calibration, dict) else {}
+        device = next(model.parameters()).device
+        model.agp_gate_temperature = float(calibration.get("gate_temperature", 1.0))
+        model.agp_target_active_terms = int(calibration.get("target_active_terms", len(model.agp_labels)))
+        model.agp_log_gamma = torch.nn.Parameter(state["agp_log_gamma"].detach().to(device).float().reshape(()))
+        model.agp_gate_logits = torch.nn.Parameter(state["agp_gate_logits"].detach().to(device).float().flatten())
 
 
 def norm_sq_subset(values: torch.Tensor, indices: list[int]) -> torch.Tensor:
