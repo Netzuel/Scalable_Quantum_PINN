@@ -59,9 +59,11 @@ The initial AGP support is selected from a bounded nested-commutator Krylov pool
 seeded by the order-1 commutator direction. The method never enumerates the full
 `4**15` basis.
 
-The active AGP support is fixed during holdout-feedback. The curriculum does
-not grow the number of neural outputs; instead, it adds hard residual equations
-to the training residual basis.
+The active AGP support has fixed cardinality during holdout-feedback. The
+curriculum does not grow the number of neural outputs; instead, it adds hard
+residual equations to the training residual basis and, in the retained
+support-swap benchmark, replaces weak AGP strings with hard residual-derived
+candidates while keeping `K` unchanged.
 
 ## Neural Architecture
 
@@ -154,12 +156,22 @@ Each round:
 2. evaluates a larger generated residual holdout basis;
 3. ranks unseen residual equations by RMS residual;
 4. adds the hardest unseen residual equations to the training residual basis;
-5. fine-tunes the same AGP coefficient functions and calibration variables.
+5. ranks AGP strings by `RMS_tau(dot(lambda) C_P(tau))`;
+6. replaces 256 weak AGP strings with hard residual-derived candidates;
+7. remaps retained output rows and gate logits by Pauli label;
+8. fine-tunes the resulting fixed-`K` AGP coefficient functions and calibration
+   variables.
+
+Candidate replacements are generated from the largest holdout residual
+directions plus their one-commutator closure with the Hamiltonian support. This
+gives the method exploratory capability without increasing the output budget or
+using the q15 final-state ground truth during training.
 
 For the current q15 run:
 
 ```text
 add_residual_terms_per_iteration = 3072
+support_swap_terms_per_iteration = 256
 final train residual equations = 50176
 final generated holdout pool = 65536
 ```
@@ -167,9 +179,9 @@ final generated holdout pool = 65536
 The final round residual diagnostics were:
 
 ```text
-training relative residual = 0.002679963
-holdout relative residual  = 0.053223804
-absolute unseen residual   = 0.000888793
+training relative residual = 0.001547411
+holdout relative residual  = 0.056218036
+absolute unseen residual   = 0.000110266
 ```
 
 The reported unseen relative residual is not meaningful in this run because the
@@ -195,29 +207,36 @@ The latest expanded-support result is:
 |---|---:|---:|---:|---:|
 | no CD | 16.8582 | 0.000287 | 0.9700 | 0.8411 |
 | Kipu/DQFM l=1 | 10.1628 | 0.02594 | 0.8441 | 0.4119 |
-| learned sparse AGP + learned schedule | 0.7002 | 0.8675 | 0.0493 | 0.0343 |
+| learned sparse AGP + learned schedule + fixed-K support swap | 0.2740 | 0.9478 | 0.0187 | 0.0138 |
 
-The previous retained width-96 fixed-SiLU benchmark had:
-
-```text
-activation = SiLU
-energy error = 1.1574
-ground fidelity = 0.7697
-```
-
-The promoted PAU activation therefore improved the retained benchmark:
+The previous retained PAU benchmark without support swaps had:
 
 ```text
-energy error improvement ~= 39.5%
-ground fidelity gain    ~= 0.0978
+energy error = 0.7002
+ground fidelity = 0.8675
 ```
 
-Two architecture/activation candidates were rejected during the same sweep:
+The promoted fixed-K support-swap curriculum therefore improved the retained
+physical benchmark:
+
+```text
+energy error improvement ~= 60.9%
+ground fidelity gain    ~= 0.0803
+```
+
+Earlier architecture/activation candidates from the PAU sweep remain rejected:
 
 | Candidate | Energy error | Ground fidelity | Reason not retained |
 |---|---:|---:|---|
 | width 128, 4 layers, SiLU | 1.2558 | 0.7410 | worse physical metrics |
 | width 96, 4 layers, trainable SiLU | 1.1214 | 0.7789 | improved over SiLU but worse than PAU |
+
+The final support-swap holdout residual (`0.0562`) is slightly worse than the
+previous no-swap PAU holdout residual (`0.0532`). The method is nevertheless
+retained because the physical validation improved substantially: final energy,
+ground-state fidelity, `<Z_i>`, and `<Z_i Z_{i+1}>` all moved closer to the
+exact q15 final ground-state diagnostics. This reinforces that the projected
+residual is a necessary diagnostic, not the only benchmark objective.
 
 The learned row uses the exported learned schedule grid from the trained AGP
 checkpoint. The no-CD and Kipu/DQFM l=1 rows use the fixed reference

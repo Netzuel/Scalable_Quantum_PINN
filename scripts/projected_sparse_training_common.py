@@ -929,6 +929,239 @@ def adaptive_agp_additions(
     return expanded, additions, ranked
 
 
+def _importance_score(row: dict[str, object], *keys: str) -> float:
+    for key in keys:
+        value = row.get(key)
+        if value is not None:
+            return float(value)
+    return 0.0
+
+
+def _top_protected_labels(
+    labels: list[str],
+    coefficient_importance: list[dict[str, object]],
+    *,
+    protect_top_fraction: float,
+) -> set[str]:
+    if protect_top_fraction <= 0.0:
+        return set()
+    scores = {
+        str(row["label"]): _importance_score(row, "rms", "importance")
+        for row in coefficient_importance
+        if isinstance(row, dict) and "label" in row
+    }
+    ranked = sorted(labels, key=lambda label: (scores.get(label, 0.0), -pauli_weight(label), label), reverse=True)
+    count = max(1, min(len(ranked), int(math.ceil(float(protect_top_fraction) * len(ranked)))))
+    return set(ranked[:count])
+
+
+def hard_residual_agp_candidates(
+    *,
+    residual_spectrum: list[dict[str, object]],
+    h0: SparsePauliOperator,
+    h1: SparsePauliOperator,
+    current_agp_labels: Iterable[str],
+    candidate_pool_size: int,
+) -> list[dict[str, object]]:
+    """Generate candidate AGP labels from hard holdout residual directions.
+
+    The direct hard residual strings are included, and a one-commutator closure
+    with the Hamiltonian support is also scored. This keeps the candidate pool
+    finite while allowing residual directions to suggest nearby AGP terms.
+    """
+
+    current = {str(label) for label in current_agp_labels}
+    identity = "I" * h0.n_qubits
+    limit = max(1, int(candidate_pool_size))
+    residual_scores: dict[str, float] = {}
+    for row in residual_spectrum[:limit]:
+        if not isinstance(row, dict) or "label" not in row:
+            continue
+        label = str(row["label"])
+        if len(label) != h0.n_qubits:
+            continue
+        score = _importance_score(row, "residual_rms", "rms")
+        if score <= 0.0:
+            continue
+        residual_scores[label] = max(residual_scores.get(label, 0.0), score)
+
+    h_score = hamiltonian_importance(h0, h1)
+    closure_scores = commutator_generated_scores(residual_scores, h_score)
+    candidate_scores = merge_scores(residual_scores, closure_scores)
+    ranked = ranked_label_scores(candidate_scores)
+    candidates: list[dict[str, object]] = []
+    for label, score in ranked:
+        if label == identity or label in current:
+            continue
+        candidates.append(
+            {
+                "label": label,
+                "score": float(score),
+                "order": pauli_weight(label),
+                "source": "hard_residual_or_hamiltonian_commutator",
+            }
+        )
+    return candidates
+
+
+def plan_fixed_k_support_swap(
+    *,
+    current_agp_labels: list[str],
+    coefficient_importance: list[dict[str, object]],
+    residual_spectrum: list[dict[str, object]],
+    h0: SparsePauliOperator,
+    h1: SparsePauliOperator,
+    max_swaps: int,
+    candidate_pool_size: int,
+    protect_top_fraction: float = 0.0,
+) -> dict[str, object]:
+    """Plan a fixed-K AGP support swap from weak active terms to hard candidates."""
+
+    labels = sort_pauli_labels(current_agp_labels)
+    requested = max(0, min(int(max_swaps), len(labels)))
+    if requested == 0:
+        return {
+            "enabled": True,
+            "swap_count": 0,
+            "new_agp_labels": labels,
+            "removed_labels": [],
+            "added_labels": [],
+            "candidate_labels": [],
+            "reason": "no_requested_swaps",
+        }
+
+    scores = {
+        str(row["label"]): _importance_score(row, "rms", "importance")
+        for row in coefficient_importance
+        if isinstance(row, dict) and "label" in row
+    }
+    protected = _top_protected_labels(
+        labels,
+        coefficient_importance,
+        protect_top_fraction=protect_top_fraction,
+    )
+    removable = [label for label in labels if label not in protected]
+    removable = sorted(removable, key=lambda label: (scores.get(label, 0.0), pauli_weight(label), label))
+    candidates = hard_residual_agp_candidates(
+        residual_spectrum=residual_spectrum,
+        h0=h0,
+        h1=h1,
+        current_agp_labels=labels,
+        candidate_pool_size=candidate_pool_size,
+    )
+    added: list[str] = []
+    seen = set(labels)
+    for row in candidates:
+        label = str(row["label"])
+        if label in seen:
+            continue
+        added.append(label)
+        seen.add(label)
+        if len(added) >= min(requested, len(removable)):
+            break
+
+    swap_count = min(len(added), len(removable))
+    removed = removable[:swap_count]
+    added = added[:swap_count]
+    new_labels = sort_pauli_labels((set(labels) - set(removed)) | set(added))
+    return {
+        "enabled": True,
+        "swap_count": int(swap_count),
+        "new_agp_labels": new_labels,
+        "removed_labels": removed,
+        "added_labels": added,
+        "candidate_labels": [str(row["label"]) for row in candidates],
+        "candidate_rows": candidates[: max(len(added), 32)],
+        "protected_label_count": len(protected),
+        "protect_top_fraction": float(protect_top_fraction),
+        "reason": "planned" if swap_count else "no_candidates",
+    }
+
+
+def _clone_trainable_state_value(value: object) -> object:
+    if isinstance(value, torch.Tensor):
+        return value.detach().clone()
+    if isinstance(value, dict):
+        return {str(key): _clone_trainable_state_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return list(value)
+    return value
+
+
+def _remap_output_axis_tensor(
+    tensor: torch.Tensor,
+    *,
+    old_labels: list[str],
+    new_labels: list[str],
+    removed_labels: list[str],
+) -> torch.Tensor:
+    old_index = {label: idx for idx, label in enumerate(old_labels)}
+    donor_indices = [old_index[label] for label in removed_labels if label in old_index]
+    if not donor_indices:
+        donor_indices = [0]
+    out = tensor.detach().clone()
+    for new_idx, label in enumerate(new_labels):
+        old_idx = old_index.get(label)
+        if old_idx is None:
+            old_idx = donor_indices[new_idx % len(donor_indices)]
+        out[new_idx] = tensor[old_idx]
+    return out
+
+
+def remap_trainable_state_for_agp_labels(
+    state: dict[str, object],
+    *,
+    old_labels: list[str],
+    new_labels: list[str],
+    removed_labels: list[str],
+    added_labels: list[str],
+    new_gate_logit: float,
+) -> dict[str, object]:
+    """Remap fixed-K trainable state after AGP labels are swapped.
+
+    Hidden weights and schedule state are preserved. Final output rows are
+    transferred by Pauli label for retained terms; newly added labels reuse rows
+    from removed weak terms so they start near the discarded tail rather than
+    from unrelated high-importance outputs. Calibration logits for new labels
+    are initialized explicitly so the gates can explore them immediately.
+    """
+
+    if len(old_labels) != len(new_labels):
+        raise ValueError("Fixed-K support remapping requires old and new label lists with the same length.")
+    old_labels = [str(label) for label in old_labels]
+    new_labels = [str(label) for label in new_labels]
+    removed_labels = [str(label) for label in removed_labels]
+    added_set = {str(label) for label in added_labels}
+
+    remapped = {str(key): _clone_trainable_state_value(value) for key, value in state.items()}
+    body = remapped.get("body")
+    if isinstance(body, dict):
+        for key, value in list(body.items()):
+            if isinstance(value, torch.Tensor) and value.shape[:1] == (len(old_labels),):
+                body[key] = _remap_output_axis_tensor(
+                    value,
+                    old_labels=old_labels,
+                    new_labels=new_labels,
+                    removed_labels=removed_labels,
+                )
+
+    calibration = remapped.get("calibration")
+    if isinstance(calibration, dict):
+        logits = calibration.get("gate_logits")
+        if isinstance(logits, torch.Tensor) and logits.numel() == len(old_labels):
+            old_index = {label: idx for idx, label in enumerate(old_labels)}
+            new_logits = logits.detach().clone().flatten()
+            for new_idx, label in enumerate(new_labels):
+                if label in added_set or label not in old_index:
+                    new_logits[new_idx] = float(new_gate_logit)
+                else:
+                    new_logits[new_idx] = logits.flatten()[old_index[label]]
+            calibration["gate_logits"] = new_logits
+        calibration["agp_labels"] = list(new_labels)
+    remapped["agp_labels"] = list(new_labels)
+    return remapped
+
+
 def train_stage(
     model: ProjectedSparseAGPPINN,
     optimizer: torch.optim.Optimizer,

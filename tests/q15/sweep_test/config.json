@@ -65,8 +65,17 @@
       "layer_type": "quadratic",
       "description": "Train or reuse the retained SiLU baseline checkpoint, then warm-start the PAU feedback model from that checkpoint. This makes the PAU benchmark reproducible even from a cleaned q15 folder."
     },
+    "support_swap": {
+      "enabled": true,
+      "terms_per_iteration": 256,
+      "start_round": 2,
+      "candidate_pool_multiplier": 16,
+      "protect_top_fraction": 0.02,
+      "new_gate_logit": 2.0,
+      "description": "Fixed-K support-swap curriculum: after each trained round, replace weak low-importance AGP strings with hard residual-derived candidates while keeping K unchanged."
+    },
     "keep_round_images": false,
-    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_v1"
+    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_v1"
   },
   "agp_calibration": {
     "enabled": true,

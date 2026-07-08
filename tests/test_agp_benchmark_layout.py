@@ -40,6 +40,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "tests/test_q15_physical_validation.py",
             "tests/test_agp_joint_calibration.py",
             "tests/test_agp_residual_calibration.py",
+            "tests/test_agp_support_swap.py",
             "tests/test_q20_guarded_curriculum.py",
             "tests/test_qiskit_hamiltonian_generator.py",
             "tests/test_sparse_pauli.py",

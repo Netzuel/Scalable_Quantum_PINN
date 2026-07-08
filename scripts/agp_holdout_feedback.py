@@ -4,7 +4,7 @@ import argparse
 import copy
 import json
 import shutil
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from decimal import Decimal, getcontext
 from pathlib import Path
 
@@ -36,12 +36,14 @@ from projected_sparse_training_common import (  # noqa: E402
     export_results,
     make_optimizer,
     make_projected_model,
+    plan_fixed_k_support_swap,
     plot_connection_summary,
     plot_support_map,
     preferred_calibration_labels_from_support,
     projected_trainable_state,
     projected_trainable_state_from_checkpoint,
     rank_coefficients,
+    remap_trainable_state_for_agp_labels,
     restore_projected_trainable_state,
     select_device,
     set_paper_style,
@@ -61,6 +63,16 @@ RUN_DIR = Path.cwd()
 DEFAULT_CONFIG = Path("config.json")
 ROUND_RUNS_DIRNAME = "rounds"
 LEGACY_ROUND_RUNS_DIRNAME = "runs"
+
+
+@dataclass(frozen=True)
+class SupportSwapSettings:
+    enabled: bool = False
+    terms_per_iteration: int = 0
+    start_round: int = 2
+    candidate_pool_multiplier: int = 16
+    protect_top_fraction: float = 0.02
+    new_gate_logit: float = 2.0
 
 
 def configure_run_dir(config_path: Path) -> None:
@@ -84,6 +96,39 @@ def normalize_round_run_label(label: object) -> str:
 def load_checkpoint_labels(checkpoint_path: Path) -> tuple[list[str], list[str]]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     return [str(label) for label in checkpoint["agp_labels"]], [str(label) for label in checkpoint["residual_labels"]]
+
+
+def support_swap_settings_from_feedback(feedback: dict[str, object]) -> SupportSwapSettings:
+    raw = feedback.get("support_swap", {})
+    if not isinstance(raw, dict):
+        return SupportSwapSettings()
+    return SupportSwapSettings(
+        enabled=bool(raw.get("enabled", False)),
+        terms_per_iteration=max(0, int(raw.get("terms_per_iteration", 0))),
+        start_round=max(1, int(raw.get("start_round", 2))),
+        candidate_pool_multiplier=max(1, int(raw.get("candidate_pool_multiplier", 16))),
+        protect_top_fraction=max(0.0, float(raw.get("protect_top_fraction", 0.02))),
+        new_gate_logit=float(raw.get("new_gate_logit", 2.0)),
+    )
+
+
+def compact_support_swap_plan(plan: dict[str, object] | None, *, preview_terms: int = 32) -> dict[str, object]:
+    if not plan:
+        return {"enabled": False, "swap_count": 0}
+    preview = max(0, int(preview_terms))
+    compact: dict[str, object] = {
+        "enabled": bool(plan.get("enabled", False)),
+        "swap_count": int(plan.get("swap_count", 0)),
+        "reason": str(plan.get("reason", "unknown")),
+    }
+    for key in ("removed_labels", "added_labels", "candidate_rows"):
+        values = plan.get(key, [])
+        if isinstance(values, list):
+            compact[key] = values[:preview]
+    for key in ("protected_label_count", "protect_top_fraction"):
+        if key in plan:
+            compact[key] = plan[key]
+    return compact
 
 
 def payload_with_feedback_baseline_neural(payload: dict[str, object]) -> dict[str, object]:
@@ -112,6 +157,19 @@ def load_body_state_from_checkpoint(checkpoint_path: Path) -> dict[str, torch.Te
     if not isinstance(body_state, dict):
         raise TypeError(f"Missing body state in {checkpoint_path}.")
     return {str(key): value for key, value in body_state.items() if isinstance(value, torch.Tensor)}
+
+
+def load_coefficient_importance_rows(run_dir: Path) -> list[dict[str, object]]:
+    path = run_dir / "Models_Data" / "coefficient_importance.json"
+    if not path.is_file():
+        return []
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("all_terms", [])
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def select_residual_additions(
@@ -173,6 +231,7 @@ def train_feedback_round(
     trainable_state: dict[str, object],
     round_index: int,
     additions: list[dict[str, object]],
+    support_swap_plan: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], dict[str, float], dict[str, object]]:
     config = settings.model
     torch.manual_seed(settings.seed + round_index)
@@ -237,6 +296,7 @@ def train_feedback_round(
     metadata["feedback_round"] = round_index
     metadata["feedback_added_terms"] = additions
     metadata["feedback_added_term_count"] = len(additions)
+    metadata["support_swap"] = compact_support_swap_plan(support_swap_plan)
     metadata["adaptive_enabled"] = False
     metadata["final_agp_terms"] = len(model.agp_labels)
     metadata["final_intermediate_terms"] = len(model.intermediate_labels)
@@ -774,6 +834,7 @@ def main() -> None:
     lr = float(args.lr if args.lr is not None else feedback.get("lr", 1e-5))
     device_name = str(args.device if args.device is not None else feedback.get("device", "auto"))
     min_rms = float(args.min_rms if args.min_rms is not None else feedback.get("min_rms", 0.0))
+    support_swap_settings = support_swap_settings_from_feedback(feedback)
     output_root_arg = args.output_root if args.output_root is not None else Path(str(feedback.get("output_root", "runs/holdout_feedback")))
     baseline_root_arg = args.baseline_root if args.baseline_root is not None else Path(str(feedback.get("baseline_root", "runs/baselines")))
     keep_round_images = bool(args.keep_round_images or feedback.get("keep_round_images", False))
@@ -892,6 +953,15 @@ def main() -> None:
         top_stability=0.0,
         top_fraction=0.10,
     )
+    hamiltonian_path = Path(feedback_settings.model.hamiltonian_source)
+    if not hamiltonian_path.is_absolute():
+        hamiltonian_path = ROOT / hamiltonian_path
+    h0_swap, h1_swap = load_pauli_hamiltonian_pair(
+        hamiltonian_path,
+        system=feedback_settings.model.system,
+        n_qubits=feedback_settings.model.n_qubits,
+        distance=feedback_settings.model.distance,
+    )
     if existing_state is None:
         rows: list[dict[str, object]] = []
         spectra: dict[int, list[dict[str, object]]] = {}
@@ -942,6 +1012,42 @@ def main() -> None:
             trainable_state = projected_trainable_state_from_checkpoint(last_checkpoint)
 
     for round_index in range(completed_round + 1, rounds + 1):
+        previous_run = base_run if round_index == 1 else round_run_dir(output_dir, round_index - 1)
+        support_swap_plan: dict[str, object] = {"enabled": False, "swap_count": 0}
+        if (
+            support_swap_settings.enabled
+            and support_swap_settings.terms_per_iteration > 0
+            and round_index >= support_swap_settings.start_round
+        ):
+            old_agp_labels = list(agp_labels)
+            support_swap_plan = plan_fixed_k_support_swap(
+                current_agp_labels=old_agp_labels,
+                coefficient_importance=load_coefficient_importance_rows(previous_run),
+                residual_spectrum=spectra[round_index - 1],
+                h0=h0_swap,
+                h1=h1_swap,
+                max_swaps=support_swap_settings.terms_per_iteration,
+                candidate_pool_size=(
+                    support_swap_settings.terms_per_iteration
+                    * support_swap_settings.candidate_pool_multiplier
+                ),
+                protect_top_fraction=support_swap_settings.protect_top_fraction,
+            )
+            if int(support_swap_plan.get("swap_count", 0)) > 0:
+                agp_labels = [str(label) for label in support_swap_plan["new_agp_labels"]]
+                trainable_state = remap_trainable_state_for_agp_labels(
+                    trainable_state,
+                    old_labels=old_agp_labels,
+                    new_labels=agp_labels,
+                    removed_labels=[str(label) for label in support_swap_plan.get("removed_labels", [])],
+                    added_labels=[str(label) for label in support_swap_plan.get("added_labels", [])],
+                    new_gate_logit=support_swap_settings.new_gate_logit,
+                )
+                print(
+                    f"support_swap_round={round_index} swapped={support_swap_plan['swap_count']} "
+                    f"removed={support_swap_plan.get('removed_labels', [])[:5]} "
+                    f"added={support_swap_plan.get('added_labels', [])[:5]}"
+                )
         additions = select_residual_additions(
             spectra[round_index - 1],
             current_residual_labels,
@@ -964,6 +1070,7 @@ def main() -> None:
             trainable_state=trainable_state,
             round_index=round_index,
             additions=additions,
+            support_swap_plan=support_swap_plan,
         )
         row, spectrum = evaluate_one_run(
             run_dir=round_run,
@@ -1006,6 +1113,7 @@ def main() -> None:
                     "final_intermediate_terms": metadata["final_intermediate_terms"],
                     "final_residual_terms": metadata["final_residual_terms"],
                 },
+                "support_swap": metadata.get("support_swap", {"enabled": False, "swap_count": 0}),
             }
         )
         print(

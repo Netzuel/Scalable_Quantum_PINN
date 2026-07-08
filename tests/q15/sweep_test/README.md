@@ -31,9 +31,11 @@ The baseline support is selected from a bounded nested-commutator Krylov pool
 seeded by the order-1 direction `i[H, dH]`. This never enumerates the full
 `4**15` basis; the support is a deliberate sparse research choice.
 
-Feedback keeps the AGP support fixed. Each round evaluates a larger residual
-holdout basis, adds the highest-RMS unseen residual equations to the training
-residual basis, and fine-tunes the same coefficient functions.
+Feedback keeps the AGP support size fixed at `K=32768`. Each round evaluates a
+larger residual holdout basis, adds the highest-RMS unseen residual equations
+to the training residual basis, swaps 256 weak AGP strings for hard
+residual-derived candidates, remaps retained output rows by Pauli label, and
+fine-tunes the same coefficient functions.
 
 The current residual-feedback budget uses `intermediate_top_k = 32768`,
 `Q = 65536`, and `add_residual_terms_per_iteration = 3072`. The final trained
@@ -49,7 +51,7 @@ Generated artifacts are ignored by git and written under:
 
 ```text
 runs/baselines/agp_32768/
-runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_v1/agp_32768_residual_65536_add_3072_rounds_15/
+runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_v1/agp_32768_residual_65536_add_3072_rounds_15/
 runs/support_sweep_summary/
 ```
 
