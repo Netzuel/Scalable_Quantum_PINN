@@ -188,6 +188,8 @@ def train_feedback_round(
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
         agp_curvature=settings.agp_curvature_weight,
+        schedule_monotonic=settings.schedule_monotonic_weight,
+        schedule_correction_l2=settings.schedule_correction_l2_weight,
         calibration_budget=settings.calibration_budget_weight,
         calibration_binary=settings.calibration_binary_weight,
         calibration_scale_l2=settings.calibration_scale_l2_weight,

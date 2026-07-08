@@ -1085,6 +1085,8 @@ def train_coupled_round(
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
         agp_curvature=settings.agp_curvature_weight,
+        schedule_monotonic=settings.schedule_monotonic_weight,
+        schedule_correction_l2=settings.schedule_correction_l2_weight,
     )
     tau = torch.linspace(0.0, 1.0, settings.num_points, device=device).view(-1, 1)
     t = config.t_initial + config.physical_time * tau

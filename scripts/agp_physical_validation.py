@@ -303,6 +303,8 @@ def learned_term_selection(coefficient_path: Path, max_terms: int) -> dict[str, 
     labels = [str(label) for label in payload["pauli_labels"]]
     coefficients = np.asarray(payload["counterdiabatic_coefficients"], dtype=np.float64)
     tau_grid = np.asarray(payload["tau"], dtype=np.float64).reshape(-1)
+    lambda_grid = np.asarray(payload.get("lambda", []), dtype=np.float64).reshape(-1)
+    d_lambda_dt_grid = np.asarray(payload.get("d_lambda_dt", []), dtype=np.float64).reshape(-1)
     rms = np.sqrt(np.mean(coefficients * coefficients, axis=0))
     ranking = np.argsort(-rms)
     selected_idx = ranking[: min(int(max_terms), len(ranking))]
@@ -310,6 +312,8 @@ def learned_term_selection(coefficient_path: Path, max_terms: int) -> dict[str, 
     retained_norm_sq = float(np.sum(rms[selected_idx] * rms[selected_idx]))
     return {
         "tau": tau_grid,
+        "lambda": lambda_grid if lambda_grid.shape == tau_grid.shape else None,
+        "d_lambda_dt": d_lambda_dt_grid if d_lambda_dt_grid.shape == tau_grid.shape else None,
         "labels": [labels[idx] for idx in selected_idx],
         "coefficients": coefficients[:, selected_idx],
         "selected_indices": [int(idx) for idx in selected_idx],
@@ -319,6 +323,7 @@ def learned_term_selection(coefficient_path: Path, max_terms: int) -> dict[str, 
         "retained_rms_norm_sq": retained_norm_sq,
         "total_rms_norm_sq": total_norm_sq,
         "retained_rms_norm_fraction": retained_norm_sq / total_norm_sq if total_norm_sq > 0.0 else 0.0,
+        "schedule_source": payload.get("schedule", "exported_agp_coefficients"),
     }
 
 
@@ -331,6 +336,8 @@ def subset_learned_terms(learned: Mapping[str, object], max_terms: int) -> dict[
     retained_norm_sq = float(np.sum(np.asarray(selected_rms, dtype=np.float64) ** 2))
     return {
         "tau": learned["tau"],
+        "lambda": learned.get("lambda"),
+        "d_lambda_dt": learned.get("d_lambda_dt"),
         "labels": labels,
         "coefficients": coefficients,
         "selected_indices": selected_indices,
@@ -358,6 +365,22 @@ def interpolate_coefficients(tau_grid: np.ndarray, coefficients: np.ndarray, tau
     return (1.0 - weight) * coefficients[lower] + weight * coefficients[upper]
 
 
+def interpolate_scalar(tau_grid: np.ndarray, values: np.ndarray, tau: float) -> float:
+    return float(interpolate_coefficients(tau_grid, values[:, None], tau)[0])
+
+
+def learned_schedule(learned: Mapping[str, object], t: float, total_time: float) -> tuple[float, float]:
+    tau_grid = np.asarray(learned["tau"], dtype=np.float64)
+    lambda_grid = learned.get("lambda")
+    d_lambda_dt_grid = learned.get("d_lambda_dt")
+    if lambda_grid is None or d_lambda_dt_grid is None:
+        return schedule_sin2(t, total_time)
+    tau = float(t) / float(total_time)
+    lam = interpolate_scalar(tau_grid, np.asarray(lambda_grid, dtype=np.float64), tau)
+    dlam_dt = interpolate_scalar(tau_grid, np.asarray(d_lambda_dt_grid, dtype=np.float64), tau)
+    return lam, dlam_dt
+
+
 def evolve_state(
     *,
     protocol: str,
@@ -369,6 +392,7 @@ def evolve_state(
     total_time: float,
     steps: int,
     learned_scale: float = 1.0,
+    schedule: Mapping[str, object] | None = None,
 ) -> np.ndarray:
     n_qubits = h0.n_qubits
     dim = 1 << n_qubits
@@ -376,7 +400,10 @@ def evolve_state(
     dt = float(total_time) / int(steps)
 
     def h_apply(t: float, state: np.ndarray) -> np.ndarray:
-        lam, dlam_dt = schedule_sin2(t, total_time)
+        if schedule is None:
+            lam, dlam_dt = schedule_sin2(t, total_time)
+        else:
+            lam, dlam_dt = learned_schedule(schedule, t, total_time)
         out = (1.0 - lam) * apply_pauli_sum(state, h0.terms, h0_actions)
         out += lam * final_energies * state
         if protocol in {"nested_l1", "kipu_dqfm_l1"}:
@@ -647,6 +674,7 @@ def main() -> None:
             total_time=total_time,
             steps=steps,
             learned_scale=spec.scale,
+            schedule=learned,
         )
         row = protocol_metrics(
             psi,
@@ -686,6 +714,9 @@ def main() -> None:
         "n_qubits": n_qubits,
         "hilbert_dimension": int(1 << n_qubits),
         "schedule": "sinusoidal_sin2",
+        "learned_protocol_schedule": (
+            "exported_lambda_grid" if default_learned.get("lambda") is not None else "sinusoidal_sin2"
+        ),
         "total_time": total_time,
         "steps": steps,
         "ground_energy": ground_energy,

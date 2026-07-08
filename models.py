@@ -393,6 +393,8 @@ class ProjectedSparseLossWeights:
     residual_block_normalization: str = "none"
     agp_smoothness: float = 0.0
     agp_curvature: float = 0.0
+    schedule_monotonic: float = 0.0
+    schedule_correction_l2: float = 0.0
     calibration_budget: float = 0.0
     calibration_binary: float = 0.0
     calibration_scale_l2: float = 0.0
@@ -500,21 +502,91 @@ class ProjectedSparseAGPPINN(nn.Module):
     def _normalized_time(self, t: torch.Tensor) -> torch.Tensor:
         return (t - self.t_min) / (self.t_max - self.t_min)
 
+    def has_trainable_schedule(self) -> bool:
+        return hasattr(self, "schedule_body")
+
+    def enable_trainable_schedule(
+        self,
+        *,
+        hidden_width: int = 16,
+        hidden_layers: int = 1,
+        activation: str = "tanh",
+        base: str = "sinusoidal_sin2",
+        correction_amplitude: float = 2.4,
+    ) -> None:
+        self.schedule_base = str(base)
+        self.schedule_correction_amplitude = float(correction_amplitude)
+        self.schedule_body = MLP(
+            1,
+            1,
+            hidden_width=int(hidden_width),
+            hidden_layers=int(hidden_layers),
+            activation=str(activation),
+        )
+        final_linear = [module for module in self.schedule_body.network if isinstance(module, nn.Linear)][-1]
+        nn.init.constant_(final_linear.weight, 0.0)
+        nn.init.constant_(final_linear.bias, 0.0)
+        self.schedule_body.to(next(self.parameters()).device)
+
+    def _base_schedule(self, t: torch.Tensor, tau: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        base = str(getattr(self, "schedule_base", "sinusoidal_sin2")).lower()
+        if base in {"sinusoidal_sin2", "sin2", "fixed_sinusoidal"}:
+            return fixed_sinusoidal_schedule(t, t_min=self.t_min, t_max=self.t_max)
+        if base in {"smoothstep", "cubic_smoothstep"}:
+            lam = 3.0 * tau.pow(2) - 2.0 * tau.pow(3)
+            d_lambda_dt = (6.0 * tau - 6.0 * tau.pow(2)) / (self.t_max - self.t_min)
+            start_mask = tau <= 0.0
+            end_mask = tau >= 1.0
+            lam = torch.where(start_mask, torch.zeros_like(lam), lam)
+            lam = torch.where(end_mask, torch.ones_like(lam), lam)
+            d_lambda_dt = torch.where(start_mask | end_mask, torch.zeros_like(d_lambda_dt), d_lambda_dt)
+            return lam, d_lambda_dt
+        raise ValueError(f"Unsupported schedule base {base!r}.")
+
     def schedule(self, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         t = self._time_column(t)
-        return fixed_sinusoidal_schedule(t, t_min=self.t_min, t_max=self.t_max)
+        if not self.has_trainable_schedule():
+            return fixed_sinusoidal_schedule(t, t_min=self.t_min, t_max=self.t_max)
+        with torch.enable_grad():
+            t_for_grad = t
+            if not t_for_grad.requires_grad:
+                t_for_grad = t_for_grad.detach().clone().requires_grad_(True)
+            tau = self._normalized_time(t_for_grad)
+            base_lam, _ = self._base_schedule(t_for_grad, tau)
+            envelope = tau.pow(2) * (1.0 - tau).pow(2)
+            raw_schedule = self.schedule_body(tau)
+            correction = float(getattr(self, "schedule_correction_amplitude", 2.4)) * envelope * torch.tanh(raw_schedule)
+            lam = base_lam + correction
+            d_lambda_dt = torch.autograd.grad(lam.sum(), t_for_grad, create_graph=True)[0]
+            start_mask = tau <= 0.0
+            end_mask = tau >= 1.0
+            lam = torch.where(start_mask, torch.zeros_like(lam), lam)
+            lam = torch.where(end_mask, torch.ones_like(lam), lam)
+            d_lambda_dt = torch.where(start_mask | end_mask, torch.zeros_like(d_lambda_dt), d_lambda_dt)
+            self._last_schedule_prediction = {
+                "base_lambda": base_lam,
+                "correction": correction,
+                "raw": raw_schedule,
+            }
+            return lam, d_lambda_dt
 
     def forward(self, t: torch.Tensor) -> dict[str, torch.Tensor]:
         t = self._time_column(t)
         tau = self._normalized_time(t)
         lam, d_lambda_dt = self.schedule(t)
         raw_agp_coefficients = self.body(tau)
-        return {
+        output = {
             "lambda": lam,
             "d_lambda_dt": d_lambda_dt,
             "raw_agp_coefficients": raw_agp_coefficients,
             "agp_coefficients": self.apply_agp_calibration(raw_agp_coefficients),
         }
+        if self.has_trainable_schedule():
+            schedule_prediction = getattr(self, "_last_schedule_prediction", {})
+            output["schedule_base_lambda"] = schedule_prediction.get("base_lambda", torch.zeros_like(lam))
+            output["schedule_correction"] = schedule_prediction.get("correction", torch.zeros_like(lam))
+            output["schedule_raw"] = schedule_prediction.get("raw", torch.zeros_like(lam))
+        return output
 
     def has_agp_calibration(self) -> bool:
         return hasattr(self, "agp_log_gamma") and hasattr(self, "agp_gate_logits")
@@ -606,6 +678,11 @@ class ProjectedSparseAGPPINN(nn.Module):
                 mid_dtau = ((dtau[1:] + dtau[:-1]) / 2.0).clamp_min(torch.finfo(sorted_tau.dtype).eps)
                 second_diff = torch.diff(first_diff, dim=0) / mid_dtau[:, None]
                 agp_curvature_loss = torch.mean(second_diff.pow(2))
+        schedule_monotonic_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
+        schedule_correction_l2_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
+        if self.has_trainable_schedule():
+            schedule_monotonic_loss = torch.mean(torch.relu(-prediction["d_lambda_dt"]).pow(2))
+            schedule_correction_l2_loss = torch.mean(prediction["schedule_correction"].pow(2))
         calibration_budget_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
         calibration_binary_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
         calibration_scale_l2_loss = torch.zeros((), dtype=agp_l2_loss.dtype, device=agp_l2_loss.device)
@@ -632,6 +709,10 @@ class ProjectedSparseAGPPINN(nn.Module):
             total = total + weights.agp_smoothness * agp_smoothness_loss
         if weights.agp_curvature != 0.0:
             total = total + weights.agp_curvature * agp_curvature_loss
+        if weights.schedule_monotonic != 0.0:
+            total = total + weights.schedule_monotonic * schedule_monotonic_loss
+        if weights.schedule_correction_l2 != 0.0:
+            total = total + weights.schedule_correction_l2 * schedule_correction_l2_loss
         if weights.calibration_budget != 0.0:
             total = total + weights.calibration_budget * calibration_budget_loss
         if weights.calibration_binary != 0.0:
@@ -648,6 +729,8 @@ class ProjectedSparseAGPPINN(nn.Module):
             "agp_l2": agp_l2_loss.detach(),
             "agp_smoothness": agp_smoothness_loss.detach(),
             "agp_curvature": agp_curvature_loss.detach(),
+            "schedule_monotonic": schedule_monotonic_loss.detach(),
+            "schedule_correction_l2": schedule_correction_l2_loss.detach(),
             "calibration_gamma": calibration_gamma.detach(),
             "calibration_active_gate_sum": calibration_active_gate_sum.detach(),
             "calibration_budget": calibration_budget_loss.detach(),

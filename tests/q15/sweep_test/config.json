@@ -8,7 +8,7 @@
       "t_initial": 0.0,
       "T": 1.0,
       "tau_range": [0.0, 1.0],
-      "schedule": "sinusoidal_sin2"
+      "schedule": "trainable_bounded_envelope_sin2"
     }
   },
   "neural": {
@@ -25,14 +25,14 @@
   "default_pipeline": {
     "name": "q15_fixed_k_holdout_feedback_physical_validation",
     "entrypoint": "scripts/agp_holdout_feedback.py",
-    "agp_terms": 16384,
-    "description": "Fixed K=4**7 AGP support selected from a bounded nested-commutator Krylov pool; ten feedback iterations add hard residual equations from a larger Q=32768 residual holdout pool without growing AGP outputs."
+    "agp_terms": 32768,
+    "description": "Fixed K=32768 AGP support selected from a bounded nested-commutator Krylov pool; fifteen feedback iterations add hard residual equations from a larger Q=65536 residual holdout pool without growing AGP outputs."
   },
   "support_sweep": {
-    "agp_terms": [16384],
+    "agp_terms": [32768],
     "output_root": "runs/baselines",
-    "intermediate_top_k": 16384,
-    "residual_top_k": 2048,
+    "intermediate_top_k": 32768,
+    "residual_top_k": 4096,
     "residual_projection": "largest_generated_commutator_terms",
     "agp_support_selection": {
       "strategy": "nested_commutator_krylov_pool",
@@ -46,10 +46,10 @@
     }
   },
   "holdout_feedback": {
-    "base_agp_terms": 16384,
-    "holdout_residual_top_k": 32768,
-    "iterations": 10,
-    "add_residual_terms_per_iteration": 2048,
+    "base_agp_terms": 32768,
+    "holdout_residual_top_k": 65536,
+    "iterations": 15,
+    "add_residual_terms_per_iteration": 3072,
     "unseen_residual_batches_after_final_iteration": 1,
     "epochs_per_iteration": 1000,
     "lr": 1e-5,
@@ -59,14 +59,14 @@
     "unseen_threshold": 1.0,
     "baseline_root": "runs/baselines",
     "keep_round_images": false,
-    "output_root": "runs/fixed_k_holdout_feedback_v1"
+    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_v1"
   },
   "agp_calibration": {
     "enabled": true,
     "gamma_lr": 0.01,
     "gate_lr": 0.01,
     "initial_gamma": 1.0,
-    "target_active_terms": 1024,
+    "target_active_terms": 2048,
     "gate_temperature": 1.0,
     "active_logit": 4.0,
     "inactive_logit": -8.0,
@@ -86,7 +86,9 @@
     },
     "loss": {
       "residual": 1.0,
-      "agp_l2": 1e-8
+      "agp_l2": 1e-8,
+      "schedule_monotonic": 10.0,
+      "schedule_correction_l2": 0.0001
     },
     "export": {
       "path_images": "Images/",
@@ -96,6 +98,16 @@
       "format": "pdf"
     }
   },
+  "schedule_optimization": {
+    "enabled": true,
+    "base": "sinusoidal_sin2",
+    "correction_amplitude": 2.4,
+    "hidden_width": 16,
+    "hidden_layers": 1,
+    "activation": "tanh",
+    "lr": 0.001,
+    "description": "Trainable scheduling function lambda(t)=lambda_0(t)+tau^2(1-tau)^2*A_sched*tanh(u_NN(t)), with lambda_0 equal to the current sin^2 schedule and A_sched=2.4 chosen to keep lambda within [0,1] for this base schedule. Endpoint values and endpoint derivatives are enforced by construction."
+  },
   "physical_validation": {
     "entrypoint": "scripts/agp_physical_validation.py",
     "protocols": ["no_cd", "kipu_dqfm_l1", "learned_sparse_agp"],
@@ -103,8 +115,8 @@
     "statevector_qubits": 15,
     "evolution_steps": 96,
     "prefer_residual_calibrated": false,
-    "learned_top_terms": 1024,
-    "learned_top_terms_sweep": [1024],
+    "learned_top_terms": 2048,
+    "learned_top_terms_sweep": [1024, 2048],
     "learned_scale_sweep": [1.0],
     "selection_metric": "energy_error",
     "description": "Post-training q15 statevector diagnostic comparing final observables under no counterdiabatic drive, the Kipu/DQFM-style l=1 nested-commutator CD approximator, and the jointly calibrated learned sparse AGP."

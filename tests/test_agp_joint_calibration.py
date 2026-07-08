@@ -17,6 +17,7 @@ from projected_sparse_training_common import (
     ProjectedTrainingConfig,
     build_projected_support,
     enable_projected_agp_calibration,
+    enable_projected_trainable_schedule,
     make_optimizer,
     make_projected_model,
     projected_trainable_state,
@@ -103,6 +104,40 @@ class AGPJointCalibrationTests(unittest.TestCase):
         self.assertTrue(hasattr(restored, "agp_log_gamma"))
         self.assertAlmostEqual(float(restored.agp_log_gamma.detach()), 0.25, places=6)
         self.assertAlmostEqual(float(restored.agp_gate_logits.detach()[0]), 1.5, places=6)
+
+    def test_trainable_schedule_preserves_endpoint_constraints_and_trains(self):
+        model, settings = self._model_and_settings()
+        settings = ProjectedRunSettings(
+            **{
+                **settings.__dict__,
+                "schedule_trainable_enabled": True,
+                "schedule_lr": 0.02,
+                "schedule_hidden_width": 6,
+                "schedule_hidden_layers": 1,
+                "schedule_correction_amplitude": 2.4,
+            }
+        )
+
+        enable_projected_trainable_schedule(model, settings)
+        optimizer, info = make_optimizer(model, settings)
+        t = torch.linspace(0.0, 1.0, 5).view(-1, 1)
+        prediction = model(t)
+        loss, diagnostics = model.loss(t, weights=ProjectedSparseLossWeights(schedule_monotonic=1.0))
+        loss.backward()
+
+        self.assertEqual(info["schedule"], "joint_trainable")
+        self.assertIn(settings.schedule_lr, {group["lr"] for group in optimizer.param_groups})
+        self.assertTrue(torch.allclose(prediction["lambda"][[0, -1]].flatten(), torch.tensor([0.0, 1.0]), atol=1e-6))
+        self.assertTrue(torch.allclose(prediction["d_lambda_dt"][[0, -1]], torch.zeros(2, 1), atol=1e-5))
+        self.assertGreaterEqual(float(torch.min(prediction["lambda"]).detach()), -1e-6)
+        self.assertLessEqual(float(torch.max(prediction["lambda"]).detach()), 1.0 + 1e-6)
+        self.assertIn("schedule_monotonic", diagnostics)
+        schedule_grads = [
+            parameter.grad
+            for name, parameter in model.named_parameters()
+            if name.startswith("schedule_body.")
+        ]
+        self.assertTrue(any(grad is not None for grad in schedule_grads))
 
 
 if __name__ == "__main__":

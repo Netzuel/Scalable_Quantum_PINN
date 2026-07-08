@@ -20,11 +20,14 @@ from projected_sparse_training_common import (  # noqa: E402
     calibration_kwargs,
     calibration_payload,
     enable_projected_agp_calibration,
+    enable_projected_trainable_schedule,
     export_results,
     make_optimizer,
     make_projected_model,
     preferred_calibration_labels_from_support,
     projected_trainable_state,
+    schedule_kwargs,
+    schedule_payload,
     select_device,
     split_epochs,
     train_stage,
@@ -83,6 +86,7 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
     support = payload.get("support_sweep", {})
     adaptive = support.get("adaptive", {}) if isinstance(support, dict) else {}
     calibration = calibration_payload(payload)
+    schedule = schedule_payload(payload)
     return ProjectedRunSettings(
         model=model_config_from_payload(payload),
         epochs=int(parameters.get("epochs", 5000)),
@@ -104,6 +108,9 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
         residual_block_normalization=str(loss.get("residual_block_normalization", "none")),
         agp_smoothness_weight=float(loss.get("agp_smoothness", 0.0)),
         agp_curvature_weight=float(loss.get("agp_curvature", 0.0)),
+        schedule_monotonic_weight=float(loss.get("schedule_monotonic", 0.0)),
+        schedule_correction_l2_weight=float(loss.get("schedule_correction_l2", 0.0)),
+        **schedule_kwargs(schedule),
         **calibration_kwargs(calibration),
         path_images=str(export.get("path_images", "Images/")),
         path_data=str(export.get("path_data", "Models_Data/")),
@@ -135,6 +142,8 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
         agp_curvature=settings.agp_curvature_weight,
+        schedule_monotonic=settings.schedule_monotonic_weight,
+        schedule_correction_l2=settings.schedule_correction_l2_weight,
         calibration_budget=settings.calibration_budget_weight,
         calibration_binary=settings.calibration_binary_weight,
         calibration_scale_l2=settings.calibration_scale_l2_weight,
@@ -186,6 +195,12 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
         if previous_model is not None:
             transfer_projected_weights(previous_model, model)
             previous_state = projected_trainable_state(previous_model)
+            schedule_state = previous_state.get("schedule")
+            enable_projected_trainable_schedule(
+                model,
+                settings,
+                schedule_state=schedule_state if isinstance(schedule_state, dict) else None,
+            )
             calibration_state = previous_state.get("calibration")
             enable_projected_agp_calibration(
                 model,
@@ -194,6 +209,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
                 calibration_state=calibration_state if isinstance(calibration_state, dict) else None,
             )
         else:
+            enable_projected_trainable_schedule(model, settings)
             enable_projected_agp_calibration(
                 model,
                 settings,

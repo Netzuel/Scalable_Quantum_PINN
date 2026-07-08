@@ -84,6 +84,15 @@ class ProjectedRunSettings:
     residual_block_normalization: str = "none"
     agp_smoothness_weight: float = 0.0
     agp_curvature_weight: float = 0.0
+    schedule_trainable_enabled: bool = False
+    schedule_base: str = "sinusoidal_sin2"
+    schedule_correction_amplitude: float = 2.4
+    schedule_hidden_width: int = 16
+    schedule_hidden_layers: int = 1
+    schedule_activation: str = "tanh"
+    schedule_lr: float | None = None
+    schedule_monotonic_weight: float = 0.0
+    schedule_correction_l2_weight: float = 0.0
     calibration_enabled: bool = False
     calibration_target_active_terms: int | None = None
     calibration_gate_temperature: float = 1.0
@@ -185,6 +194,8 @@ def default_config_payload(config: ProjectedTrainingConfig) -> dict[str, object]
                 "residual_block_normalization": "none",
                 "agp_smoothness": 0.0,
                 "agp_curvature": 0.0,
+                "schedule_monotonic": 0.0,
+                "schedule_correction_l2": 0.0,
             },
             "export": {
                 "path_images": "Images/",
@@ -206,6 +217,15 @@ def default_config_payload(config: ProjectedTrainingConfig) -> dict[str, object]
             "budget_weight": 0.0,
             "binary_weight": 0.0,
             "scale_l2_weight": 0.0,
+        },
+        "schedule_optimization": {
+            "enabled": False,
+            "base": "sinusoidal_sin2",
+            "correction_amplitude": 2.4,
+            "hidden_width": 16,
+            "hidden_layers": 1,
+            "activation": "tanh",
+            "lr": None,
         },
     }
 
@@ -230,6 +250,7 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
     training_export = training.get("export", {}) if isinstance(training, dict) else {}
     support_adaptive = support.get("adaptive", {}) if isinstance(support, dict) else {}
     calibration = calibration_payload(payload)
+    schedule = schedule_payload(payload)
 
     model_name = neural.get("model", "ProjectedSparseAGPPINN") if isinstance(neural, dict) else "ProjectedSparseAGPPINN"
     if model_name != "ProjectedSparseAGPPINN":
@@ -280,6 +301,9 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
         residual_block_normalization=str(training_loss.get("residual_block_normalization", "none")),
         agp_smoothness_weight=float(training_loss.get("agp_smoothness", 0.0)),
         agp_curvature_weight=float(training_loss.get("agp_curvature", 0.0)),
+        schedule_monotonic_weight=float(training_loss.get("schedule_monotonic", 0.0)),
+        schedule_correction_l2_weight=float(training_loss.get("schedule_correction_l2", 0.0)),
+        **schedule_kwargs(schedule),
         **calibration_kwargs(calibration),
         path_images=str(training_export.get("path_images", "Images/")),
         path_data=str(training_export.get("path_data", "Models_Data/")),
@@ -290,6 +314,13 @@ def calibration_payload(payload: dict[str, object]) -> dict[str, object]:
     calibration = payload.get("agp_calibration", {})
     if isinstance(calibration, dict):
         return calibration
+    return {}
+
+
+def schedule_payload(payload: dict[str, object]) -> dict[str, object]:
+    schedule = payload.get("schedule_optimization", {})
+    if isinstance(schedule, dict):
+        return schedule
     return {}
 
 
@@ -314,6 +345,18 @@ def calibration_kwargs(calibration: dict[str, object]) -> dict[str, object]:
         "calibration_budget_weight": float(calibration.get("budget_weight", 0.0)),
         "calibration_binary_weight": float(calibration.get("binary_weight", 0.0)),
         "calibration_scale_l2_weight": float(calibration.get("scale_l2_weight", 0.0)),
+    }
+
+
+def schedule_kwargs(schedule: dict[str, object]) -> dict[str, object]:
+    return {
+        "schedule_trainable_enabled": bool(schedule.get("enabled", False)),
+        "schedule_base": str(schedule.get("base", "sinusoidal_sin2")),
+        "schedule_correction_amplitude": float(schedule.get("correction_amplitude", 2.4)),
+        "schedule_hidden_width": int(schedule.get("hidden_width", 16)),
+        "schedule_hidden_layers": int(schedule.get("hidden_layers", 1)),
+        "schedule_activation": str(schedule.get("activation", "tanh")),
+        "schedule_lr": optional_float_payload(schedule, "lr"),
     }
 
 
@@ -410,11 +453,44 @@ def enable_projected_agp_calibration(
     model.agp_gate_logits = torch.nn.Parameter(gate_logits.to(device))
 
 
+def enable_projected_trainable_schedule(
+    model: ProjectedSparseAGPPINN,
+    settings: ProjectedRunSettings,
+    *,
+    schedule_state: dict[str, object] | None = None,
+) -> None:
+    if not settings.schedule_trainable_enabled and schedule_state is None:
+        return
+    model.enable_trainable_schedule(
+        hidden_width=settings.schedule_hidden_width,
+        hidden_layers=settings.schedule_hidden_layers,
+        activation=settings.schedule_activation,
+        base=settings.schedule_base,
+        correction_amplitude=settings.schedule_correction_amplitude,
+    )
+    if schedule_state is None:
+        return
+    body_state = schedule_state.get("body")
+    if isinstance(body_state, dict):
+        device = next(model.parameters()).device
+        model.schedule_body.load_state_dict({str(key): value.to(device) for key, value in body_state.items()})
+    if "base" in schedule_state:
+        model.schedule_base = str(schedule_state["base"])
+    if "correction_amplitude" in schedule_state:
+        model.schedule_correction_amplitude = float(schedule_state["correction_amplitude"])
+
+
 def projected_trainable_state(model: ProjectedSparseAGPPINN) -> dict[str, object]:
     state: dict[str, object] = {
         "body": {key: value.detach().cpu() for key, value in model.body.state_dict().items()},
         "agp_labels": list(model.agp_labels),
     }
+    if model.has_trainable_schedule():
+        state["schedule"] = {
+            "body": {key: value.detach().cpu() for key, value in model.schedule_body.state_dict().items()},
+            "base": str(getattr(model, "schedule_base", "sinusoidal_sin2")),
+            "correction_amplitude": float(getattr(model, "schedule_correction_amplitude", 2.4)),
+        }
     if model.has_agp_calibration():
         state["calibration"] = {
             "log_gamma": model.agp_log_gamma.detach().cpu(),
@@ -449,6 +525,19 @@ def projected_trainable_state_from_checkpoint(checkpoint_path: Path) -> dict[str
             "gate_temperature": float(calibration_metadata.get("gate_temperature", 1.0)),
             "target_active_terms": int(calibration_metadata.get("target_active_terms", len(checkpoint["agp_labels"]))),
         }
+    schedule_body = {
+        key.removeprefix("schedule_body."): value
+        for key, value in model_state.items()
+        if key.startswith("schedule_body.")
+    }
+    if schedule_body:
+        training_metadata = checkpoint.get("config", {}).get("training", {})
+        training_metadata = training_metadata if isinstance(training_metadata, dict) else {}
+        state["schedule"] = {
+            "body": schedule_body,
+            "base": str(training_metadata.get("schedule_base", "sinusoidal_sin2")),
+            "correction_amplitude": float(training_metadata.get("schedule_correction_amplitude", 2.4)),
+        }
     return state
 
 
@@ -463,6 +552,13 @@ def restore_projected_trainable_state(
     if not isinstance(body_state, dict):
         raise TypeError("Projected trainable state must contain a body state dictionary.")
     model.body.load_state_dict({str(key): value.to(next(model.parameters()).device) for key, value in body_state.items()})
+    schedule_state = state.get("schedule")
+    if isinstance(schedule_state, dict) or settings.schedule_trainable_enabled:
+        enable_projected_trainable_schedule(
+            model,
+            settings,
+            schedule_state=schedule_state if isinstance(schedule_state, dict) else None,
+        )
     calibration_state = state.get("calibration")
     if isinstance(calibration_state, dict) or settings.calibration_enabled:
         enable_projected_agp_calibration(
@@ -475,12 +571,15 @@ def restore_projected_trainable_state(
 
 def make_optimizer(model: torch.nn.Module, settings: ProjectedRunSettings) -> tuple[torch.optim.Optimizer, dict[str, object]]:
     body_params = []
+    schedule_params = []
     gamma_params = []
     gate_params = []
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        if name == "agp_log_gamma":
+        if name.startswith("schedule_body."):
+            schedule_params.append(parameter)
+        elif name == "agp_log_gamma":
             gamma_params.append(parameter)
         elif name == "agp_gate_logits":
             gate_params.append(parameter)
@@ -489,6 +588,8 @@ def make_optimizer(model: torch.nn.Module, settings: ProjectedRunSettings) -> tu
     groups: list[dict[str, object]] = []
     if body_params:
         groups.append({"params": body_params, "lr": settings.lr})
+    if schedule_params:
+        groups.append({"params": schedule_params, "lr": settings.schedule_lr or settings.lr})
     if gamma_params:
         groups.append({"params": gamma_params, "lr": settings.calibration_gamma_lr or settings.lr})
     if gate_params:
@@ -498,18 +599,18 @@ def make_optimizer(model: torch.nn.Module, settings: ProjectedRunSettings) -> tu
     optimizer = name.lower()
     if optimizer == "adam":
         instance = torch.optim.Adam(params, lr=settings.lr)
-        return instance, {"requested": name, "actual": "Adam", "class": type(instance).__name__, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled"}
+        return instance, {"requested": name, "actual": "Adam", "class": type(instance).__name__, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled", "schedule": "joint_trainable" if schedule_params else "disabled"}
     if optimizer == "adamw":
         instance = torch.optim.AdamW(params, lr=settings.lr)
-        return instance, {"requested": name, "actual": "AdamW", "class": type(instance).__name__, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled"}
+        return instance, {"requested": name, "actual": "AdamW", "class": type(instance).__name__, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled", "schedule": "joint_trainable" if schedule_params else "disabled"}
     if optimizer in {"soap", "safe_mps_soap", "safempssoap"}:
         if pytorch_optimizer is None:
             instance = torch.optim.AdamW(params, lr=settings.lr)
-            return instance, {"requested": name, "actual": "AdamW", "class": type(instance).__name__, "fallback": True, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled"}
+            return instance, {"requested": name, "actual": "AdamW", "class": type(instance).__name__, "fallback": True, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled", "schedule": "joint_trainable" if schedule_params else "disabled"}
         flat_params = [parameter for group in groups for parameter in group["params"]]
         optimizer_cls = SafeMPSSOAP if any(parameter.device.type == "mps" for parameter in flat_params) else pytorch_optimizer.SOAP
         instance = optimizer_cls(params, lr=settings.lr)
-        return instance, {"requested": name, "actual": "SOAP", "class": optimizer_cls.__name__, "fallback": False, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled"}
+        return instance, {"requested": name, "actual": "SOAP", "class": optimizer_cls.__name__, "fallback": False, "calibration": "joint_trainable" if gamma_params or gate_params else "disabled", "schedule": "joint_trainable" if schedule_params else "disabled"}
     raise ValueError(f"Unsupported optimizer {name!r}.")
 
 
@@ -1307,6 +1408,9 @@ def export_results(
             "counterdiabatic_coefficient_definition": coefficient_definition,
             "lambda": prediction["lambda"].detach().cpu(),
             "d_lambda_dt": d_lambda_dt,
+            "schedule": "trainable_bounded_envelope" if model.has_trainable_schedule() else "sinusoidal_sin2",
+            "schedule_base": str(getattr(model, "schedule_base", "sinusoidal_sin2")),
+            "schedule_correction_amplitude": float(getattr(model, "schedule_correction_amplitude", 0.0)),
             "calibration_gamma": float(model.agp_calibration_gamma().detach().cpu()) if calibrated else 1.0,
             "calibration_gates": model.agp_calibration_gates().detach().cpu() if calibrated else None,
             "support_metadata": metadata,
@@ -1434,6 +1538,8 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
         agp_curvature=settings.agp_curvature_weight,
+        schedule_monotonic=settings.schedule_monotonic_weight,
+        schedule_correction_l2=settings.schedule_correction_l2_weight,
         calibration_budget=settings.calibration_budget_weight,
         calibration_binary=settings.calibration_binary_weight,
         calibration_scale_l2=settings.calibration_scale_l2_weight,
@@ -1483,6 +1589,12 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
         if previous_model is not None:
             transfer_projected_weights(previous_model, model)
             previous_state = projected_trainable_state(previous_model)
+            schedule_state = previous_state.get("schedule")
+            enable_projected_trainable_schedule(
+                model,
+                settings,
+                schedule_state=schedule_state if isinstance(schedule_state, dict) else None,
+            )
             calibration_state = previous_state.get("calibration")
             enable_projected_agp_calibration(
                 model,
@@ -1491,6 +1603,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
                 calibration_state=calibration_state if isinstance(calibration_state, dict) else None,
             )
         else:
+            enable_projected_trainable_schedule(model, settings)
             enable_projected_agp_calibration(
                 model,
                 settings,
