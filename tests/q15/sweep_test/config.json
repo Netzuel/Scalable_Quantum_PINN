@@ -16,8 +16,8 @@
     "general": {
       "n_inputs": 1,
       "n_outputs": "agp_top_k",
-      "n_hidden": 3,
-      "n_neurons": 56,
+      "n_hidden": 4,
+      "n_neurons": 96,
       "activation": "silu",
       "layer_type": "quadratic"
     }
@@ -59,7 +59,7 @@
     "unseen_threshold": 1.0,
     "baseline_root": "runs/baselines",
     "keep_round_images": false,
-    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_v1"
+    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_v1"
   },
   "agp_calibration": {
     "enabled": true,
@@ -102,8 +102,8 @@
     "enabled": true,
     "base": "sinusoidal_sin2",
     "correction_amplitude": 2.4,
-    "hidden_width": 16,
-    "hidden_layers": 1,
+    "hidden_width": 32,
+    "hidden_layers": 2,
     "activation": "tanh",
     "lr": 0.001,
     "description": "Trainable scheduling function lambda(t)=lambda_0(t)+tau^2(1-tau)^2*A_sched*tanh(u_NN(t)), with lambda_0 equal to the current sin^2 schedule and A_sched=2.4 chosen to keep lambda within [0,1] for this base schedule. Endpoint values and endpoint derivatives are enforced by construction."

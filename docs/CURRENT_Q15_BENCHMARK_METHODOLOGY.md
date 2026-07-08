@@ -63,6 +63,30 @@ The active AGP support is fixed during holdout-feedback. The curriculum does
 not grow the number of neural outputs; instead, it adds hard residual equations
 to the training residual basis.
 
+## Neural Architecture
+
+The current retained benchmark uses a larger quadratic/QRes coefficient network
+than the previous trainable-schedule run:
+
+```text
+input = normalized time tau
+outputs = 32768 AGP coefficient functions
+layer_type = quadratic
+hidden width = 96
+hidden layers = 4
+activation = SiLU
+```
+
+Each quadratic layer has a linear path plus a multiplicative branch:
+
+```text
+y = W_linear x + (W_left x) * (W_right x)
+```
+
+The output layer is linear in the final hidden representation; no activation is
+applied to the emitted AGP coefficients. The learned global scale and soft Pauli
+gates are applied after the network output.
+
 ## Trainable Scheduling Function
 
 The current retained benchmark trains the counterdiabatic schedule jointly with
@@ -78,6 +102,7 @@ lambda_0(t) = sin^2(pi t / 2T)
 tau = t / T
 lambda(t) = lambda_0(t) + tau^2 (1 - tau)^2 A_sched tanh(u_theta(tau))
 A_sched = 2.4
+u_theta network = MLP(width=32, hidden_layers=2, activation=tanh)
 ```
 
 The envelope enforces `lambda(0)=0`, `lambda(T)=1`, and zero endpoint
@@ -131,8 +156,9 @@ final generated holdout pool = 65536
 The final round residual diagnostics were:
 
 ```text
-training relative residual = 0.005198295
-holdout relative residual  = 0.013448055
+training relative residual = 0.003314544
+holdout relative residual  = 0.047688428
+absolute unseen residual   = 0.000667404
 ```
 
 The reported unseen relative residual is not meaningful in this run because the
@@ -158,21 +184,23 @@ The latest expanded-support result is:
 |---|---:|---:|---:|---:|
 | no CD | 16.8582 | 0.000287 | 0.9700 | 0.8411 |
 | Kipu/DQFM l=1 | 10.1628 | 0.02594 | 0.8441 | 0.4119 |
-| learned sparse AGP + learned schedule | 1.5491 | 0.6903 | 0.1041 | 0.0786 |
+| learned sparse AGP + learned schedule | 1.1574 | 0.7697 | 0.0827 | 0.0577 |
 
-The previous fixed-schedule expanded-support learned sparse AGP benchmark had:
+The previous smaller-network trainable-schedule benchmark had:
 
 ```text
-energy error = 2.0528
-ground fidelity = 0.5979
+hidden width = 56
+hidden layers = 3
+energy error = 1.5491
+ground fidelity = 0.6903
 ```
 
-Adding the constrained trainable schedule therefore improved the retained
+Increasing the coefficient-network size therefore improved the retained
 benchmark:
 
 ```text
-energy error improvement ~= 24.5%
-ground fidelity gain    ~= 0.0924
+energy error improvement ~= 25.3%
+ground fidelity gain    ~= 0.0795
 ```
 
 The learned row uses the exported learned schedule grid from the trained AGP
