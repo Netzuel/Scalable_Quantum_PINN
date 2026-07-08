@@ -13,8 +13,13 @@ for path in (SCRIPTS_DIR, TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from models import ProjectedSparseAGPPINN, ScalableAGPPINN
-from projected_sparse_training_common import build_projected_support, export_results, split_epochs
+from models import ProjectedSparseAGPPINN, ScalableAGPPINN, TrainableSiLU
+from projected_sparse_training_common import (
+    build_projected_support,
+    export_results,
+    load_body_state_compatible,
+    split_epochs,
+)
 from utils import (
     FULL_PAULI_EXACT_MAX_QUBITS,
     ProjectedCommutator,
@@ -26,6 +31,22 @@ from utils import (
 )
 
 class SparsePauliTests(unittest.TestCase):
+    def test_body_state_can_warm_start_trainable_activation_from_fixed_silu(self):
+        source = torch.nn.Sequential(
+            torch.nn.Linear(1, 4),
+            torch.nn.SiLU(),
+            torch.nn.Linear(4, 2),
+        )
+        target = torch.nn.Sequential(
+            torch.nn.Linear(1, 4),
+            TrainableSiLU(),
+            torch.nn.Linear(4, 2),
+        )
+
+        load_body_state_compatible(target, source.state_dict())
+
+        self.assertIsNotNone(target[1].beta)
+
     def test_single_qubit_commutator(self):
         phase, label = commutator_pauli_labels("X", "Y")
         self.assertEqual(label, "Z")

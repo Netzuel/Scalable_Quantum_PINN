@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import shutil
 from dataclasses import asdict, replace
@@ -83,6 +84,26 @@ def normalize_round_run_label(label: object) -> str:
 def load_checkpoint_labels(checkpoint_path: Path) -> tuple[list[str], list[str]]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     return [str(label) for label in checkpoint["agp_labels"]], [str(label) for label in checkpoint["residual_labels"]]
+
+
+def payload_with_feedback_baseline_neural(payload: dict[str, object]) -> dict[str, object]:
+    feedback = payload.get("holdout_feedback", {})
+    feedback = feedback if isinstance(feedback, dict) else {}
+    baseline_neural = feedback.get("baseline_neural", {})
+    if not isinstance(baseline_neural, dict) or not baseline_neural:
+        return payload
+
+    out = copy.deepcopy(payload)
+    neural = out.setdefault("neural", {})
+    if not isinstance(neural, dict):
+        neural = {}
+        out["neural"] = neural
+    general = neural.setdefault("general", {})
+    if not isinstance(general, dict):
+        general = {}
+        neural["general"] = general
+    general.update(baseline_neural)
+    return out
 
 
 def load_body_state_from_checkpoint(checkpoint_path: Path) -> dict[str, torch.Tensor]:
@@ -770,9 +791,11 @@ def main() -> None:
         if isinstance(support, dict)
         else 2048
     )
-    base_settings = settings_for_support(payload, base_agp_terms)
+    baseline_payload = payload_with_feedback_baseline_neural(payload)
+    base_settings = settings_for_support(baseline_payload, base_agp_terms)
+    feedback_base_settings = settings_for_support(payload, base_agp_terms)
     feedback_settings = replace(
-        base_settings,
+        feedback_base_settings,
         epochs=epochs_per_round,
         lr=lr,
         optimizer=str(args.optimizer) if args.optimizer is not None else base_settings.optimizer,
@@ -794,7 +817,7 @@ def main() -> None:
             f"train_missing_baseline agp_terms={base_agp_terms} "
             f"epochs={base_settings.epochs} residual_terms={base_settings.residual_top_k}"
         )
-        run_training(base_settings, base_run, payload)
+        run_training(base_settings, base_run, baseline_payload)
     agp_labels, residual_labels = load_checkpoint_labels(base_checkpoint)
     current_residual_labels = set(residual_labels)
     trainable_state = projected_trainable_state_from_checkpoint(base_checkpoint)

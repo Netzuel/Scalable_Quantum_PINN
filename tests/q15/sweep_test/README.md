@@ -23,8 +23,9 @@ derivatives by construction.
 
 The current retained neural architecture is configured entirely in
 `config.json`: a quadratic/QRes AGP coefficient network with width 96, four
-hidden layers, and SiLU activations, plus a trainable schedule MLP with width
-32, two hidden layers, and tanh activations.
+hidden layers, and trainable PAU activations, plus a trainable schedule MLP with
+width 32, two hidden layers, and tanh activations. The PAU feedback stage
+warm-starts from the retained width-96 SiLU baseline checkpoint.
 
 The baseline support is selected from a bounded nested-commutator Krylov pool
 seeded by the order-1 direction `i[H, dH]`. This never enumerates the full
@@ -48,7 +49,7 @@ Generated artifacts are ignored by git and written under:
 
 ```text
 runs/baselines/agp_32768/
-runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_v1/agp_32768_residual_65536_add_3072_rounds_15/
+runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_v1/agp_32768_residual_65536_add_3072_rounds_15/
 runs/support_sweep_summary/
 ```
 

@@ -9,6 +9,9 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from agp_holdout_feedback import payload_with_feedback_baseline_neural
+from agp_baseline_train import settings_for_support
+
 
 class AGPBenchmarkLayoutTests(unittest.TestCase):
     def test_common_scripts_exist(self):
@@ -86,6 +89,31 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             payload["support_sweep"]["agp_support_selection"]["strategy"],
             "nested_commutator_krylov_pool",
         )
+
+    def test_holdout_feedback_can_override_baseline_neural_config(self):
+        payload = {
+            "neural": {
+                "general": {
+                    "n_hidden": 4,
+                    "n_neurons": 96,
+                    "activation": "pau",
+                    "layer_type": "quadratic",
+                }
+            },
+            "holdout_feedback": {
+                "baseline_neural": {
+                    "activation": "silu",
+                }
+            },
+        }
+
+        baseline_payload = payload_with_feedback_baseline_neural(payload)
+
+        self.assertEqual(payload["neural"]["general"]["activation"], "pau")
+        self.assertEqual(baseline_payload["neural"]["general"]["activation"], "silu")
+        self.assertEqual(baseline_payload["neural"]["general"]["n_neurons"], 96)
+        self.assertEqual(settings_for_support(baseline_payload, 8).model.activation, "silu")
+        self.assertEqual(settings_for_support(payload, 8).model.activation, "pau")
 
 
 if __name__ == "__main__":

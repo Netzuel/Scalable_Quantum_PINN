@@ -65,8 +65,8 @@ to the training residual basis.
 
 ## Neural Architecture
 
-The current retained benchmark uses a larger quadratic/QRes coefficient network
-than the previous trainable-schedule run:
+The current retained benchmark uses a quadratic/QRes coefficient network with a
+trainable Padé activation unit (PAU):
 
 ```text
 input = normalized time tau
@@ -74,7 +74,7 @@ outputs = 32768 AGP coefficient functions
 layer_type = quadratic
 hidden width = 96
 hidden layers = 4
-activation = SiLU
+activation = PAU
 ```
 
 Each quadratic layer has a linear path plus a multiplicative branch:
@@ -82,6 +82,17 @@ Each quadratic layer has a linear path plus a multiplicative branch:
 ```text
 y = W_linear x + (W_left x) * (W_right x)
 ```
+
+The PAU nonlinearity has trainable numerator and denominator coefficients in the
+form `P(x) / (1 + |Q(x)|)`. The numerator is initialized with a SiLU-like
+polynomial, and the denominator is initialized with small non-zero coefficients.
+
+The PAU feedback run warm-starts from the retained width-96 SiLU baseline
+checkpoint before entering the 15-round holdout-feedback curriculum. The
+`baseline_neural` block in `tests/q15/sweep_test/config.json` makes that
+warm-start explicit and reproducible from a cleaned q15 folder: the baseline
+checkpoint is trained with SiLU when missing, then the feedback rounds load the
+compatible body weights into the PAU model while training the PAU parameters.
 
 The output layer is linear in the final hidden representation; no activation is
 applied to the emitted AGP coefficients. The learned global scale and soft Pauli
@@ -156,9 +167,9 @@ final generated holdout pool = 65536
 The final round residual diagnostics were:
 
 ```text
-training relative residual = 0.003314544
-holdout relative residual  = 0.047688428
-absolute unseen residual   = 0.000667404
+training relative residual = 0.002679963
+holdout relative residual  = 0.053223804
+absolute unseen residual   = 0.000888793
 ```
 
 The reported unseen relative residual is not meaningful in this run because the
@@ -184,24 +195,29 @@ The latest expanded-support result is:
 |---|---:|---:|---:|---:|
 | no CD | 16.8582 | 0.000287 | 0.9700 | 0.8411 |
 | Kipu/DQFM l=1 | 10.1628 | 0.02594 | 0.8441 | 0.4119 |
-| learned sparse AGP + learned schedule | 1.1574 | 0.7697 | 0.0827 | 0.0577 |
+| learned sparse AGP + learned schedule | 0.7002 | 0.8675 | 0.0493 | 0.0343 |
 
-The previous smaller-network trainable-schedule benchmark had:
-
-```text
-hidden width = 56
-hidden layers = 3
-energy error = 1.5491
-ground fidelity = 0.6903
-```
-
-Increasing the coefficient-network size therefore improved the retained
-benchmark:
+The previous retained width-96 fixed-SiLU benchmark had:
 
 ```text
-energy error improvement ~= 25.3%
-ground fidelity gain    ~= 0.0795
+activation = SiLU
+energy error = 1.1574
+ground fidelity = 0.7697
 ```
+
+The promoted PAU activation therefore improved the retained benchmark:
+
+```text
+energy error improvement ~= 39.5%
+ground fidelity gain    ~= 0.0978
+```
+
+Two architecture/activation candidates were rejected during the same sweep:
+
+| Candidate | Energy error | Ground fidelity | Reason not retained |
+|---|---:|---:|---|
+| width 128, 4 layers, SiLU | 1.2558 | 0.7410 | worse physical metrics |
+| width 96, 4 layers, trainable SiLU | 1.1214 | 0.7789 | improved over SiLU but worse than PAU |
 
 The learned row uses the exported learned schedule grid from the trained AGP
 checkpoint. The no-CD and Kipu/DQFM l=1 rows use the fixed reference
@@ -286,5 +302,5 @@ physical benchmark:
 |---|---:|---:|---:|---:|
 | learned sparse AGP with `L_probe` | 3.9766 | 0.3005 | 0.2785 | 0.2118 |
 
-That rejected probe-loss result is superseded by the retained trainable-schedule
-benchmark above, with energy error `1.5491` and ground fidelity `0.6903`.
+That rejected probe-loss result is superseded by the retained PAU benchmark
+above, with energy error `0.7002` and ground fidelity `0.8675`.

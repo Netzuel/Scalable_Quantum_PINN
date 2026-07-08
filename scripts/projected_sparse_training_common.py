@@ -541,6 +541,28 @@ def projected_trainable_state_from_checkpoint(checkpoint_path: Path) -> dict[str
     return state
 
 
+def _activation_state_key(key: str) -> bool:
+    return key.endswith((".beta", ".numerator", ".denominator"))
+
+
+def load_body_state_compatible(body: torch.nn.Module, state: dict[str, torch.Tensor]) -> None:
+    """Load body weights while allowing fixed/trainable activation swaps.
+
+    This is intentionally narrow: missing or unexpected parameters are accepted
+    only when they belong to trainable activation modules. Shape mismatches in
+    linear/quadratic weights still raise through ``load_state_dict``.
+    """
+
+    incompatible = body.load_state_dict(state, strict=False)
+    bad_missing = [key for key in incompatible.missing_keys if not _activation_state_key(str(key))]
+    bad_unexpected = [key for key in incompatible.unexpected_keys if not _activation_state_key(str(key))]
+    if bad_missing or bad_unexpected:
+        raise RuntimeError(
+            "Incompatible body checkpoint state. "
+            f"missing={bad_missing} unexpected={bad_unexpected}"
+        )
+
+
 def restore_projected_trainable_state(
     model: ProjectedSparseAGPPINN,
     state: dict[str, object],
@@ -551,7 +573,10 @@ def restore_projected_trainable_state(
     body_state = state.get("body", state)
     if not isinstance(body_state, dict):
         raise TypeError("Projected trainable state must contain a body state dictionary.")
-    model.body.load_state_dict({str(key): value.to(next(model.parameters()).device) for key, value in body_state.items()})
+    load_body_state_compatible(
+        model.body,
+        {str(key): value.to(next(model.parameters()).device) for key, value in body_state.items()},
+    )
     schedule_state = state.get("schedule")
     if isinstance(schedule_state, dict) or settings.schedule_trainable_enabled:
         enable_projected_trainable_schedule(

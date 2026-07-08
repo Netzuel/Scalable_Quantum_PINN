@@ -25,6 +25,59 @@ from utils import (
 )
 
 
+class TrainableSiLU(nn.Module):
+    """SiLU/Swish activation with a learned inverse-temperature slope."""
+
+    def __init__(self, initial_beta: float = 1.0) -> None:
+        super().__init__()
+        self.beta = nn.Parameter(torch.tensor(float(initial_beta), dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        beta = self.beta.to(dtype=x.dtype, device=x.device)
+        return x * torch.sigmoid(beta * x)
+
+
+class PadeActivation(nn.Module):
+    """Trainable Padé activation unit with a stable positive denominator.
+
+    The parameterization follows the usual PAU shape,
+    ``P_m(x) / (1 + |Q_n(x)|)``. The numerator is initialized to a modest
+    SiLU-like polynomial so the activation starts near the retained benchmark
+    nonlinearity while the denominator can adapt during training.
+    """
+
+    def __init__(self, numerator_order: int = 5, denominator_order: int = 4) -> None:
+        super().__init__()
+        if numerator_order < 1:
+            raise ValueError("numerator_order must be at least 1.")
+        if denominator_order < 1:
+            raise ValueError("denominator_order must be at least 1.")
+        numerator = torch.zeros(numerator_order + 1, dtype=torch.float32)
+        silu_like = [0.07055594, 0.5, 0.17009126, 0.0, -0.00315486, 0.0]
+        numerator[: min(len(numerator), len(silu_like))] = torch.tensor(
+            silu_like[: min(len(numerator), len(silu_like))],
+            dtype=torch.float32,
+        )
+        denominator = torch.zeros(denominator_order, dtype=torch.float32)
+        denominator[0] = 1e-2
+        if denominator_order > 2:
+            denominator[2] = 1e-3
+        self.numerator = nn.Parameter(numerator)
+        self.denominator = nn.Parameter(denominator)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        numerator = torch.zeros_like(x) + self.numerator[-1].to(dtype=x.dtype, device=x.device)
+        for coefficient in reversed(self.numerator[:-1]):
+            numerator = numerator * x + coefficient.to(dtype=x.dtype, device=x.device)
+
+        denominator_poly = torch.zeros_like(x)
+        power = x
+        for coefficient in self.denominator:
+            denominator_poly = denominator_poly + coefficient.to(dtype=x.dtype, device=x.device) * power
+            power = power * x
+        return numerator / (1.0 + torch.abs(denominator_poly))
+
+
 def _activation(name: str) -> nn.Module:
     name = name.lower()
     if name == "tanh":
@@ -33,6 +86,10 @@ def _activation(name: str) -> nn.Module:
         return nn.GELU()
     if name == "silu":
         return nn.SiLU()
+    if name in {"trainable_silu", "adaptive_silu", "swish_trainable"}:
+        return TrainableSiLU()
+    if name in {"pau", "pade", "pade_activation"}:
+        return PadeActivation()
     if name == "relu":
         return nn.ReLU()
     raise ValueError(f"Unsupported activation {name!r}.")

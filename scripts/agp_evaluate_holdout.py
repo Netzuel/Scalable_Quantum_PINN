@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 from projected_sparse_training_common import (  # noqa: E402
     ProjectedSparseLossWeights,
     build_projected_support,
+    load_body_state_compatible,
     make_projected_model,
     select_device,
 )
@@ -41,7 +42,7 @@ def load_body_weights(model: torch.nn.Module, checkpoint: dict[str, object]) -> 
         for key, value in state.items()
         if key.startswith("body.")
     }
-    model.body.load_state_dict(body_state)
+    load_body_state_compatible(model.body, body_state)
     if "agp_log_gamma" in state and "agp_gate_logits" in state:
         support_metadata = checkpoint.get("config", {}).get("support", {})
         support_metadata = support_metadata if isinstance(support_metadata, dict) else {}

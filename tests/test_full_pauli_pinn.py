@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 
-from models import FullPauliAGPPINN, QuadraticMLP
+from models import FullPauliAGPPINN, PadeActivation, QuadraticMLP, TrainableSiLU
 from utils import fixed_sinusoidal_schedule, load_pauli_hamiltonian_pair
 
 
@@ -13,6 +13,39 @@ LEGACY_HAMILTONIANS = ROOT / "Hamiltonians_to_use" / "Hamiltonians_pauli.json"
 
 
 class FullPauliPINNTests(unittest.TestCase):
+    def test_trainable_silu_activation_has_learned_slope(self):
+        activation = TrainableSiLU(initial_beta=1.25)
+        x = torch.linspace(-2.0, 2.0, 7)
+        y = activation(x)
+        y.sum().backward()
+
+        self.assertEqual(y.shape, x.shape)
+        self.assertIsNotNone(activation.beta.grad)
+        self.assertTrue(torch.isfinite(activation.beta.grad))
+
+    def test_pade_activation_has_trainable_rational_coefficients(self):
+        activation = PadeActivation()
+        x = torch.linspace(-2.0, 2.0, 7)
+        y = activation(x)
+        y.sum().backward()
+
+        self.assertEqual(y.shape, x.shape)
+        self.assertTrue(torch.isfinite(y).all())
+        self.assertIsNotNone(activation.numerator.grad)
+        self.assertIsNotNone(activation.denominator.grad)
+
+    def test_quadratic_mlp_accepts_trainable_activation_names(self):
+        for name in ("trainable_silu", "pau"):
+            with self.subTest(activation=name):
+                model = QuadraticMLP(1, 3, hidden_width=4, hidden_layers=1, activation=name)
+                x = torch.linspace(0.0, 1.0, 5).view(-1, 1)
+                y = model(x)
+                loss = y.square().mean()
+                loss.backward()
+
+                self.assertEqual(y.shape, (5, 3))
+                self.assertTrue(any(parameter.grad is not None for parameter in model.parameters()))
+
     def test_fixed_schedule_endpoints(self):
         t = torch.tensor([[0.0], [0.5], [1.0]])
         lam, d_lambda_dt = fixed_sinusoidal_schedule(t)

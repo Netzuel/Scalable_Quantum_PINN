@@ -18,7 +18,7 @@
       "n_outputs": "agp_top_k",
       "n_hidden": 4,
       "n_neurons": 96,
-      "activation": "silu",
+      "activation": "pau",
       "layer_type": "quadratic"
     }
   },
@@ -58,8 +58,15 @@
     "holdout_threshold": 0.10,
     "unseen_threshold": 1.0,
     "baseline_root": "runs/baselines",
+    "baseline_neural": {
+      "n_hidden": 4,
+      "n_neurons": 96,
+      "activation": "silu",
+      "layer_type": "quadratic",
+      "description": "Train or reuse the retained SiLU baseline checkpoint, then warm-start the PAU feedback model from that checkpoint. This makes the PAU benchmark reproducible even from a cleaned q15 folder."
+    },
     "keep_round_images": false,
-    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_v1"
+    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_v1"
   },
   "agp_calibration": {
     "enabled": true,
