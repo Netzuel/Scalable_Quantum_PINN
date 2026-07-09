@@ -1,12 +1,21 @@
-# Current q15 Benchmark Methodology
+# Current Sparse AGP Methodology
 
-This document records the current q15 benchmark used to test whether the
-learned sparse AGP is physically useful, not merely whether it reduces a
-projected algebraic residual.
+This document records the current general methodology used in this repository
+to learn sparse adiabatic gauge potentials (AGPs) for arbitrary qubit counts
+`q`, without dense `2**q x 2**q` matrices and without enumerating the full
+`4**q` Pauli basis for large systems.
 
-The benchmark is intentionally above the exact-output regime. For q15, the full
-Pauli basis contains `4**15` strings, so the method must restrict the trainable
-AGP support.
+The current retained q15 study is a benchmark instance of this methodology, not
+the methodology itself. Its role is to provide a physically checkable
+above-exact-output testbed where final energy, fidelity, and simple observables
+can be compared against known ground-truth diagnostics after training. For
+larger `q`, the same training pipeline is used with different configuration
+values, but full-basis or full-state validation may no longer be accessible.
+
+For `q > 8`, the full Pauli basis is not treated as a computational object in
+this repository. The trainable AGP support size `K`, the residual holdout pool
+size `Q`, and the number of curriculum iterations `i` are explicit research
+choices recorded in the test configuration.
 
 ## Goal
 
@@ -19,18 +28,31 @@ A_lambda(t) = sum_{P in S_AGP} C_P(t) P
 that improves physical counterdiabatic evolution without using final-state
 ground-truth observables during training.
 
-The physical validation asks whether the learned AGP improves:
+When exact or approximate physical validation is feasible, the post-training
+diagnostic asks whether the learned AGP improves quantities such as:
 
 - final ground-state energy error;
 - final ground-state fidelity;
 - final `<Z_i>` expectation RMSE;
 - final nearest-neighbor `<Z_i Z_{i+1}>` RMSE.
 
-These observables are used only after training.
+These observables are used only after training. They are not targets in the
+PINN loss.
 
 ## Hamiltonian Path
 
-The benchmark uses a transverse-driver to diagonal Ising-problem path:
+The general Hamiltonian path is:
+
+```text
+H_AD(lambda) = (1 - lambda) H_initial + lambda H_final
+A_lambda(t) = sum_{P in S_AGP} C_P(t) P
+```
+
+`H_initial`, `H_final`, the schedule parameterization, the qubit count `q`, and
+the sparse Pauli decompositions are supplied by the active test configuration.
+
+The current retained q15 benchmark instance uses a transverse-driver to
+diagonal Ising-problem path:
 
 ```text
 H_initial = - sum_i X_i
@@ -40,14 +62,23 @@ T = 1
 q = 15
 ```
 
-The final Hamiltonian is diagonal, so the exact final ground energy and
-ground-state observables are accessible for this benchmark. That accessibility
-is diagnostic-only. The training loop does not use the final ground-state
-energy, final fidelity, or exact final observables.
+For this q15 instance, the final Hamiltonian is diagonal, so the exact final
+ground energy and ground-state observables are accessible. That accessibility
+is diagnostic-only and is not assumed in the general methodology. The training
+loop does not use the final ground-state energy, final fidelity, or exact final
+observables.
 
 ## Sparse AGP Support
 
-The current expanded support run uses:
+The support budget is configured per study:
+
+```text
+K = |S_AGP| trainable AGP coefficient functions
+Q = generated residual holdout terms
+i = holdout-feedback curriculum iterations
+```
+
+The current retained q15 benchmark instance uses:
 
 ```text
 K = 32768 trainable AGP outputs
@@ -57,7 +88,7 @@ i = 15 holdout-feedback curriculum iterations
 
 The initial AGP support is selected from a bounded nested-commutator Krylov pool
 seeded by the order-1 commutator direction. The method never enumerates the full
-`4**15` basis.
+`4**q` basis for large `q`.
 
 The active AGP support has fixed cardinality during holdout-feedback. The
 curriculum does not grow the number of neural outputs; instead, it adds hard
@@ -67,12 +98,12 @@ candidates while keeping `K` unchanged.
 
 ## Neural Architecture
 
-The current retained benchmark uses a quadratic/QRes coefficient network with a
-trainable Padé activation unit (PAU):
+The current retained methodology uses a quadratic/QRes coefficient network with
+a trainable Padé activation unit (PAU):
 
 ```text
 input = normalized time tau
-outputs = 32768 AGP coefficient functions
+outputs = K AGP coefficient functions
 layer_type = quadratic
 hidden width = 96
 hidden layers = 4
@@ -89,12 +120,12 @@ The PAU nonlinearity has trainable numerator and denominator coefficients in the
 form `P(x) / (1 + |Q(x)|)`. The numerator is initialized with a SiLU-like
 polynomial, and the denominator is initialized with small non-zero coefficients.
 
-The PAU feedback run warm-starts from the retained width-96 SiLU baseline
-checkpoint before entering the 15-round holdout-feedback curriculum. The
-`baseline_neural` block in `tests/q15/sweep_test/config.json` makes that
-warm-start explicit and reproducible from a cleaned q15 folder: the baseline
-checkpoint is trained with SiLU when missing, then the feedback rounds load the
-compatible body weights into the PAU model while training the PAU parameters.
+The PAU feedback run can warm-start from a width-96 SiLU baseline checkpoint
+before entering the holdout-feedback curriculum. The `baseline_neural` block in
+the active configuration makes that warm-start explicit and reproducible from a
+cleaned test folder: the baseline checkpoint is trained with SiLU when missing,
+then the feedback rounds load the compatible body weights into the PAU model
+while training the PAU parameters.
 
 The output layer is linear in the final hidden representation; no activation is
 applied to the emitted AGP coefficients. The learned global scale and soft Pauli
@@ -102,13 +133,13 @@ gates are applied after the network output.
 
 ## Trainable Scheduling Function
 
-The current retained benchmark trains the counterdiabatic schedule jointly with
-the AGP coefficient network and calibration variables. The parameterization
+The current retained methodology trains the counterdiabatic schedule jointly
+with the AGP coefficient network and calibration variables. The parameterization
 follows the constrained-envelope idea used in Section 2.1 of arXiv:2604.18506:
 a fixed smooth reference schedule plus a bounded neural correction that vanishes
 at the boundaries.
 
-For this benchmark:
+For the current q15 benchmark instance:
 
 ```text
 lambda_0(t) = sin^2(pi t / 2T)
@@ -165,9 +196,9 @@ Each round:
 Candidate replacements are generated from the largest holdout residual
 directions plus their one-commutator closure with the Hamiltonian support. This
 gives the method exploratory capability without increasing the output budget or
-using the q15 final-state ground truth during training.
+using final-state ground truth during training.
 
-For the current q15 run:
+For the current retained q15 benchmark instance:
 
 ```text
 add_residual_terms_per_iteration = 3072
@@ -178,9 +209,9 @@ final generated holdout pool = 65536
 
 ## Post-Curriculum Temporal Refinement
 
-After the fixed-K support-swap curriculum finishes, the retained benchmark runs
-one final self-supervised continuation stage on the round-15 AGP support and
-residual basis:
+After the fixed-K support-swap curriculum finishes, the retained methodology can
+run one final self-supervised continuation stage on the final-round AGP support
+and residual basis:
 
 ```text
 epochs = 2500
@@ -195,7 +226,8 @@ scale, and soft gates using only the projected residual objective and
 regularizers. It does not use final ground-state energy, final fidelity, or
 exact final observables.
 
-The accepted temporal-refinement residual diagnostics were:
+For the current retained q15 benchmark instance, the accepted
+temporal-refinement residual diagnostics were:
 
 ```text
 training relative residual = 0.001722056
@@ -209,82 +241,96 @@ unseen residual is still stored, but the quotient is recorded as invalid.
 
 ## End-To-End Pipeline
 
-The current benchmark is controlled by:
+The general pipeline is controlled by one test-local configuration file:
+
+```text
+config = tests/<case>/sweep_test/config.json
+training entrypoint = scripts/agp_holdout_feedback.py
+physical validation entrypoint = scripts/agp_physical_validation.py
+optional baseline entrypoint = scripts/agp_baseline_train.py
+optional cleanup entrypoint = scripts/agp_restart.py
+```
+
+The current retained q15 benchmark instance is:
 
 ```text
 config = tests/q15/sweep_test/config.json
-training entrypoint = scripts/agp_holdout_feedback.py
-physical validation entrypoint = scripts/agp_physical_validation.py
 current run root =
   tests/q15/sweep_test/runs/
   fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_temporal_refinement_v1/
   agp_32768_residual_65536_add_3072_rounds_15/
 ```
 
-From a cleaned `tests/q15/sweep_test/` folder, the full retained pipeline is:
+From a cleaned `tests/<case>/sweep_test/` folder, the full retained pipeline is:
 
-1. Build or refresh the q15 driver/problem Hamiltonian decomposition and index.
+1. Build or refresh the sparse Hamiltonian decomposition and index for the
+   configured problem.
 
 ```bash
 conda run -n torch-mps python scripts/build_driver_problem_hamiltonian.py --update-index
 ```
 
-2. Clean generated q15 artifacts without recreating top-level `Images/` or
-   `Models_Data/` folders.
+2. Clean generated artifacts without recreating top-level `Images/` or
+   `Models_Data/` folders in the test folder.
 
 ```bash
 conda run -n torch-mps python scripts/agp_restart.py \
-  --config tests/q15/sweep_test/config.json
+  --config tests/<case>/sweep_test/config.json
 ```
 
 3. Train the retained end-to-end sparse AGP pipeline. This command trains the
    missing SiLU warm-start baseline if needed, warm-starts the PAU feedback
-   model, runs the 15 fixed-K holdout-feedback/support-swap curriculum rounds,
+   model, runs the configured fixed-K holdout-feedback/support-swap curriculum,
    and then runs the post-curriculum temporal-refinement continuation.
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/q15/sweep_test/config.json
+  --config tests/<case>/sweep_test/config.json
 ```
 
 4. Run the post-training physical diagnostic. The script chooses the
    `temporal_refinement/` checkpoint when the feedback summary records it as
-   enabled, then compares no-CD, Kipu/DQFM `l=1`, and the learned sparse AGP.
+   enabled. For the q15 benchmark instance, it compares no-CD, Kipu/DQFM `l=1`,
+   and the learned sparse AGP.
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_physical_validation.py \
-  --config tests/q15/sweep_test/config.json
+  --config tests/<case>/sweep_test/config.json
 ```
 
-5. Accept or reject the candidate by the q15 physical validation table. The
-   deciding retained metrics are final energy error and ground-state fidelity,
-   with `<Z_i>` and `<Z_i Z_{i+1}>` RMSEs as observable consistency checks.
-   A candidate is promoted only if it improves the retained physical benchmark
-   without using final ground-truth observables during training.
+5. Accept or reject the candidate using the strongest available diagnostics for
+   the configured `q`. When a physical table is available, the deciding retained
+   metrics are final energy error and ground-state fidelity, with local
+   observables such as `<Z_i>` and `<Z_i Z_{i+1}>` RMSEs as consistency checks.
+   For larger `q`, where exact statevector ground truth is not available, the
+   candidate must be reported at the correct certification level using
+   `AGP_CERTIFICATION_CRITERIA.md`.
 
 Generated run artifacts are local and ignored by git. The repository stores the
 code, configuration, tests, and this methodology record; it does not commit
 `runs/`, checkpoint files, or generated figures.
 
-## Certification Status
+## Current Benchmark Instance And Certification Status
 
-The current q15 result is the retained physical benchmark, but it is not a
-fully certified sparse AGP support for the unrestricted `4**15` basis. Under
-`AGP_CERTIFICATION_CRITERIA.md`, the current status is:
+The current retained physical benchmark instance is q15. It is evidence that
+the general methodology can produce a physically useful sparse AGP on an
+above-exact-output problem, but it is not a full certification of the support
+against the unrestricted `4**15` basis. Under `AGP_CERTIFICATION_CRITERIA.md`,
+the current q15 status is:
 
 | Gate | Status | Evidence |
 |---|---|---|
 | Training residual | pass | temporal refinement training relative residual `0.001722056` |
 | Holdout residual | pass | temporal refinement holdout relative residual `0.056884907`, below the practical `0.05` to `0.10` band |
 | Unseen residual quotient | not tested | quotient invalid because the AGP=0 reference residual on the sampled unseen subset is zero |
-| Fixed `probe_gate` / `probe_watch` / `probe_test` residuals | not tested | the current q15 pipeline does not yet define fixed disjoint probe bases |
+| Fixed `probe_gate` / `probe_watch` / `probe_test` residuals | not tested | the current retained pipeline does not yet define fixed disjoint probe bases |
 | K-sweep plateau | not tested | current retained run uses `K = 32768`; no formal nearby-K plateau is stored for this temporal-refinement benchmark |
 | Q-sweep plateau | not tested | current validation uses `Q = 65536`; no formal larger-Q plateau is stored |
 | Top-term stability across K and seeds | not tested | no formal top-term overlap study is stored for the retained temporal-refinement run |
 | Prune-and-retest | not tested | deployment truncates to the top 2048 terms for statevector validation, but no formal residual prune sweep is stored |
 | Physical validation | pass | learned AGP improves energy error, fidelity, and local observable RMSEs against no-CD and Kipu/DQFM `l=1` |
 
-The correct claim level is therefore:
+The correct claim level for the current q15 benchmark instance is therefore:
 
 ```text
 Projected sparse AGP experiment with strong q15 physical validation.
@@ -368,9 +414,10 @@ schedule.
 
 ## Current Interpretation
 
-The current method is good enough to show that the jointly learned sparse AGP
-and schedule are much more physically useful than no-CD and the first-order
-nested-commutator approximator for this benchmark.
+The current retained q15 benchmark instance shows that the jointly learned
+sparse AGP and schedule are much more physically useful than no-CD and the
+first-order nested-commutator approximator on a physically checkable
+above-exact-output problem.
 
 It does not certify that the selected support is globally sufficient out of the
 full `4**q` basis. It also does not prove that a lower projected residual always
