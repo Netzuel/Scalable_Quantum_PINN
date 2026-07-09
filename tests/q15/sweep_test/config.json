@@ -26,7 +26,7 @@
     "name": "q15_fixed_k_holdout_feedback_physical_validation",
     "entrypoint": "scripts/agp_holdout_feedback.py",
     "agp_terms": 32768,
-    "description": "Fixed K=32768 AGP support selected from a bounded nested-commutator Krylov pool; fifteen feedback iterations add hard residual equations from a larger Q=65536 residual holdout pool without growing AGP outputs."
+    "description": "Fixed K=32768 AGP support selected from a bounded nested-commutator Krylov pool; fifteen feedback iterations add hard residual equations from a larger Q=65536 residual holdout pool without growing AGP outputs. The candidate experiment adds a final high-time-resolution continuation stage after the support-swap curriculum."
   },
   "support_sweep": {
     "agp_terms": [32768],
@@ -74,8 +74,17 @@
       "new_gate_logit": 2.0,
       "description": "Fixed-K support-swap curriculum: after each trained round, replace weak low-importance AGP strings with hard residual-derived candidates while keeping K unchanged."
     },
+    "temporal_refinement": {
+      "enabled": true,
+      "epochs": 2500,
+      "num_points": 64,
+      "lr": 3e-6,
+      "optimizer": "AdamW",
+      "run_dir": "temporal_refinement",
+      "description": "Final post-curriculum continuation on the fixed round-15 AGP support and residual basis. It increases the time collocation grid while keeping PAU weights, learned schedule, gamma, and gates trainable; no final ground-state energy, fidelity, or observable targets are used."
+    },
     "keep_round_images": false,
-    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_v1"
+    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_temporal_refinement_v1"
   },
   "agp_calibration": {
     "enabled": true,

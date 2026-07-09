@@ -75,6 +75,16 @@ class SupportSwapSettings:
     new_gate_logit: float = 2.0
 
 
+@dataclass(frozen=True)
+class TemporalRefinementSettings:
+    enabled: bool = False
+    epochs: int = 0
+    num_points: int = 0
+    lr: float = 0.0
+    optimizer: str = ""
+    run_dir: str = "temporal_refinement"
+
+
 def configure_run_dir(config_path: Path) -> None:
     global RUN_DIR
     RUN_DIR = config_path.resolve().parent
@@ -109,6 +119,20 @@ def support_swap_settings_from_feedback(feedback: dict[str, object]) -> SupportS
         candidate_pool_multiplier=max(1, int(raw.get("candidate_pool_multiplier", 16))),
         protect_top_fraction=max(0.0, float(raw.get("protect_top_fraction", 0.02))),
         new_gate_logit=float(raw.get("new_gate_logit", 2.0)),
+    )
+
+
+def temporal_refinement_settings_from_feedback(feedback: dict[str, object]) -> TemporalRefinementSettings:
+    raw = feedback.get("temporal_refinement", {})
+    if not isinstance(raw, dict):
+        return TemporalRefinementSettings()
+    return TemporalRefinementSettings(
+        enabled=bool(raw.get("enabled", False)),
+        epochs=max(0, int(raw.get("epochs", 0))),
+        num_points=max(0, int(raw.get("num_points", 0))),
+        lr=max(0.0, float(raw.get("lr", 0.0))),
+        optimizer=str(raw.get("optimizer", "")),
+        run_dir=str(raw.get("run_dir", "temporal_refinement")),
     )
 
 
@@ -705,6 +729,7 @@ def write_feedback_summary(
     residual_top_k: int,
     thresholds: Thresholds,
     residual_budget: dict[str, object],
+    temporal_refinement: dict[str, object] | None = None,
     keep_round_images: bool = True,
 ) -> None:
     images_dir = output_dir / "Images"
@@ -755,6 +780,8 @@ def write_feedback_summary(
         "rounds": round_rows,
         "rows": rows,
     }
+    if temporal_refinement is not None:
+        payload["temporal_refinement"] = temporal_refinement
     with (data_dir / f"holdout_feedback_summary_residual_{residual_top_k}.json").open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
@@ -764,6 +791,10 @@ def write_feedback_summary(
     plot_feedback_added_terms(round_rows, images_dir)
     if round_rows:
         final_round_dir = output_dir / str(round_rows[-1]["run_dir"])
+        if temporal_refinement and temporal_refinement.get("enabled", False):
+            candidate_dir = output_dir / str(temporal_refinement.get("run_dir", ""))
+            if candidate_dir.is_dir():
+                final_round_dir = candidate_dir
         coefficient_path = final_round_dir / "Models_Data" / "final_agp_coefficients.pt"
         if coefficient_path.is_file():
             coefficient_payload = torch.load(coefficient_path, map_location="cpu")
@@ -835,6 +866,7 @@ def main() -> None:
     device_name = str(args.device if args.device is not None else feedback.get("device", "auto"))
     min_rms = float(args.min_rms if args.min_rms is not None else feedback.get("min_rms", 0.0))
     support_swap_settings = support_swap_settings_from_feedback(feedback)
+    temporal_refinement_settings = temporal_refinement_settings_from_feedback(feedback)
     output_root_arg = args.output_root if args.output_root is not None else Path(str(feedback.get("output_root", "runs/holdout_feedback")))
     baseline_root_arg = args.baseline_root if args.baseline_root is not None else Path(str(feedback.get("baseline_root", "runs/baselines")))
     keep_round_images = bool(args.keep_round_images or feedback.get("keep_round_images", False))
@@ -1123,6 +1155,81 @@ def main() -> None:
             f"unseen_status={row.get('unseen_relative_residual_status', {}).get('reason', 'unknown')}"
         )
 
+    temporal_refinement_summary: dict[str, object] | None = None
+    if temporal_refinement_settings.enabled:
+        if temporal_refinement_settings.epochs <= 0:
+            raise ValueError("holdout_feedback.temporal_refinement.epochs must be positive when enabled.")
+        if temporal_refinement_settings.num_points <= 0:
+            raise ValueError("holdout_feedback.temporal_refinement.num_points must be positive when enabled.")
+        if temporal_refinement_settings.lr <= 0.0:
+            raise ValueError("holdout_feedback.temporal_refinement.lr must be positive when enabled.")
+        refinement_settings = replace(
+            feedback_settings,
+            epochs=temporal_refinement_settings.epochs,
+            num_points=temporal_refinement_settings.num_points,
+            lr=temporal_refinement_settings.lr,
+            optimizer=(
+                temporal_refinement_settings.optimizer
+                if temporal_refinement_settings.optimizer
+                else feedback_settings.optimizer
+            ),
+        )
+        refinement_run = output_dir / temporal_refinement_settings.run_dir
+        print(
+            "train_temporal_refinement "
+            f"run_dir={temporal_refinement_settings.run_dir} "
+            f"agp_terms={len(agp_labels)} residual_terms={len(residual_labels)} "
+            f"epochs={refinement_settings.epochs} num_points={refinement_settings.num_points} "
+            f"lr={refinement_settings.lr:g}"
+        )
+        trainable_state, refined_final, refined_metadata = train_feedback_round(
+            run_dir=refinement_run,
+            payload=payload,
+            settings=refinement_settings,
+            agp_labels=agp_labels,
+            residual_labels=residual_labels,
+            trainable_state=trainable_state,
+            round_index=rounds + 1,
+            additions=[],
+            support_swap_plan={"enabled": False, "swap_count": 0, "reason": "temporal_refinement"},
+        )
+        refined_row, _ = evaluate_one_run(
+            run_dir=refinement_run,
+            config_payload=payload,
+            residual_top_k=residual_top_k,
+            intermediate_top_k=intermediate_top_k,
+            device=select_device("cpu"),
+            spectra_dir=data_dir,
+            common_residual_labels=common_residual_labels,
+            holdout_basis_mode="union_agp",
+            holdout_basis_agp_terms=holdout_basis_agp_terms,
+        )
+        temporal_refinement_summary = {
+            "enabled": True,
+            "run_dir": str(refinement_run.relative_to(output_dir)),
+            "source_round": rounds,
+            "epochs": refinement_settings.epochs,
+            "num_points": refinement_settings.num_points,
+            "lr": refinement_settings.lr,
+            "optimizer": refinement_settings.optimizer,
+            "training_final_relative_residual": float(refined_final["relative_residual"]),
+            "holdout_relative_residual": float(refined_row["holdout_relative_residual"]),
+            "unseen_relative_residual": refined_row["unseen_relative_residual"],
+            "unseen_relative_residual_status": refined_row.get("unseen_relative_residual_status"),
+            "support_metadata": {
+                "first_commutator_nnz": refined_metadata["first_commutator_nnz"],
+                "second_commutator_nnz": refined_metadata["second_commutator_nnz"],
+                "final_intermediate_terms": refined_metadata["final_intermediate_terms"],
+                "final_residual_terms": refined_metadata["final_residual_terms"],
+            },
+        }
+        print(
+            "done_temporal_refinement "
+            f"train_relative={refined_final['relative_residual']:.6e} "
+            f"holdout_relative={refined_row['holdout_relative_residual']:.6e} "
+            f"unseen_relative={optional_float(refined_row['unseen_relative_residual']):.6e}"
+        )
+
     write_feedback_summary(
         output_dir=output_dir,
         rows=rows,
@@ -1131,6 +1238,7 @@ def main() -> None:
         residual_top_k=residual_top_k,
         thresholds=thresholds,
         residual_budget=residual_budget,
+        temporal_refinement=temporal_refinement_summary,
         keep_round_images=keep_round_images,
     )
     summary_path = output_dir / "Models_Data" / f"holdout_feedback_summary_residual_{residual_top_k}.json"
@@ -1146,6 +1254,7 @@ def main() -> None:
                 "base_agp_terms": base_agp_terms,
                 "agp_fraction_of_full_basis": f"{Decimal(base_agp_terms) / full_basis:.12E}",
                 "rounds": round_rows,
+                "temporal_refinement": temporal_refinement_summary,
             },
             indent=2,
         )

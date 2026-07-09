@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
@@ -19,9 +20,11 @@ from agp_physical_validation import (
     apply_pauli_sum,
     build_action_cache,
     build_learned_variant_specs,
+    final_run_from_summary,
     select_best_learned_variant,
     variational_l1_agp,
 )
+import agp_physical_validation
 from utils import SparsePauliOperator, transverse_field_ising_problem
 
 
@@ -99,6 +102,47 @@ class Q15PhysicalValidationTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertFalse(status["valid"])
         self.assertEqual(status["reason"], "zero_reference")
+
+    def test_final_run_prefers_temporal_refinement_recorded_in_feedback_summary(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_run_dir = agp_physical_validation.RUN_DIR
+            agp_physical_validation.RUN_DIR = root
+            try:
+                output_dir = (
+                    root
+                    / "runs"
+                    / "refined"
+                    / "agp_8_residual_16_add_2_rounds_3"
+                )
+                refined = output_dir / "temporal_refinement"
+                refined.mkdir(parents=True)
+                data_dir = output_dir / "Models_Data"
+                data_dir.mkdir(parents=True)
+                summary = {
+                    "temporal_refinement": {
+                        "enabled": True,
+                        "run_dir": "temporal_refinement",
+                    }
+                }
+                (data_dir / "holdout_feedback_summary_residual_16.json").write_text(
+                    __import__("json").dumps(summary),
+                    encoding="utf-8",
+                )
+                config = {
+                    "support_sweep": {"residual_top_k": 10},
+                    "holdout_feedback": {
+                        "base_agp_terms": 8,
+                        "iterations": 3,
+                        "add_residual_terms_per_iteration": 2,
+                        "holdout_residual_top_k": 16,
+                        "output_root": "runs/refined",
+                    },
+                }
+
+                self.assertEqual(final_run_from_summary(config), refined)
+            finally:
+                agp_physical_validation.RUN_DIR = old_run_dir
 
     def test_learned_variant_specs_expand_term_and_scale_sweeps(self):
         specs = build_learned_variant_specs(

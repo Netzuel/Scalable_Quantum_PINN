@@ -35,7 +35,9 @@ Feedback keeps the AGP support size fixed at `K=32768`. Each round evaluates a
 larger residual holdout basis, adds the highest-RMS unseen residual equations
 to the training residual basis, swaps 256 weak AGP strings for hard
 residual-derived candidates, remaps retained output rows by Pauli label, and
-fine-tunes the same coefficient functions.
+fine-tunes the same coefficient functions. After round 15, the current retained
+benchmark runs one final temporal-refinement continuation on the fixed support
+and residual basis with a higher time-collocation grid.
 
 The current residual-feedback budget uses `intermediate_top_k = 32768`,
 `Q = 65536`, and `add_residual_terms_per_iteration = 3072`. The final trained
@@ -51,7 +53,7 @@ Generated artifacts are ignored by git and written under:
 
 ```text
 runs/baselines/agp_32768/
-runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_v1/agp_32768_residual_65536_add_3072_rounds_15/
+runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_temporal_refinement_v1/agp_32768_residual_65536_add_3072_rounds_15/
 runs/support_sweep_summary/
 ```
 
@@ -116,6 +118,10 @@ no_cd
 kipu_dqfm_l1
 learned_sparse_agp
 ```
+
+The current retained learned AGP checkpoint is selected from the
+`temporal_refinement/` sub-run when the feedback summary records an accepted
+post-curriculum temporal-refinement stage.
 
 The diagnostic reports final energy, excitation probability, ground-state
 fidelity, `<Z_i>` RMSE, nearest-neighbor `<Z_i Z_{i+1}>` RMSE, and improvement

@@ -176,12 +176,31 @@ final train residual equations = 50176
 final generated holdout pool = 65536
 ```
 
-The final round residual diagnostics were:
+## Post-Curriculum Temporal Refinement
+
+After the fixed-K support-swap curriculum finishes, the retained benchmark runs
+one final self-supervised continuation stage on the round-15 AGP support and
+residual basis:
 
 ```text
-training relative residual = 0.001547411
-holdout relative residual  = 0.056218036
-absolute unseen residual   = 0.000110266
+epochs = 2500
+num_points = 64
+lr = 3e-6
+optimizer = AdamW
+```
+
+This refinement increases the time-collocation resolution while keeping the AGP
+support fixed. It continues to train the PAU network, learned schedule, global
+scale, and soft gates using only the projected residual objective and
+regularizers. It does not use final ground-state energy, final fidelity, or
+exact final observables.
+
+The accepted temporal-refinement residual diagnostics were:
+
+```text
+training relative residual = 0.001722056
+holdout relative residual  = 0.056884907
+absolute unseen residual   = 0.001222019
 ```
 
 The reported unseen relative residual is not meaningful in this run because the
@@ -207,21 +226,36 @@ The latest expanded-support result is:
 |---|---:|---:|---:|---:|
 | no CD | 16.8582 | 0.000287 | 0.9700 | 0.8411 |
 | Kipu/DQFM l=1 | 10.1628 | 0.02594 | 0.8441 | 0.4119 |
-| learned sparse AGP + learned schedule + fixed-K support swap | 0.2740 | 0.9478 | 0.0187 | 0.0138 |
+| learned sparse AGP + learned schedule + fixed-K support swap + temporal refinement | 0.2369 | 0.9549 | 0.0148 | 0.0124 |
 
-The previous retained PAU benchmark without support swaps had:
+The previous retained fixed-K support-swap benchmark without temporal
+refinement had:
+
+```text
+energy error = 0.2740
+ground fidelity = 0.9478
+```
+
+The post-curriculum temporal refinement therefore improved the retained
+physical benchmark:
+
+```text
+energy error improvement ~= 13.5%
+ground fidelity gain    ~= 0.0071
+```
+
+The older retained PAU benchmark without support swaps had:
 
 ```text
 energy error = 0.7002
 ground fidelity = 0.8675
 ```
 
-The promoted fixed-K support-swap curriculum therefore improved the retained
-physical benchmark:
+The current benchmark improves substantially over that older no-swap PAU run:
 
 ```text
-energy error improvement ~= 60.9%
-ground fidelity gain    ~= 0.0803
+energy error improvement ~= 66.2%
+ground fidelity gain    ~= 0.0874
 ```
 
 Earlier architecture/activation candidates from the PAU sweep remain rejected:
@@ -231,12 +265,13 @@ Earlier architecture/activation candidates from the PAU sweep remain rejected:
 | width 128, 4 layers, SiLU | 1.2558 | 0.7410 | worse physical metrics |
 | width 96, 4 layers, trainable SiLU | 1.1214 | 0.7789 | improved over SiLU but worse than PAU |
 
-The final support-swap holdout residual (`0.0562`) is slightly worse than the
-previous no-swap PAU holdout residual (`0.0532`). The method is nevertheless
-retained because the physical validation improved substantially: final energy,
-ground-state fidelity, `<Z_i>`, and `<Z_i Z_{i+1}>` all moved closer to the
-exact q15 final ground-state diagnostics. This reinforces that the projected
-residual is a necessary diagnostic, not the only benchmark objective.
+The final temporal-refinement holdout residual (`0.0569`) is slightly worse
+than the previous no-swap PAU holdout residual (`0.0532`). The method is
+nevertheless retained because the physical validation improved substantially:
+final energy, ground-state fidelity, `<Z_i>`, and `<Z_i Z_{i+1}>` all moved
+closer to the exact q15 final ground-state diagnostics. This reinforces that
+the projected residual is a necessary diagnostic, not the only benchmark
+objective.
 
 The learned row uses the exported learned schedule grid from the trained AGP
 checkpoint. The no-CD and Kipu/DQFM l=1 rows use the fixed reference

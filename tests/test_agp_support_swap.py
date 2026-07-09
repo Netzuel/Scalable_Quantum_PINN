@@ -14,7 +14,11 @@ from projected_sparse_training_common import (  # noqa: E402
     plan_fixed_k_support_swap,
     remap_trainable_state_for_agp_labels,
 )
-from agp_holdout_feedback import compact_support_swap_plan, support_swap_settings_from_feedback  # noqa: E402
+from agp_holdout_feedback import (  # noqa: E402
+    compact_support_swap_plan,
+    support_swap_settings_from_feedback,
+    temporal_refinement_settings_from_feedback,
+)
 from utils import SparsePauliOperator  # noqa: E402
 
 
@@ -39,6 +43,27 @@ class AGPSupportSwapTests(unittest.TestCase):
         self.assertEqual(settings.candidate_pool_multiplier, 12)
         self.assertEqual(settings.protect_top_fraction, 0.05)
         self.assertEqual(settings.new_gate_logit, 2.0)
+
+    def test_temporal_refinement_settings_are_read_from_holdout_feedback_config(self):
+        settings = temporal_refinement_settings_from_feedback(
+            {
+                "temporal_refinement": {
+                    "enabled": True,
+                    "epochs": 2500,
+                    "num_points": 64,
+                    "lr": 2.5e-6,
+                    "optimizer": "AdamW",
+                    "run_dir": "temporal_refinement",
+                }
+            }
+        )
+
+        self.assertTrue(settings.enabled)
+        self.assertEqual(settings.epochs, 2500)
+        self.assertEqual(settings.num_points, 64)
+        self.assertEqual(settings.lr, 2.5e-6)
+        self.assertEqual(settings.optimizer, "AdamW")
+        self.assertEqual(settings.run_dir, "temporal_refinement")
 
     def test_compact_support_swap_plan_omits_full_support_lists(self):
         compact = compact_support_swap_plan(
