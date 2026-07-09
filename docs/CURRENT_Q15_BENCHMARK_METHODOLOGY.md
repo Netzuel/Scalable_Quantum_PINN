@@ -207,6 +207,92 @@ The reported unseen relative residual is not meaningful in this run because the
 AGP=0 reference residual on the sampled unseen batch is zero. The absolute
 unseen residual is still stored, but the quotient is recorded as invalid.
 
+## End-To-End Pipeline
+
+The current benchmark is controlled by:
+
+```text
+config = tests/q15/sweep_test/config.json
+training entrypoint = scripts/agp_holdout_feedback.py
+physical validation entrypoint = scripts/agp_physical_validation.py
+current run root =
+  tests/q15/sweep_test/runs/
+  fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_temporal_refinement_v1/
+  agp_32768_residual_65536_add_3072_rounds_15/
+```
+
+From a cleaned `tests/q15/sweep_test/` folder, the full retained pipeline is:
+
+1. Build or refresh the q15 driver/problem Hamiltonian decomposition and index.
+
+```bash
+conda run -n torch-mps python scripts/build_driver_problem_hamiltonian.py --update-index
+```
+
+2. Clean generated q15 artifacts without recreating top-level `Images/` or
+   `Models_Data/` folders.
+
+```bash
+conda run -n torch-mps python scripts/agp_restart.py \
+  --config tests/q15/sweep_test/config.json
+```
+
+3. Train the retained end-to-end sparse AGP pipeline. This command trains the
+   missing SiLU warm-start baseline if needed, warm-starts the PAU feedback
+   model, runs the 15 fixed-K holdout-feedback/support-swap curriculum rounds,
+   and then runs the post-curriculum temporal-refinement continuation.
+
+```bash
+conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
+  --config tests/q15/sweep_test/config.json
+```
+
+4. Run the post-training physical diagnostic. The script chooses the
+   `temporal_refinement/` checkpoint when the feedback summary records it as
+   enabled, then compares no-CD, Kipu/DQFM `l=1`, and the learned sparse AGP.
+
+```bash
+conda run --no-capture-output -n torch-mps python scripts/agp_physical_validation.py \
+  --config tests/q15/sweep_test/config.json
+```
+
+5. Accept or reject the candidate by the q15 physical validation table. The
+   deciding retained metrics are final energy error and ground-state fidelity,
+   with `<Z_i>` and `<Z_i Z_{i+1}>` RMSEs as observable consistency checks.
+   A candidate is promoted only if it improves the retained physical benchmark
+   without using final ground-truth observables during training.
+
+Generated run artifacts are local and ignored by git. The repository stores the
+code, configuration, tests, and this methodology record; it does not commit
+`runs/`, checkpoint files, or generated figures.
+
+## Certification Status
+
+The current q15 result is the retained physical benchmark, but it is not a
+fully certified sparse AGP support for the unrestricted `4**15` basis. Under
+`AGP_CERTIFICATION_CRITERIA.md`, the current status is:
+
+| Gate | Status | Evidence |
+|---|---|---|
+| Training residual | pass | temporal refinement training relative residual `0.001722056` |
+| Holdout residual | pass | temporal refinement holdout relative residual `0.056884907`, below the practical `0.05` to `0.10` band |
+| Unseen residual quotient | not tested | quotient invalid because the AGP=0 reference residual on the sampled unseen subset is zero |
+| Fixed `probe_gate` / `probe_watch` / `probe_test` residuals | not tested | the current q15 pipeline does not yet define fixed disjoint probe bases |
+| K-sweep plateau | not tested | current retained run uses `K = 32768`; no formal nearby-K plateau is stored for this temporal-refinement benchmark |
+| Q-sweep plateau | not tested | current validation uses `Q = 65536`; no formal larger-Q plateau is stored |
+| Top-term stability across K and seeds | not tested | no formal top-term overlap study is stored for the retained temporal-refinement run |
+| Prune-and-retest | not tested | deployment truncates to the top 2048 terms for statevector validation, but no formal residual prune sweep is stored |
+| Physical validation | pass | learned AGP improves energy error, fidelity, and local observable RMSEs against no-CD and Kipu/DQFM `l=1` |
+
+The correct claim level is therefore:
+
+```text
+Projected sparse AGP experiment with strong q15 physical validation.
+```
+
+It should not be described as a certified globally sufficient support for the
+full Pauli basis.
+
 ## Physical Validation
 
 After training, the q15 statevector diagnostic compares:
