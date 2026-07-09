@@ -144,6 +144,53 @@ class Q15PhysicalValidationTests(unittest.TestCase):
             finally:
                 agp_physical_validation.RUN_DIR = old_run_dir
 
+    def test_final_run_prefers_adaptive_temporal_refinement_over_temporal_refinement(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_run_dir = agp_physical_validation.RUN_DIR
+            agp_physical_validation.RUN_DIR = root
+            try:
+                output_dir = (
+                    root
+                    / "runs"
+                    / "refined"
+                    / "agp_8_residual_16_add_2_rounds_3"
+                )
+                temporal = output_dir / "temporal_refinement"
+                adaptive = output_dir / "adaptive_temporal_refinement"
+                temporal.mkdir(parents=True)
+                adaptive.mkdir(parents=True)
+                data_dir = output_dir / "Models_Data"
+                data_dir.mkdir(parents=True)
+                summary = {
+                    "temporal_refinement": {
+                        "enabled": True,
+                        "run_dir": "temporal_refinement",
+                    },
+                    "adaptive_temporal_refinement": {
+                        "enabled": True,
+                        "run_dir": "adaptive_temporal_refinement",
+                    },
+                }
+                (data_dir / "holdout_feedback_summary_residual_16.json").write_text(
+                    __import__("json").dumps(summary),
+                    encoding="utf-8",
+                )
+                config = {
+                    "support_sweep": {"residual_top_k": 10},
+                    "holdout_feedback": {
+                        "base_agp_terms": 8,
+                        "iterations": 3,
+                        "add_residual_terms_per_iteration": 2,
+                        "holdout_residual_top_k": 16,
+                        "output_root": "runs/refined",
+                    },
+                }
+
+                self.assertEqual(final_run_from_summary(config), adaptive)
+            finally:
+                agp_physical_validation.RUN_DIR = old_run_dir
+
     def test_learned_variant_specs_expand_term_and_scale_sweeps(self):
         specs = build_learned_variant_specs(
             {

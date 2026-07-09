@@ -210,8 +210,10 @@ final generated holdout pool = 65536
 ## Post-Curriculum Temporal Refinement
 
 After the fixed-K support-swap curriculum finishes, the retained methodology can
-run one final self-supervised continuation stage on the final-round AGP support
-and residual basis:
+run self-supervised continuation stages on the final-round AGP support and
+residual basis.
+
+The first continuation uses a denser uniform time-collocation grid:
 
 ```text
 epochs = 2500
@@ -220,19 +222,35 @@ lr = 3e-6
 optimizer = AdamW
 ```
 
-This refinement increases the time-collocation resolution while keeping the AGP
-support fixed. It continues to train the PAU network, learned schedule, global
+The retained benchmark then runs an adaptive temporal-refinement continuation.
+It scores a dense time grid using only projected Euler-Lagrange residual
+quantities, concentrates the final collocation grid near harder time regions,
+and keeps the AGP support fixed:
+
+```text
+epochs = 1500
+dense_points = 257
+num_points = 64
+lr = 1.5e-6
+optimizer = AdamW
+difficulty = residual_x_cd_norm
+weight_power = 0.5
+min_weight = 0.25
+max_weight = 4.0
+```
+
+Both refinements continue to train the PAU network, learned schedule, global
 scale, and soft gates using only the projected residual objective and
-regularizers. It does not use final ground-state energy, final fidelity, or
+regularizers. They do not use final ground-state energy, final fidelity, or
 exact final observables.
 
 For the current retained q15 benchmark instance, the accepted
-temporal-refinement residual diagnostics were:
+adaptive-refinement residual diagnostics were:
 
 ```text
-training relative residual = 0.001722056
-holdout relative residual  = 0.056884907
-absolute unseen residual   = 0.001222019
+training relative residual = 0.003279208
+holdout relative residual  = 0.055878535
+absolute unseen residual   = 0.000301352
 ```
 
 The reported unseen relative residual is not meaningful in this run because the
@@ -257,7 +275,7 @@ The current retained q15 benchmark instance is:
 config = tests/q15/sweep_test/config.json
 current run root =
   tests/q15/sweep_test/runs/
-  fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_temporal_refinement_v1/
+  fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/
   agp_32768_residual_65536_add_3072_rounds_15/
 ```
 
@@ -281,7 +299,8 @@ conda run -n torch-mps python scripts/agp_restart.py \
 3. Train the retained end-to-end sparse AGP pipeline. This command trains the
    missing SiLU warm-start baseline if needed, warm-starts the PAU feedback
    model, runs the configured fixed-K holdout-feedback/support-swap curriculum,
-   and then runs the post-curriculum temporal-refinement continuation.
+   runs the uniform temporal-refinement continuation, and then runs the
+   adaptive temporal-refinement continuation.
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
@@ -289,9 +308,10 @@ conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.p
 ```
 
 4. Run the post-training physical diagnostic. The script chooses the
-   `temporal_refinement/` checkpoint when the feedback summary records it as
-   enabled. For the q15 benchmark instance, it compares no-CD, Kipu/DQFM `l=1`,
-   and the learned sparse AGP.
+   `adaptive_temporal_refinement/` checkpoint when the feedback summary records
+   it as enabled, otherwise it falls back to `temporal_refinement/` and then to
+   the final feedback round. For the q15 benchmark instance, it compares no-CD,
+   Kipu/DQFM `l=1`, and the learned sparse AGP.
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_physical_validation.py \
@@ -320,13 +340,13 @@ the current q15 status is:
 
 | Gate | Status | Evidence |
 |---|---|---|
-| Training residual | pass | temporal refinement training relative residual `0.001722056` |
-| Holdout residual | pass | temporal refinement holdout relative residual `0.056884907`, below the practical `0.05` to `0.10` band |
+| Training residual | pass | adaptive temporal-refinement training relative residual `0.003279208` |
+| Holdout residual | pass | adaptive temporal-refinement holdout relative residual `0.055878535`, within the practical `0.05` to `0.10` target band |
 | Unseen residual quotient | not tested | quotient invalid because the AGP=0 reference residual on the sampled unseen subset is zero |
 | Fixed `probe_gate` / `probe_watch` / `probe_test` residuals | not tested | the current retained pipeline does not yet define fixed disjoint probe bases |
-| K-sweep plateau | not tested | current retained run uses `K = 32768`; no formal nearby-K plateau is stored for this temporal-refinement benchmark |
+| K-sweep plateau | not tested | current retained run uses `K = 32768`; no formal nearby-K plateau is stored for this adaptive-refinement benchmark |
 | Q-sweep plateau | not tested | current validation uses `Q = 65536`; no formal larger-Q plateau is stored |
-| Top-term stability across K and seeds | not tested | no formal top-term overlap study is stored for the retained temporal-refinement run |
+| Top-term stability across K and seeds | not tested | no formal top-term overlap study is stored for the retained adaptive-refinement run |
 | Prune-and-retest | not tested | deployment truncates to the top 2048 terms for statevector validation, but no formal residual prune sweep is stored |
 | Physical validation | pass | learned AGP improves energy error, fidelity, and local observable RMSEs against no-CD and Kipu/DQFM `l=1` |
 
@@ -352,28 +372,49 @@ learned_sparse_agp
 The q15 statevector path is intentionally a benchmark diagnostic, not a scalable
 large-q library path.
 
-The latest expanded-support result is:
+The latest retained adaptive-temporal benchmark result is:
 
 | Method | Energy error | Ground fidelity | `<Z_i>` RMSE | `<Z_i Z_{i+1}>` RMSE |
 |---|---:|---:|---:|---:|
 | no CD | 16.8582 | 0.000287 | 0.9700 | 0.8411 |
 | Kipu/DQFM l=1 | 10.1628 | 0.02594 | 0.8441 | 0.4119 |
-| learned sparse AGP + learned schedule + fixed-K support swap + temporal refinement | 0.2369 | 0.9549 | 0.0148 | 0.0124 |
+| learned sparse AGP + learned schedule + fixed-K support swap + adaptive temporal refinement | 0.1873 | 0.9601 | 0.0144 | 0.0140 |
 
-The previous retained fixed-K support-swap benchmark without temporal
-refinement had:
+The previous retained temporal-refinement benchmark had:
+
+```text
+energy error = 0.2369
+ground fidelity = 0.9549
+<Z_i> RMSE = 0.0148
+<Z_i Z_{i+1}> RMSE = 0.0124
+```
+
+Adaptive temporal refinement therefore improved the primary retained physical
+benchmark targets:
+
+```text
+energy error improvement ~= 20.9%
+ground fidelity gain    ~= 0.0053
+```
+
+It also slightly improved `<Z_i>` RMSE, while nearest-neighbor
+`<Z_i Z_{i+1}>` RMSE worsened from `0.0124` to `0.0140`. The method is retained
+because the stated primary objective for this iteration was lower final energy
+error and higher ground-state fidelity.
+
+The older retained fixed-K support-swap benchmark without temporal refinement
+had:
 
 ```text
 energy error = 0.2740
 ground fidelity = 0.9478
 ```
 
-The post-curriculum temporal refinement therefore improved the retained
-physical benchmark:
+The current benchmark improves over that no-temporal-refinement run:
 
 ```text
-energy error improvement ~= 13.5%
-ground fidelity gain    ~= 0.0071
+energy error improvement ~= 31.6%
+ground fidelity gain    ~= 0.0124
 ```
 
 The older retained PAU benchmark without support swaps had:
@@ -386,8 +427,8 @@ ground fidelity = 0.8675
 The current benchmark improves substantially over that older no-swap PAU run:
 
 ```text
-energy error improvement ~= 66.2%
-ground fidelity gain    ~= 0.0874
+energy error improvement ~= 73.2%
+ground fidelity gain    ~= 0.0926
 ```
 
 Earlier architecture/activation candidates from the PAU sweep remain rejected:
@@ -397,13 +438,12 @@ Earlier architecture/activation candidates from the PAU sweep remain rejected:
 | width 128, 4 layers, SiLU | 1.2558 | 0.7410 | worse physical metrics |
 | width 96, 4 layers, trainable SiLU | 1.1214 | 0.7789 | improved over SiLU but worse than PAU |
 
-The final temporal-refinement holdout residual (`0.0569`) is slightly worse
+The final adaptive-refinement holdout residual (`0.0559`) is slightly worse
 than the previous no-swap PAU holdout residual (`0.0532`). The method is
-nevertheless retained because the physical validation improved substantially:
-final energy, ground-state fidelity, `<Z_i>`, and `<Z_i Z_{i+1}>` all moved
-closer to the exact q15 final ground-state diagnostics. This reinforces that
-the projected residual is a necessary diagnostic, not the only benchmark
-objective.
+nevertheless retained because the primary physical validation targets improved:
+final energy and ground-state fidelity moved closer to the exact q15 final
+ground-state diagnostics. This reinforces that the projected residual is a
+necessary diagnostic, not the only benchmark objective.
 
 The learned row uses the exported learned schedule grid from the trained AGP
 checkpoint. The no-CD and Kipu/DQFM l=1 rows use the fixed reference
@@ -417,7 +457,9 @@ schedule.
 The current retained q15 benchmark instance shows that the jointly learned
 sparse AGP and schedule are much more physically useful than no-CD and the
 first-order nested-commutator approximator on a physically checkable
-above-exact-output problem.
+above-exact-output problem. The adaptive temporal-refinement stage is retained
+because it improved final energy and ground fidelity beyond the uniform
+temporal-refinement benchmark without using final-state observables in training.
 
 It does not certify that the selected support is globally sufficient out of the
 full `4**q` basis. It also does not prove that a lower projected residual always
@@ -426,59 +468,25 @@ maps to a better final physical state.
 The next methodological improvements should therefore add physical robustness
 or attribution controls without using benchmark-only ground-truth targets.
 
-## Recommended Next Direction
+## Non-Retained Probe-Loss Variant
 
-The most natural next loss is a variational action or stochastic probe-state
-loss that acts one level closer to the physical counterdiabatic condition than
-the current Euler-Lagrange residual alone.
-
-Define the gauge-error operator:
+The current retained methodology does not include the previously tested
+gauge-error probe loss. That candidate introduced the gauge-error operator
 
 ```text
-G(A) = dH_AD/dlambda + i [A_lambda, H_AD].
+G(A) = dH_AD/dlambda + i [A_lambda, H_AD]
 ```
 
-The current residual asks whether the stationarity condition is small:
-
-```text
-R(A) = [G(A), H_AD].
-```
-
-A complementary physical loss would also penalize the size of `G(A)` itself,
-projected onto generated Pauli coordinates or estimated with stochastic probe
-states:
-
-```text
-L_action = E_tau ||G(A)||^2 / (||G(0)||^2 + eps)
-```
-
-or, with scalable probe states `|phi_s>`:
+and added a self-supervised probe-state penalty of the form
 
 ```text
 L_probe = E_{tau,s} ||G(A, tau) |phi_s>||^2
-          / (||G(0, tau) |phi_s>||^2 + eps).
+          / (||G(0, tau) |phi_s>||^2 + eps)
 ```
 
-The combined training objective would be:
-
-```text
-L_total = L_Euler_Lagrange
-        + alpha L_action_or_probe
-        + beta L_budget
-        + gamma L_binary_gate
-        + eta L_scale_l2
-        + optional smoothness regularization on C_P(t).
-```
-
-This does not use the q15 final ground state. It asks the AGP to reduce a
-physically meaningful gauge error across sampled times and sampled probes, while
-the existing residual term still enforces the Euler-Lagrange condition.
-
-For q15, the probe loss can be validated against the same final energy and
-fidelity table. For larger q, the same idea can be estimated with product-state,
-local-shadow, or tensor-network probes without enumerating the full Pauli basis.
-
-## Rejected Probe-Loss Variant
+to the projected Euler-Lagrange residual. The idea was physically motivated and
+did not use q15 final-state ground-truth metrics during training, but the tested
+configuration did not improve the retained benchmark.
 
 The first tested `L_probe` implementation used `alpha = 0.05` with four
 deterministic Pauli-stabilizer product probes. It was trained end-to-end under
@@ -489,5 +497,6 @@ physical benchmark:
 |---|---:|---:|---:|---:|
 | learned sparse AGP with `L_probe` | 3.9766 | 0.3005 | 0.2785 | 0.2118 |
 
-That rejected probe-loss result is superseded by the retained PAU benchmark
-above, with energy error `0.7002` and ground fidelity `0.8675`.
+That rejected probe-loss result is superseded by the current retained benchmark
+above. It was also worse than the older no-swap PAU benchmark, which had energy
+error `0.7002` and ground fidelity `0.8675`.

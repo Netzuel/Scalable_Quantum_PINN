@@ -85,6 +85,21 @@ class TemporalRefinementSettings:
     run_dir: str = "temporal_refinement"
 
 
+@dataclass(frozen=True)
+class AdaptiveTemporalRefinementSettings:
+    enabled: bool = False
+    epochs: int = 0
+    dense_points: int = 0
+    num_points: int = 0
+    lr: float = 0.0
+    optimizer: str = ""
+    run_dir: str = "adaptive_temporal_refinement"
+    weight_power: float = 0.5
+    min_weight: float = 0.25
+    max_weight: float = 4.0
+    difficulty: str = "residual"
+
+
 def configure_run_dir(config_path: Path) -> None:
     global RUN_DIR
     RUN_DIR = config_path.resolve().parent
@@ -134,6 +149,99 @@ def temporal_refinement_settings_from_feedback(feedback: dict[str, object]) -> T
         optimizer=str(raw.get("optimizer", "")),
         run_dir=str(raw.get("run_dir", "temporal_refinement")),
     )
+
+
+def adaptive_temporal_refinement_settings_from_feedback(
+    feedback: dict[str, object],
+) -> AdaptiveTemporalRefinementSettings:
+    raw = feedback.get("adaptive_temporal_refinement", {})
+    if not isinstance(raw, dict):
+        return AdaptiveTemporalRefinementSettings()
+    return AdaptiveTemporalRefinementSettings(
+        enabled=bool(raw.get("enabled", False)),
+        epochs=max(0, int(raw.get("epochs", 0))),
+        dense_points=max(0, int(raw.get("dense_points", 0))),
+        num_points=max(0, int(raw.get("num_points", 0))),
+        lr=max(0.0, float(raw.get("lr", 0.0))),
+        optimizer=str(raw.get("optimizer", "")),
+        run_dir=str(raw.get("run_dir", "adaptive_temporal_refinement")),
+        weight_power=max(0.0, float(raw.get("weight_power", 0.5))),
+        min_weight=max(0.0, float(raw.get("min_weight", 0.25))),
+        max_weight=max(0.0, float(raw.get("max_weight", 4.0))),
+        difficulty=str(raw.get("difficulty", "residual")),
+    )
+
+
+def make_adaptive_tau_grid(
+    dense_tau: torch.Tensor,
+    difficulty: torch.Tensor,
+    *,
+    num_points: int,
+    weight_power: float,
+    min_weight: float,
+    max_weight: float,
+) -> tuple[torch.Tensor, dict[str, object]]:
+    """Build a monotone collocation grid concentrated near hard residual times."""
+
+    if num_points < 2:
+        raise ValueError("adaptive temporal refinement requires at least two time points.")
+    dense = dense_tau.detach().flatten().to(dtype=torch.float32)
+    score = difficulty.detach().flatten().to(dtype=torch.float32, device=dense.device)
+    if dense.numel() != score.numel():
+        raise ValueError("dense_tau and difficulty must have the same length.")
+    if dense.numel() < 2:
+        raise ValueError("adaptive temporal refinement requires at least two dense time points.")
+    if max_weight < min_weight:
+        raise ValueError("adaptive temporal refinement max_weight must be >= min_weight.")
+
+    order = torch.argsort(dense)
+    dense = dense.index_select(0, order)
+    score = score.index_select(0, order)
+    score = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+    eps = torch.finfo(score.dtype).eps
+    mean_score = torch.mean(score).clamp_min(eps)
+    relative_score = score / mean_score
+    if weight_power == 0.0:
+        weights = torch.ones_like(relative_score)
+    else:
+        weights = relative_score.clamp_min(eps).pow(weight_power)
+    weights = weights.clamp(min=min_weight, max=max_weight)
+    delta = torch.diff(dense).clamp_min(eps)
+    segment_mass = 0.5 * (weights[:-1] + weights[1:]) * delta
+    total_mass = torch.sum(segment_mass)
+    if not torch.isfinite(total_mass) or float(total_mass.item()) <= 0.0:
+        tau = torch.linspace(float(dense[0]), float(dense[-1]), num_points, device=dense.device)
+        metadata = {
+            "num_points": int(num_points),
+            "dense_points": int(dense.numel()),
+            "min_weight": float(weights.min().item()),
+            "max_weight": float(weights.max().item()),
+            "mean_weight": float(weights.mean().item()),
+            "fallback": "uniform_zero_mass",
+        }
+        return tau.view(-1, 1), metadata
+
+    cdf = torch.cat([torch.zeros(1, device=dense.device, dtype=dense.dtype), torch.cumsum(segment_mass, dim=0)])
+    cdf = cdf / total_mass
+    targets = torch.linspace(0.0, 1.0, num_points, device=dense.device, dtype=dense.dtype)
+    right = torch.searchsorted(cdf, targets, right=False).clamp(min=1, max=cdf.numel() - 1)
+    left = right - 1
+    width = (cdf[right] - cdf[left]).clamp_min(eps)
+    frac = (targets - cdf[left]) / width
+    tau = dense[left] + frac * (dense[right] - dense[left])
+    tau[0] = dense[0]
+    tau[-1] = dense[-1]
+    metadata = {
+        "num_points": int(num_points),
+        "dense_points": int(dense.numel()),
+        "min_weight": float(weights.min().item()),
+        "max_weight": float(weights.max().item()),
+        "mean_weight": float(weights.mean().item()),
+        "max_difficulty": float(score.max().item()),
+        "mean_difficulty": float(score.mean().item()),
+        "weight_power": float(weight_power),
+    }
+    return tau.view(-1, 1), metadata
 
 
 def compact_support_swap_plan(plan: dict[str, object] | None, *, preview_terms: int = 32) -> dict[str, object]:
@@ -245,6 +353,85 @@ def make_support_with_residual_labels(
     return support
 
 
+def load_feedback_hamiltonian_pair(config):
+    hamiltonian_path = Path(config.hamiltonian_source)
+    if not hamiltonian_path.is_absolute():
+        hamiltonian_path = ROOT / hamiltonian_path
+    return load_pauli_hamiltonian_pair(
+        hamiltonian_path,
+        system=config.system,
+        n_qubits=config.n_qubits,
+        distance=config.distance,
+    )
+
+
+def make_feedback_model_from_state(
+    *,
+    h0,
+    h1,
+    settings: ProjectedRunSettings,
+    agp_labels: list[str],
+    residual_labels: list[str],
+    trainable_state: dict[str, object],
+    stage: int,
+    device: torch.device,
+):
+    support = make_support_with_residual_labels(
+        h0=h0,
+        h1=h1,
+        settings=settings,
+        agp_labels=agp_labels,
+        residual_labels=residual_labels,
+        stage=stage,
+    )
+    model = make_projected_model(h0, h1, support, settings.model, device)
+    restore_projected_trainable_state(
+        model,
+        trainable_state,
+        settings=settings,
+        preferred_active_labels=preferred_calibration_labels_from_support(support),
+    )
+    return model, support
+
+
+def adaptive_temporal_difficulty(
+    *,
+    payload: dict[str, object],
+    settings: ProjectedRunSettings,
+    agp_labels: list[str],
+    residual_labels: list[str],
+    trainable_state: dict[str, object],
+    stage: int,
+    dense_points: int,
+    difficulty: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    config = settings.model
+    device = select_device(settings.device)
+    h0, h1 = load_feedback_hamiltonian_pair(config)
+    model, _ = make_feedback_model_from_state(
+        h0=h0,
+        h1=h1,
+        settings=settings,
+        agp_labels=agp_labels,
+        residual_labels=residual_labels,
+        trainable_state=trainable_state,
+        stage=stage,
+        device=device,
+    )
+    dense_tau = torch.linspace(0.0, 1.0, dense_points, device=device).view(-1, 1)
+    t = config.t_initial + config.physical_time * dense_tau
+    with torch.no_grad():
+        residual = model.euler_lagrange_residual(t)
+        residual_score = torch.sum(torch.abs(residual) ** 2, dim=-1).real
+        if difficulty == "residual_x_cd_norm":
+            prediction = model(t)
+            cd_coefficients = prediction["d_lambda_dt"] * prediction["agp_coefficients"]
+            cd_norm = torch.sqrt(torch.mean(torch.abs(cd_coefficients) ** 2, dim=-1).real)
+            normalized_cd_norm = cd_norm / torch.mean(cd_norm).clamp_min(torch.finfo(cd_norm.dtype).eps)
+            residual_score = residual_score * normalized_cd_norm
+    return dense_tau.detach().cpu(), residual_score.detach().cpu()
+
+
 def train_feedback_round(
     *,
     run_dir: Path,
@@ -256,33 +443,22 @@ def train_feedback_round(
     round_index: int,
     additions: list[dict[str, object]],
     support_swap_plan: dict[str, object] | None = None,
+    tau_override: torch.Tensor | None = None,
+    temporal_sampling_metadata: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], dict[str, float], dict[str, object]]:
     config = settings.model
     torch.manual_seed(settings.seed + round_index)
     device = select_device(settings.device)
-    hamiltonian_path = Path(config.hamiltonian_source)
-    if not hamiltonian_path.is_absolute():
-        hamiltonian_path = ROOT / hamiltonian_path
-    h0, h1 = load_pauli_hamiltonian_pair(
-        hamiltonian_path,
-        system=config.system,
-        n_qubits=config.n_qubits,
-        distance=config.distance,
-    )
-    support = make_support_with_residual_labels(
+    h0, h1 = load_feedback_hamiltonian_pair(config)
+    model, support = make_feedback_model_from_state(
         h0=h0,
         h1=h1,
         settings=settings,
         agp_labels=agp_labels,
         residual_labels=residual_labels,
+        trainable_state=trainable_state,
         stage=round_index,
-    )
-    model = make_projected_model(h0, h1, support, config, device)
-    restore_projected_trainable_state(
-        model,
-        trainable_state,
-        settings=settings,
-        preferred_active_labels=preferred_calibration_labels_from_support(support),
+        device=device,
     )
 
     optimizer, optimizer_info = make_optimizer(model, settings)
@@ -298,7 +474,10 @@ def train_feedback_round(
         calibration_binary=settings.calibration_binary_weight,
         calibration_scale_l2=settings.calibration_scale_l2_weight,
     )
-    tau = torch.linspace(0.0, 1.0, settings.num_points, device=device).view(-1, 1)
+    if tau_override is None:
+        tau = torch.linspace(0.0, 1.0, settings.num_points, device=device).view(-1, 1)
+    else:
+        tau = tau_override.detach().to(device=device, dtype=torch.float32).view(-1, 1)
     t = config.t_initial + config.physical_time * tau
     history: list[dict[str, float]] = []
     train_stage(
@@ -322,6 +501,8 @@ def train_feedback_round(
     metadata["feedback_added_term_count"] = len(additions)
     metadata["support_swap"] = compact_support_swap_plan(support_swap_plan)
     metadata["adaptive_enabled"] = False
+    if temporal_sampling_metadata is not None:
+        metadata["temporal_sampling"] = temporal_sampling_metadata
     metadata["final_agp_terms"] = len(model.agp_labels)
     metadata["final_intermediate_terms"] = len(model.intermediate_labels)
     metadata["final_residual_terms"] = len(model.residual_labels)
@@ -730,6 +911,7 @@ def write_feedback_summary(
     thresholds: Thresholds,
     residual_budget: dict[str, object],
     temporal_refinement: dict[str, object] | None = None,
+    adaptive_temporal_refinement: dict[str, object] | None = None,
     keep_round_images: bool = True,
 ) -> None:
     images_dir = output_dir / "Images"
@@ -782,6 +964,8 @@ def write_feedback_summary(
     }
     if temporal_refinement is not None:
         payload["temporal_refinement"] = temporal_refinement
+    if adaptive_temporal_refinement is not None:
+        payload["adaptive_temporal_refinement"] = adaptive_temporal_refinement
     with (data_dir / f"holdout_feedback_summary_residual_{residual_top_k}.json").open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
@@ -793,6 +977,10 @@ def write_feedback_summary(
         final_round_dir = output_dir / str(round_rows[-1]["run_dir"])
         if temporal_refinement and temporal_refinement.get("enabled", False):
             candidate_dir = output_dir / str(temporal_refinement.get("run_dir", ""))
+            if candidate_dir.is_dir():
+                final_round_dir = candidate_dir
+        if adaptive_temporal_refinement and adaptive_temporal_refinement.get("enabled", False):
+            candidate_dir = output_dir / str(adaptive_temporal_refinement.get("run_dir", ""))
             if candidate_dir.is_dir():
                 final_round_dir = candidate_dir
         coefficient_path = final_round_dir / "Models_Data" / "final_agp_coefficients.pt"
@@ -867,6 +1055,7 @@ def main() -> None:
     min_rms = float(args.min_rms if args.min_rms is not None else feedback.get("min_rms", 0.0))
     support_swap_settings = support_swap_settings_from_feedback(feedback)
     temporal_refinement_settings = temporal_refinement_settings_from_feedback(feedback)
+    adaptive_temporal_settings = adaptive_temporal_refinement_settings_from_feedback(feedback)
     output_root_arg = args.output_root if args.output_root is not None else Path(str(feedback.get("output_root", "runs/holdout_feedback")))
     baseline_root_arg = args.baseline_root if args.baseline_root is not None else Path(str(feedback.get("baseline_root", "runs/baselines")))
     keep_round_images = bool(args.keep_round_images or feedback.get("keep_round_images", False))
@@ -1230,6 +1419,120 @@ def main() -> None:
             f"unseen_relative={optional_float(refined_row['unseen_relative_residual']):.6e}"
         )
 
+    adaptive_temporal_summary: dict[str, object] | None = None
+    if adaptive_temporal_settings.enabled:
+        if adaptive_temporal_settings.epochs <= 0:
+            raise ValueError("holdout_feedback.adaptive_temporal_refinement.epochs must be positive when enabled.")
+        if adaptive_temporal_settings.dense_points <= 1:
+            raise ValueError("holdout_feedback.adaptive_temporal_refinement.dense_points must be greater than one when enabled.")
+        if adaptive_temporal_settings.num_points <= 1:
+            raise ValueError("holdout_feedback.adaptive_temporal_refinement.num_points must be greater than one when enabled.")
+        if adaptive_temporal_settings.lr <= 0.0:
+            raise ValueError("holdout_feedback.adaptive_temporal_refinement.lr must be positive when enabled.")
+        if adaptive_temporal_settings.max_weight < adaptive_temporal_settings.min_weight:
+            raise ValueError("holdout_feedback.adaptive_temporal_refinement.max_weight must be >= min_weight.")
+        adaptive_settings = replace(
+            feedback_settings,
+            epochs=adaptive_temporal_settings.epochs,
+            num_points=adaptive_temporal_settings.num_points,
+            lr=adaptive_temporal_settings.lr,
+            optimizer=(
+                adaptive_temporal_settings.optimizer
+                if adaptive_temporal_settings.optimizer
+                else feedback_settings.optimizer
+            ),
+        )
+        dense_tau, difficulty = adaptive_temporal_difficulty(
+            payload=payload,
+            settings=adaptive_settings,
+            agp_labels=agp_labels,
+            residual_labels=residual_labels,
+            trainable_state=trainable_state,
+            stage=rounds + 2,
+            dense_points=adaptive_temporal_settings.dense_points,
+            difficulty=adaptive_temporal_settings.difficulty,
+        )
+        adaptive_tau, temporal_sampling_metadata = make_adaptive_tau_grid(
+            dense_tau,
+            difficulty,
+            num_points=adaptive_temporal_settings.num_points,
+            weight_power=adaptive_temporal_settings.weight_power,
+            min_weight=adaptive_temporal_settings.min_weight,
+            max_weight=adaptive_temporal_settings.max_weight,
+        )
+        temporal_sampling_metadata.update(
+            {
+                "enabled": True,
+                "difficulty": adaptive_temporal_settings.difficulty,
+                "uses_ground_truth_observables": False,
+                "source": "projected_euler_lagrange_residual_on_dense_time_grid",
+            }
+        )
+        adaptive_run = output_dir / adaptive_temporal_settings.run_dir
+        print(
+            "train_adaptive_temporal_refinement "
+            f"run_dir={adaptive_temporal_settings.run_dir} "
+            f"agp_terms={len(agp_labels)} residual_terms={len(residual_labels)} "
+            f"epochs={adaptive_settings.epochs} dense_points={adaptive_temporal_settings.dense_points} "
+            f"num_points={adaptive_settings.num_points} lr={adaptive_settings.lr:g}"
+        )
+        trainable_state, adaptive_final, adaptive_metadata = train_feedback_round(
+            run_dir=adaptive_run,
+            payload=payload,
+            settings=adaptive_settings,
+            agp_labels=agp_labels,
+            residual_labels=residual_labels,
+            trainable_state=trainable_state,
+            round_index=rounds + 2,
+            additions=[],
+            support_swap_plan={"enabled": False, "swap_count": 0, "reason": "adaptive_temporal_refinement"},
+            tau_override=adaptive_tau,
+            temporal_sampling_metadata=temporal_sampling_metadata,
+        )
+        adaptive_row, _ = evaluate_one_run(
+            run_dir=adaptive_run,
+            config_payload=payload,
+            residual_top_k=residual_top_k,
+            intermediate_top_k=intermediate_top_k,
+            device=select_device("cpu"),
+            spectra_dir=data_dir,
+            common_residual_labels=common_residual_labels,
+            holdout_basis_mode="union_agp",
+            holdout_basis_agp_terms=holdout_basis_agp_terms,
+        )
+        adaptive_temporal_summary = {
+            "enabled": True,
+            "run_dir": str(adaptive_run.relative_to(output_dir)),
+            "source": (
+                temporal_refinement_summary["run_dir"]
+                if temporal_refinement_summary is not None
+                else str(round_run_dir(output_dir, rounds).relative_to(output_dir))
+            ),
+            "epochs": adaptive_settings.epochs,
+            "dense_points": adaptive_temporal_settings.dense_points,
+            "num_points": adaptive_settings.num_points,
+            "lr": adaptive_settings.lr,
+            "optimizer": adaptive_settings.optimizer,
+            "difficulty": adaptive_temporal_settings.difficulty,
+            "temporal_sampling": temporal_sampling_metadata,
+            "training_final_relative_residual": float(adaptive_final["relative_residual"]),
+            "holdout_relative_residual": float(adaptive_row["holdout_relative_residual"]),
+            "unseen_relative_residual": adaptive_row["unseen_relative_residual"],
+            "unseen_relative_residual_status": adaptive_row.get("unseen_relative_residual_status"),
+            "support_metadata": {
+                "first_commutator_nnz": adaptive_metadata["first_commutator_nnz"],
+                "second_commutator_nnz": adaptive_metadata["second_commutator_nnz"],
+                "final_intermediate_terms": adaptive_metadata["final_intermediate_terms"],
+                "final_residual_terms": adaptive_metadata["final_residual_terms"],
+            },
+        }
+        print(
+            "done_adaptive_temporal_refinement "
+            f"train_relative={adaptive_final['relative_residual']:.6e} "
+            f"holdout_relative={adaptive_row['holdout_relative_residual']:.6e} "
+            f"unseen_relative={optional_float(adaptive_row['unseen_relative_residual']):.6e}"
+        )
+
     write_feedback_summary(
         output_dir=output_dir,
         rows=rows,
@@ -1239,6 +1542,7 @@ def main() -> None:
         thresholds=thresholds,
         residual_budget=residual_budget,
         temporal_refinement=temporal_refinement_summary,
+        adaptive_temporal_refinement=adaptive_temporal_summary,
         keep_round_images=keep_round_images,
     )
     summary_path = output_dir / "Models_Data" / f"holdout_feedback_summary_residual_{residual_top_k}.json"
@@ -1255,6 +1559,7 @@ def main() -> None:
                 "agp_fraction_of_full_basis": f"{Decimal(base_agp_terms) / full_basis:.12E}",
                 "rounds": round_rows,
                 "temporal_refinement": temporal_refinement_summary,
+                "adaptive_temporal_refinement": adaptive_temporal_summary,
             },
             indent=2,
         )

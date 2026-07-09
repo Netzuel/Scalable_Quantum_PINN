@@ -83,8 +83,22 @@
       "run_dir": "temporal_refinement",
       "description": "Final post-curriculum continuation on the fixed round-15 AGP support and residual basis. It increases the time collocation grid while keeping PAU weights, learned schedule, gamma, and gates trainable; no final ground-state energy, fidelity, or observable targets are used."
     },
+    "adaptive_temporal_refinement": {
+      "enabled": true,
+      "epochs": 1500,
+      "dense_points": 257,
+      "num_points": 64,
+      "lr": 1.5e-6,
+      "optimizer": "AdamW",
+      "run_dir": "adaptive_temporal_refinement",
+      "weight_power": 0.5,
+      "min_weight": 0.25,
+      "max_weight": 4.0,
+      "difficulty": "residual_x_cd_norm",
+      "description": "Final self-supervised continuation after temporal_refinement. It scores a dense time grid with the projected Euler-Lagrange residual, concentrates the training collocation grid near hard times, and keeps the AGP support fixed; no final ground-state energy, fidelity, or observable targets are used."
+    },
     "keep_round_images": false,
-    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_temporal_refinement_v1"
+    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1"
   },
   "agp_calibration": {
     "enabled": true,

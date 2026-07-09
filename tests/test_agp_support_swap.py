@@ -15,7 +15,9 @@ from projected_sparse_training_common import (  # noqa: E402
     remap_trainable_state_for_agp_labels,
 )
 from agp_holdout_feedback import (  # noqa: E402
+    adaptive_temporal_refinement_settings_from_feedback,
     compact_support_swap_plan,
+    make_adaptive_tau_grid,
     support_swap_settings_from_feedback,
     temporal_refinement_settings_from_feedback,
 )
@@ -64,6 +66,61 @@ class AGPSupportSwapTests(unittest.TestCase):
         self.assertEqual(settings.lr, 2.5e-6)
         self.assertEqual(settings.optimizer, "AdamW")
         self.assertEqual(settings.run_dir, "temporal_refinement")
+
+    def test_adaptive_temporal_refinement_settings_are_read_from_holdout_feedback_config(self):
+        settings = adaptive_temporal_refinement_settings_from_feedback(
+            {
+                "adaptive_temporal_refinement": {
+                    "enabled": True,
+                    "epochs": 1200,
+                    "dense_points": 257,
+                    "num_points": 65,
+                    "lr": 1.5e-6,
+                    "optimizer": "AdamW",
+                    "run_dir": "adaptive_temporal_refinement",
+                    "weight_power": 0.75,
+                    "min_weight": 0.2,
+                    "max_weight": 5.0,
+                    "difficulty": "residual_x_cd_norm",
+                }
+            }
+        )
+
+        self.assertTrue(settings.enabled)
+        self.assertEqual(settings.epochs, 1200)
+        self.assertEqual(settings.dense_points, 257)
+        self.assertEqual(settings.num_points, 65)
+        self.assertEqual(settings.lr, 1.5e-6)
+        self.assertEqual(settings.optimizer, "AdamW")
+        self.assertEqual(settings.run_dir, "adaptive_temporal_refinement")
+        self.assertEqual(settings.weight_power, 0.75)
+        self.assertEqual(settings.min_weight, 0.2)
+        self.assertEqual(settings.max_weight, 5.0)
+        self.assertEqual(settings.difficulty, "residual_x_cd_norm")
+
+    def test_adaptive_tau_grid_concentrates_points_near_hard_times(self):
+        dense_tau = torch.linspace(0.0, 1.0, 101)
+        difficulty = torch.full_like(dense_tau, 0.05)
+        difficulty[45:56] = 10.0
+
+        tau, metadata = make_adaptive_tau_grid(
+            dense_tau,
+            difficulty,
+            num_points=21,
+            weight_power=1.0,
+            min_weight=0.1,
+            max_weight=8.0,
+        )
+
+        self.assertEqual(tau.shape, (21, 1))
+        self.assertAlmostEqual(float(tau[0, 0]), 0.0)
+        self.assertAlmostEqual(float(tau[-1, 0]), 1.0)
+        self.assertTrue(torch.all(tau[1:, 0] >= tau[:-1, 0]))
+        focused_count = int(((tau[:, 0] >= 0.45) & (tau[:, 0] <= 0.55)).sum().item())
+        self.assertGreaterEqual(focused_count, 5)
+        self.assertEqual(metadata["num_points"], 21)
+        self.assertEqual(metadata["dense_points"], 101)
+        self.assertGreater(metadata["max_weight"], metadata["min_weight"])
 
     def test_compact_support_swap_plan_omits_full_support_lists(self):
         compact = compact_support_swap_plan(

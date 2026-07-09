@@ -528,7 +528,7 @@ def final_run_from_summary(config: dict[str, object]) -> Path:
         residual_top_k = int(residual_request)
     output_root = RUN_DIR / str(feedback.get("output_root", "runs/fixed_k_holdout_feedback_v1"))
     output_dir = output_root / f"agp_{base_agp_terms}_residual_{residual_top_k}_add_{add_terms}_rounds_{rounds}"
-    refined = temporal_refinement_run_from_summary(output_dir=output_dir, residual_top_k=residual_top_k)
+    refined = preferred_refinement_run_from_summary(output_dir=output_dir, residual_top_k=residual_top_k)
     if refined is not None:
         return refined
     expected = output_dir / "rounds" / f"round_{rounds:02d}"
@@ -536,22 +536,53 @@ def final_run_from_summary(config: dict[str, object]) -> Path:
         return expected
     matches = sorted(output_root.glob(f"agp_{base_agp_terms}_residual_*_add_*_rounds_{rounds}"))
     if matches:
-        refined = temporal_refinement_run_from_summary(output_dir=matches[-1], residual_top_k=residual_top_k)
+        refined = preferred_refinement_run_from_summary(output_dir=matches[-1], residual_top_k=residual_top_k)
         if refined is not None:
             return refined
         return matches[-1] / "rounds" / f"round_{rounds:02d}"
     return expected
 
 
+def preferred_refinement_run_from_summary(*, output_dir: Path, residual_top_k: int) -> Path | None:
+    for key, default_dir in (
+        ("adaptive_temporal_refinement", "adaptive_temporal_refinement"),
+        ("temporal_refinement", "temporal_refinement"),
+    ):
+        refined = refinement_run_from_summary(
+            output_dir=output_dir,
+            residual_top_k=residual_top_k,
+            summary_key=key,
+            default_dir=default_dir,
+        )
+        if refined is not None:
+            return refined
+    return None
+
+
 def temporal_refinement_run_from_summary(*, output_dir: Path, residual_top_k: int) -> Path | None:
+    return refinement_run_from_summary(
+        output_dir=output_dir,
+        residual_top_k=residual_top_k,
+        summary_key="temporal_refinement",
+        default_dir="temporal_refinement",
+    )
+
+
+def refinement_run_from_summary(
+    *,
+    output_dir: Path,
+    residual_top_k: int,
+    summary_key: str,
+    default_dir: str,
+) -> Path | None:
     summary_path = output_dir / "Models_Data" / f"holdout_feedback_summary_residual_{residual_top_k}.json"
     if not summary_path.is_file():
         return None
     payload = load_json(summary_path)
-    refinement = payload.get("temporal_refinement", {})
+    refinement = payload.get(summary_key, {})
     if not isinstance(refinement, dict) or not bool(refinement.get("enabled", False)):
         return None
-    run_dir = output_dir / str(refinement.get("run_dir", "temporal_refinement"))
+    run_dir = output_dir / str(refinement.get("run_dir", default_dir))
     return run_dir if run_dir.is_dir() else None
 
 
