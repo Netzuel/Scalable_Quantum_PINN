@@ -83,6 +83,7 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
     parameters = training.get("parameters", {}) if isinstance(training, dict) else {}
     loss = training.get("loss", {}) if isinstance(training, dict) else {}
     export = training.get("export", {}) if isinstance(training, dict) else {}
+    runtime_support = payload.get("support", {})
     support = payload.get("support_sweep", {})
     adaptive = support.get("adaptive", {}) if isinstance(support, dict) else {}
     calibration = calibration_payload(payload)
@@ -98,7 +99,11 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
         agp_top_k=int(agp_terms),
         intermediate_top_k=int(support.get("intermediate_top_k", 2048)) if isinstance(support, dict) else 2048,
         residual_top_k=int(support.get("residual_top_k", 2048)) if isinstance(support, dict) else 2048,
-        allow_low_q_projected=False,
+        allow_low_q_projected=(
+            bool(runtime_support.get("allow_low_q_projected", False))
+            if isinstance(runtime_support, dict)
+            else False
+        ),
         adaptive_enabled=bool(adaptive.get("enabled", False)) if isinstance(adaptive, dict) else False,
         adaptive_stages=int(adaptive.get("stages", 1)) if isinstance(adaptive, dict) else 1,
         adaptive_growth_per_stage=int(adaptive.get("growth_terms_per_stage", 0)) if isinstance(adaptive, dict) else 0,

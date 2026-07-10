@@ -1551,19 +1551,21 @@ def main() -> None:
     except ValueError:
         summary_label = str(summary_path)
     full_basis = Decimal(4) ** int(model_config_from_payload(payload).n_qubits)
-    print(
-        json.dumps(
-            {
-                "summary": summary_label,
-                "base_agp_terms": base_agp_terms,
-                "agp_fraction_of_full_basis": f"{Decimal(base_agp_terms) / full_basis:.12E}",
-                "rounds": round_rows,
-                "temporal_refinement": temporal_refinement_summary,
-                "adaptive_temporal_refinement": adaptive_temporal_summary,
-            },
-            indent=2,
-        )
-    )
+    final_round = round_rows[-1] if round_rows else {}
+    compact_summary = {
+        "summary": summary_label,
+        "base_agp_terms": base_agp_terms,
+        "agp_fraction_of_full_basis": f"{Decimal(base_agp_terms) / full_basis:.12E}",
+        "rounds": len(round_rows),
+        "final_round_holdout_relative_residual": final_round.get("holdout_relative_residual"),
+        "temporal_holdout_relative_residual": (
+            temporal_refinement_summary or {}
+        ).get("holdout_relative_residual"),
+        "adaptive_temporal_holdout_relative_residual": (
+            adaptive_temporal_summary or {}
+        ).get("holdout_relative_residual"),
+    }
+    print("holdout_feedback_summary " + json.dumps(compact_summary, sort_keys=True))
 
 
 if __name__ == "__main__":

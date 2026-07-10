@@ -19,6 +19,7 @@ from projected_sparse_training_common import (  # noqa: E402
     LINE_WIDTH,
     OKABE_ITO,
     ProjectedSparseLossWeights,
+    ProjectedTrainingConfig,
     TICK_FS,
     TICK_LENGTH,
     TICK_WIDTH,
@@ -32,7 +33,7 @@ from projected_sparse_training_common import (  # noqa: E402
     set_paper_style,
 )
 from agp_baseline_train import model_config_from_payload, parse_support_sizes  # noqa: E402
-from utils import load_pauli_hamiltonian_pair, sort_pauli_labels  # noqa: E402
+from utils import all_pauli_labels, load_pauli_hamiltonian_pair, sort_pauli_labels  # noqa: E402
 
 
 RUN_DIR = Path.cwd()
@@ -56,6 +57,46 @@ class Thresholds:
 def load_json(path: Path) -> dict[str, object] | list[dict[str, object]]:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def model_config_from_checkpoint_or_payload(
+    checkpoint: dict[str, object],
+    payload: dict[str, object],
+) -> ProjectedTrainingConfig:
+    """Recover the exact model architecture used by a saved run.
+
+    Holdout feedback may train a deliberately different baseline architecture
+    before warm-starting the main curriculum. Rebuilding every checkpoint from
+    the outer test config can silently evaluate SiLU weights inside a PAU body.
+    Prefer the serialized checkpoint metadata when it is present, and fall back
+    to the caller payload for older checkpoints.
+    """
+
+    fallback = model_config_from_payload(payload)
+    checkpoint_config = checkpoint.get("config", {})
+    checkpoint_config = checkpoint_config if isinstance(checkpoint_config, dict) else {}
+    training = checkpoint_config.get("training", {})
+    training = training if isinstance(training, dict) else {}
+    candidates = [
+        training.get("model", {}),
+        checkpoint_config.get("physical", {}),
+    ]
+    for raw in candidates:
+        if not isinstance(raw, dict) or "system" not in raw or "n_qubits" not in raw:
+            continue
+        return ProjectedTrainingConfig(
+            system=str(raw.get("system", fallback.system)),
+            n_qubits=int(raw.get("n_qubits", fallback.n_qubits)),
+            distance=str(raw.get("distance", fallback.distance)),
+            hamiltonian_source=str(raw.get("hamiltonian_source", fallback.hamiltonian_source)),
+            t_initial=float(raw.get("t_initial", fallback.t_initial)),
+            physical_time=float(raw.get("physical_time", raw.get("T", fallback.physical_time))),
+            hidden_layers=int(raw.get("hidden_layers", fallback.hidden_layers)),
+            hidden_width=int(raw.get("hidden_width", fallback.hidden_width)),
+            activation=str(raw.get("activation", fallback.activation)),
+            layer_type=str(raw.get("layer_type", fallback.layer_type)),
+        )
+    return fallback
 
 
 def relpath(path: Path, base: Path | None = None) -> str:
@@ -175,7 +216,6 @@ def evaluate_one_run(
     holdout_basis_mode: str,
     holdout_basis_agp_terms: int | None,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
-    config = model_config_from_payload(config_payload)
     training = config_payload.get("training", {})
     parameters = training.get("parameters", {}) if isinstance(training, dict) else {}
     num_points = int(parameters.get("num_points", 16))
@@ -188,6 +228,7 @@ def evaluate_one_run(
     train_history = load_json(history_path)
     if not isinstance(train_metadata, dict) or not isinstance(train_history, list):
         raise TypeError(f"Unexpected metadata/history shape in {run_dir}.")
+    config = model_config_from_checkpoint_or_payload(checkpoint, config_payload)
 
     trained_agp_labels = [str(label) for label in checkpoint["agp_labels"]]
     trained_residual_labels = {str(label) for label in checkpoint["residual_labels"]}
@@ -349,6 +390,11 @@ def build_common_holdout_residual_labels(
         run_agp_labels, _ = load_checkpoint_labels(run_dir)
         agp_labels.update(run_agp_labels)
     sorted_agp = sort_pauli_labels(agp_labels)
+    support_config = config_payload.get("support_sweep", {})
+    support_selection = support_config.get("agp_support_selection", {}) if isinstance(support_config, dict) else {}
+    if isinstance(support_selection, dict) and support_selection.get("strategy") == "full_pauli_basis":
+        full_labels = all_pauli_labels(config.n_qubits)
+        return full_labels, len(sorted_agp)
     support = build_projected_support(
         h0,
         h1,

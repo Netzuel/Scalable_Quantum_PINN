@@ -13,3 +13,5 @@ runs/
 wandb/
 tests/q*/sweep_test/Images/*
 tests/q*/sweep_test/Models_Data/*
+tests/diagonal_ising_grid/Images/
+tests/diagonal_ising_grid/Models_Data/

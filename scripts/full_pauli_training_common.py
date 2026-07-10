@@ -18,6 +18,19 @@ if str(ROOT) not in sys.path:
 from models import FullPauliAGPPINN, FullPauliLossWeights
 from utils import FULL_PAULI_EXACT_MAX_QUBITS, SafeMPSSOAP, load_pauli_hamiltonian_pair, pytorch_optimizer
 
+try:  # noqa: E402
+    from agp_plot_annotations import (  # type: ignore[import-not-found]
+        draw_physical_footer,
+        footer_bottom_margin,
+        physical_footer_lines_for_images_dir,
+    )
+except ModuleNotFoundError:  # pragma: no cover - package-style imports in tests
+    from scripts.agp_plot_annotations import (  # type: ignore[import-not-found]
+        draw_physical_footer,
+        footer_bottom_margin,
+        physical_footer_lines_for_images_dir,
+    )
+
 
 OKABE_ITO = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442"]
 TITLE_FS = 13
@@ -653,6 +666,7 @@ def plot_connection_summary(
 
     set_paper_style(plt)
     pair_matrix, order_totals = summarize_connections(ranked_terms, n_qubits)
+    footer_lines = physical_footer_lines_for_images_dir(images_dir)
 
     fig, (ax_heat, ax_order) = plt.subplots(
         1,
@@ -708,7 +722,14 @@ def plot_connection_summary(
     ax_order.set_xticks(orders)
     ax_order.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
     ax_order.tick_params(axis="both", labelsize=TICK_FS, length=TICK_LENGTH, width=TICK_WIDTH)
-    fig.subplots_adjust(top=0.84, left=0.09, right=0.90, bottom=0.18, wspace=0.56)
+    fig.subplots_adjust(
+        top=0.84,
+        left=0.09,
+        right=0.90,
+        bottom=footer_bottom_margin(0.18, footer_lines),
+        wspace=0.56,
+    )
+    draw_physical_footer(fig, footer_lines)
     save_pdf(fig, images_dir, "hcd_connection_summary")
     plt.close(fig)
 

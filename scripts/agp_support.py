@@ -6,7 +6,7 @@ from itertools import combinations, product
 from typing import Iterable
 
 from projected_sparse_training_common import build_projected_support
-from utils import _commutator_pauli_labels_unchecked, pauli_weight, sort_pauli_labels
+from utils import _commutator_pauli_labels_unchecked, all_pauli_labels, pauli_weight, sort_pauli_labels
 
 
 @dataclass(frozen=True)
@@ -234,6 +234,66 @@ def build_krylov_projected_support(
     return support
 
 
+def build_full_pauli_projected_support(
+    h0,
+    h1,
+    *,
+    agp_top_k: int,
+    intermediate_top_k: int,
+    residual_top_k: int,
+    explicit_agp_labels: Iterable[str] | None = None,
+    residual_labels: list[str] | None = None,
+    stage: int = 0,
+) -> dict[str, object]:
+    full_labels = all_pauli_labels(int(h0.n_qubits))
+    expected = 4 ** int(h0.n_qubits)
+    if int(agp_top_k) != expected:
+        raise ValueError(
+            "full_pauli_basis support requires agp_top_k == 4**n_qubits; "
+            f"got agp_top_k={agp_top_k}, expected={expected}."
+        )
+    if explicit_agp_labels is not None:
+        supplied = sort_pauli_labels(str(label) for label in explicit_agp_labels)
+        if supplied != full_labels:
+            raise ValueError("Explicit AGP labels do not match the full Pauli basis.")
+    if residual_labels is not None:
+        supplied_residual = sort_pauli_labels(residual_labels)
+        if supplied_residual != full_labels:
+            raise ValueError("Explicit residual labels do not match the full Pauli basis.")
+    metadata = {
+        "strategy": "full_pauli_projected_basis",
+        "agp_support_strategy": "full_pauli_basis",
+        "selection_rule": (
+            "For q<=8 exact-output diagnostics, AGP, intermediate, and residual "
+            "labels are the complete 4**q Pauli basis including the identity."
+        ),
+        "selection_caveat": (
+            "The identity direction is included to match the full 4**q output "
+            "budget, although it is gauge-trivial in commutator-based AGP losses."
+        ),
+        "stage": int(stage),
+        "full_pauli_basis_size": expected,
+        "includes_identity": True,
+        "agp_terms": len(full_labels),
+        "intermediate_terms": len(full_labels),
+        "residual_terms": len(full_labels),
+        "agp_top_k": int(agp_top_k),
+        "intermediate_top_k": int(intermediate_top_k),
+        "residual_top_k": int(residual_top_k),
+        "hamiltonian_terms": len(sort_pauli_labels(set(h0.labels) | set(h1.labels))),
+        "agp_weight_counts": {
+            str(weight): sum(pauli_weight(label) == weight for label in full_labels)
+            for weight in sorted({pauli_weight(label) for label in full_labels})
+        },
+    }
+    return {
+        "agp_labels": full_labels,
+        "intermediate_labels": full_labels,
+        "residual_labels": full_labels,
+        "metadata": metadata,
+    }
+
+
 def build_configured_projected_support(
     h0,
     h1,
@@ -248,6 +308,17 @@ def build_configured_projected_support(
 ) -> dict[str, object]:
     selection = support_selection if isinstance(support_selection, dict) else {}
     strategy = str(selection.get("strategy", "endpoint_commutator"))
+    if strategy == "full_pauli_basis":
+        return build_full_pauli_projected_support(
+            h0,
+            h1,
+            agp_top_k=agp_top_k,
+            intermediate_top_k=intermediate_top_k,
+            residual_top_k=residual_top_k,
+            explicit_agp_labels=explicit_agp_labels,
+            residual_labels=residual_labels,
+            stage=stage,
+        )
     if strategy == "nested_commutator_krylov_pool":
         return build_krylov_projected_support(
             h0,

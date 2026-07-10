@@ -13,7 +13,7 @@
   },
   "drop_tol": 1e-08,
   "format": "pauli_hamiltonian_index_v1",
-  "pair_count": 27,
+  "pair_count": 45,
   "pairs": {
     "Hidrogen_10_qubits_1_0": {
       "basis_size": 1048576,
@@ -290,6 +290,61 @@
       "n_qubits": 4,
       "system": "Li"
     },
+    "TransverseIsingDriverProblem_10_qubits_1_0": {
+      "basis_size": 1048576,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/10_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 19,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 10,
+      "n_qubits": 10,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_11_qubits_1_0": {
+      "basis_size": 4194304,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/11_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 21,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 11,
+      "n_qubits": 11,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_12_qubits_1_0": {
+      "basis_size": 16777216,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/12_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 23,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 12,
+      "n_qubits": 12,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_13_qubits_1_0": {
+      "basis_size": 67108864,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/13_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 25,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 13,
+      "n_qubits": 13,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_14_qubits_1_0": {
+      "basis_size": 268435456,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/14_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 27,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 14,
+      "n_qubits": 14,
+      "system": "TransverseIsingDriverProblem"
+    },
     "TransverseIsingDriverProblem_15_qubits_1_0": {
       "basis_size": 1073741824,
       "distance": "1_0",
@@ -299,6 +354,149 @@
       "initial_key": "analytic_transverse_driver_sparse_pauli",
       "initial_term_count": 15,
       "n_qubits": 15,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_16_qubits_1_0": {
+      "basis_size": 4294967296,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/16_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 31,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 16,
+      "n_qubits": 16,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_17_qubits_1_0": {
+      "basis_size": 17179869184,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/17_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 33,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 17,
+      "n_qubits": 17,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_18_qubits_1_0": {
+      "basis_size": 68719476736,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/18_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 35,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 18,
+      "n_qubits": 18,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_19_qubits_1_0": {
+      "basis_size": 274877906944,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/19_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 37,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 19,
+      "n_qubits": 19,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_20_qubits_1_0": {
+      "basis_size": 1099511627776,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/20_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 39,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 20,
+      "n_qubits": 20,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_2_qubits_1_0": {
+      "basis_size": 16,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/2_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 3,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 2,
+      "n_qubits": 2,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_3_qubits_1_0": {
+      "basis_size": 64,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/3_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 5,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 3,
+      "n_qubits": 3,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_4_qubits_1_0": {
+      "basis_size": 256,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/4_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 7,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 4,
+      "n_qubits": 4,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_5_qubits_1_0": {
+      "basis_size": 1024,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/5_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 9,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 5,
+      "n_qubits": 5,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_6_qubits_1_0": {
+      "basis_size": 4096,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/6_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 11,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 6,
+      "n_qubits": 6,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_7_qubits_1_0": {
+      "basis_size": 16384,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/7_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 13,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 7,
+      "n_qubits": 7,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_8_qubits_1_0": {
+      "basis_size": 65536,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/8_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 15,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 8,
+      "n_qubits": 8,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_9_qubits_1_0": {
+      "basis_size": 262144,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/9_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 17,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 9,
+      "n_qubits": 9,
       "system": "TransverseIsingDriverProblem"
     },
     "TransverseIsing_156_qubits_1_0": {

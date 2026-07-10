@@ -1,0 +1,137 @@
+{
+  "basis": {
+    "alphabet": [
+      "I",
+      "X",
+      "Y",
+      "Z"
+    ],
+    "max_order": 6,
+    "ordering": "lexicographic product over I, X, Y, Z",
+    "size": 4096
+  },
+  "coefficient_convention": {
+    "coefficient_formula": "Sparse Pauli coefficients, with labels in matrix tensor-product order",
+    "operator_expansion": "H = sum_P C_P P",
+    "pauli_alphabet": [
+      "I",
+      "X",
+      "Y",
+      "Z"
+    ],
+    "pauli_basis": "{I, X, Y, Z}^{tensor n_qubits}",
+    "stored_terms": "Only coefficients with abs(C_P) > drop_tol are stored."
+  },
+  "distance": "1_0",
+  "drop_tol": 1e-10,
+  "format": "pauli_hamiltonian_pair_v1",
+  "hamiltonians": {
+    "final": {
+      "role": "H_problem",
+      "source_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "tau": 1.0,
+      "term_count": 11,
+      "terms": {
+        "IIIIIZ": [
+          -0.40249999999999997,
+          0.0
+        ],
+        "IIIIZI": [
+          -0.3815,
+          0.0
+        ],
+        "IIIIZZ": [
+          -1.1,
+          0.0
+        ],
+        "IIIZII": [
+          -0.3605,
+          0.0
+        ],
+        "IIIZZI": [
+          -1.05,
+          0.0
+        ],
+        "IIZIII": [
+          -0.33949999999999997,
+          0.0
+        ],
+        "IIZZII": [
+          -1.0,
+          0.0
+        ],
+        "IZIIII": [
+          -0.3185,
+          0.0
+        ],
+        "IZZIII": [
+          -0.95,
+          0.0
+        ],
+        "ZIIIII": [
+          -0.2975,
+          0.0
+        ],
+        "ZZIIII": [
+          -0.9,
+          0.0
+        ]
+      },
+      "terms_by_order": {
+        "1": 6,
+        "2": 5
+      }
+    },
+    "initial": {
+      "role": "H_diagonal",
+      "source_key": "analytic_transverse_driver_sparse_pauli",
+      "tau": 0.0,
+      "term_count": 6,
+      "terms": {
+        "IIIIIX": [
+          -1.0,
+          0.0
+        ],
+        "IIIIXI": [
+          -1.0,
+          0.0
+        ],
+        "IIIXII": [
+          -1.0,
+          0.0
+        ],
+        "IIXIII": [
+          -1.0,
+          0.0
+        ],
+        "IXIIII": [
+          -1.0,
+          0.0
+        ],
+        "XIIIII": [
+          -1.0,
+          0.0
+        ]
+      },
+      "terms_by_order": {
+        "1": 6
+      }
+    }
+  },
+  "n_qubits": 6,
+  "source": {
+    "backend": "analytic_driver_to_problem_transverse_ising",
+    "coupling_gradient": 0.1,
+    "dense_usage": "None; analytic Pauli strings are exported directly.",
+    "field_gradient": 0.15,
+    "final_construction": "analytic diagonal Ising problem with Z_i and nearest-neighbor Z_i Z_j terms",
+    "generator": "scripts/build_driver_problem_hamiltonian.py",
+    "initial_construction": "analytic transverse-field driver H_initial = -sum_i X_i",
+    "num_qubits": 6,
+    "periodic": false,
+    "x_field": 1.0,
+    "z_field": 0.35,
+    "zz_coupling": 1.0
+  },
+  "system": "TransverseIsingDriverProblem"
+}

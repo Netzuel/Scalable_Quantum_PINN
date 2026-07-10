@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import OrderedDict
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Iterator, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -41,6 +42,42 @@ class LearnedVariantSpec:
     max_terms: int
     scale: float
     is_default: bool = False
+
+
+class LazyPauliActionCache(Mapping[str, PauliAction]):
+    """Bounded Pauli-action cache for larger statevector diagnostics.
+
+    A dense action for one q20 Pauli string stores two arrays of length 2**20.
+    Keeping thousands of them resident is unnecessary and can exhaust memory.
+    This mapping builds actions on demand and evicts old entries while keeping
+    the existing ``actions[label]`` call sites unchanged.
+    """
+
+    def __init__(self, labels: Sequence[str], *, max_items: int) -> None:
+        if max_items < 1:
+            raise ValueError("max_items must be positive for LazyPauliActionCache.")
+        self._labels = set(labels)
+        self._max_items = int(max_items)
+        self._cache: OrderedDict[str, PauliAction] = OrderedDict()
+
+    def __getitem__(self, label: str) -> PauliAction:
+        if label not in self._labels:
+            raise KeyError(label)
+        action = self._cache.get(label)
+        if action is not None:
+            self._cache.move_to_end(label)
+            return action
+        action = build_pauli_action(label)
+        self._cache[label] = action
+        if len(self._cache) > self._max_items:
+            self._cache.popitem(last=False)
+        return action
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._labels)
+
+    def __len__(self) -> int:
+        return len(self._labels)
 
 
 def load_json(path: Path) -> dict[str, object]:
@@ -86,8 +123,11 @@ def build_pauli_action(label: str) -> PauliAction:
     return PauliAction(label=label, flipped_indices=flipped, phase=phase)
 
 
-def build_action_cache(labels: list[str]) -> dict[str, PauliAction]:
-    return {label: build_pauli_action(label) for label in sorted(set(labels))}
+def build_action_cache(labels: list[str], *, max_items: int | None = None) -> Mapping[str, PauliAction]:
+    unique_labels = sorted(set(labels))
+    if max_items is not None and int(max_items) < len(unique_labels):
+        return LazyPauliActionCache(unique_labels, max_items=int(max_items))
+    return {label: build_pauli_action(label) for label in unique_labels}
 
 
 def apply_pauli_sum(
@@ -513,6 +553,25 @@ def save_plot(results: dict[str, dict[str, float]], images_dir: Path) -> None:
     plt.close(fig)
 
 
+def refresh_hcd_connection_summary(trained_run: Path, output_dir: Path) -> None:
+    coefficient_path = trained_run / "Models_Data" / "final_agp_coefficients.pt"
+    if not coefficient_path.is_file():
+        print(f"skip_hcd_connection_summary_refresh missing_coefficients={coefficient_path}")
+        return
+
+    from projected_sparse_training_common import plot_connection_summary, rank_coefficients
+
+    payload = torch.load(coefficient_path, map_location="cpu")
+    coefficients = payload.get("counterdiabatic_coefficients")
+    if coefficients is None:
+        coefficients = payload["d_lambda_dt"] * payload["agp_coefficients"]
+    labels = [str(label) for label in payload["pauli_labels"]]
+    ranked = rank_coefficients(coefficients, labels)
+    images_dir = output_dir / "Images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    plot_connection_summary(ranked, len(labels[0]), images_dir)
+
+
 def final_run_from_summary(config: dict[str, object]) -> Path:
     feedback = config.get("holdout_feedback", {})
     feedback = feedback if isinstance(feedback, dict) else {}
@@ -528,6 +587,12 @@ def final_run_from_summary(config: dict[str, object]) -> Path:
         residual_top_k = int(residual_request)
     output_root = RUN_DIR / str(feedback.get("output_root", "runs/fixed_k_holdout_feedback_v1"))
     output_dir = output_root / f"agp_{base_agp_terms}_residual_{residual_top_k}_add_{add_terms}_rounds_{rounds}"
+    validation = config.get("physical_validation", {})
+    validation = validation if isinstance(validation, dict) else {}
+    if str(validation.get("trained_run_selection", "")).lower() == "best_holdout_residual":
+        best = best_residual_run_from_summary(output_dir=output_dir, residual_top_k=residual_top_k)
+        if best is not None:
+            return best
     refined = preferred_refinement_run_from_summary(output_dir=output_dir, residual_top_k=residual_top_k)
     if refined is not None:
         return refined
@@ -541,6 +606,62 @@ def final_run_from_summary(config: dict[str, object]) -> Path:
             return refined
         return matches[-1] / "rounds" / f"round_{rounds:02d}"
     return expected
+
+
+def metric_value(row: Mapping[str, object], *keys: str) -> float | None:
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(parsed):
+            return parsed
+    return None
+
+
+def best_residual_run_from_summary(*, output_dir: Path, residual_top_k: int) -> Path | None:
+    summary_path = output_dir / "Models_Data" / f"holdout_feedback_summary_residual_{residual_top_k}.json"
+    if not summary_path.is_file():
+        return None
+    payload = load_json(summary_path)
+    candidates: list[tuple[float, Path]] = []
+
+    rows = payload.get("rows", [])
+    if isinstance(rows, list) and rows:
+        baseline = rows[0]
+        if isinstance(baseline, dict):
+            score = metric_value(baseline, "holdout_relative_residual", "training_final_relative_residual")
+            run_dir = baseline.get("run_dir")
+            if score is not None and run_dir:
+                path = Path(str(run_dir))
+                if not path.is_absolute():
+                    path = RUN_DIR / path
+                candidates.append((score, path))
+
+    for key, default_dir in (
+        ("temporal_refinement", "temporal_refinement"),
+        ("adaptive_temporal_refinement", "adaptive_temporal_refinement"),
+    ):
+        refinement = payload.get(key, {})
+        if not isinstance(refinement, dict) or not bool(refinement.get("enabled", False)):
+            continue
+        score = metric_value(refinement, "holdout_relative_residual", "training_final_relative_residual")
+        if score is None:
+            continue
+        run_dir = output_dir / str(refinement.get("run_dir", default_dir))
+        candidates.append((score, run_dir))
+
+    valid = [
+        (score, path)
+        for score, path in candidates
+        if (path / "Models_Data" / "final_agp_coefficients.pt").is_file()
+    ]
+    if not valid:
+        return None
+    return min(valid, key=lambda item: item[0])[1]
 
 
 def preferred_refinement_run_from_summary(*, output_dir: Path, residual_top_k: int) -> Path | None:
@@ -678,7 +799,11 @@ def main() -> None:
     learned_full = learned_term_selection(coefficient_path, max(spec.max_terms for spec in variant_specs))
 
     h0_actions = build_action_cache(list(h0.terms))
-    learned_actions = build_action_cache(list(learned_full["labels"]))
+    learned_cache_size = validation.get("learned_action_cache_size")
+    learned_actions = build_action_cache(
+        list(learned_full["labels"]),
+        max_items=int(learned_cache_size) if learned_cache_size is not None else None,
+    )
 
     results: dict[str, dict[str, float]] = {}
     for protocol in ("no_cd", "kipu_dqfm_l1"):
@@ -770,6 +895,14 @@ def main() -> None:
             "selected_terms": default_learned["selected_terms"],
             "available_terms": default_learned["available_terms"],
             "retained_rms_norm_fraction": default_learned["retained_rms_norm_fraction"],
+            "action_cache": (
+                {
+                    "mode": "lazy_lru",
+                    "max_items": int(learned_cache_size),
+                }
+                if learned_cache_size is not None
+                else {"mode": "eager"}
+            ),
         },
         "learned_variant_specs": [asdict(spec) for spec in variant_specs],
         "learned_variant_results": learned_variant_results,
@@ -780,6 +913,7 @@ def main() -> None:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
     save_plot(results, images_dir)
+    refresh_hcd_connection_summary(trained_run, output_dir)
     print(json.dumps(payload, indent=2))
 
 

@@ -10,6 +10,7 @@ Benchmark studies are configuration-only folders:
 
 - `q15/sweep_test/`
 - `q20/sweep_test/`
+- `diagonal_ising_grid/q*/`
 
 Generated artifacts may exist locally under each study's ignored `runs/`
 folder, but they should not be committed.

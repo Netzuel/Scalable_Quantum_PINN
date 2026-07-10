@@ -11,6 +11,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from agp_holdout_feedback import payload_with_feedback_baseline_neural
 from agp_baseline_train import settings_for_support
+from agp_qubit_grid_benchmark import grid_config
 
 
 class AGPBenchmarkLayoutTests(unittest.TestCase):
@@ -23,10 +24,13 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "agp_residual_calibration.py",
             "agp_restart.py",
             "agp_support.py",
+            "agp_qubit_grid_benchmark.py",
             "full_pauli_training_common.py",
             "projected_sparse_training_common.py",
             "agp_physical_validation.py",
+            "agp_plot_annotations.py",
             "build_driver_problem_hamiltonian.py",
+            "agp_regenerate_hcd_summaries.py",
         }
 
         self.assertTrue(SCRIPTS_DIR.is_dir())
@@ -115,6 +119,98 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         self.assertEqual(baseline_payload["neural"]["general"]["n_neurons"], 96)
         self.assertEqual(settings_for_support(baseline_payload, 8).model.activation, "silu")
         self.assertEqual(settings_for_support(payload, 8).model.activation, "pau")
+
+    def test_baseline_training_respects_low_q_projected_opt_in(self):
+        payload = {
+            "physical": {
+                "parameters": {
+                    "system": "TransverseIsingDriverProblem",
+                    "num_qubits": 3,
+                    "distance": "1_0",
+                    "hamiltonian_source": "Hamiltonians_to_use/pauli_decompositions/index.json",
+                }
+            },
+            "neural": {
+                "model": "ProjectedSparseAGPPINN",
+                "general": {
+                    "n_hidden": 2,
+                    "n_neurons": 8,
+                    "activation": "silu",
+                    "layer_type": "linear",
+                },
+            },
+            "support": {"allow_low_q_projected": True},
+            "support_sweep": {"intermediate_top_k": 16, "residual_top_k": 16},
+            "training": {"parameters": {"epochs": 1}},
+        }
+
+        settings = settings_for_support(payload, 16)
+
+        self.assertTrue(settings.allow_low_q_projected)
+
+    def test_qubit_grid_config_uses_one_q_folder_methodology_surface(self):
+        payload = grid_config(
+            3,
+            max_agp_terms=32768,
+            max_initial_residual_terms=4096,
+            holdout_residual_top_k=65536,
+            add_residual_terms=3072,
+            iterations=15,
+            epochs=5000,
+            epochs_per_iteration=1000,
+            temporal_epochs=2500,
+            adaptive_temporal_epochs=1500,
+            evolution_steps=96,
+            max_learned_terms=2048,
+            learned_action_cache_size=128,
+        )
+
+        self.assertEqual(payload["physical"]["parameters"]["num_qubits"], 3)
+        self.assertEqual(payload["default_pipeline"]["agp_terms"], 64)
+        self.assertTrue(payload["support"]["allow_low_q_projected"])
+        self.assertEqual(payload["support_sweep"]["agp_support_selection"]["strategy"], "full_pauli_basis")
+        self.assertFalse(payload["holdout_feedback"]["support_swap"]["enabled"])
+        self.assertEqual(payload["holdout_feedback"]["iterations"], 1)
+        self.assertEqual(payload["holdout_feedback"]["add_residual_terms_per_iteration"], 0)
+        self.assertEqual(payload["holdout_feedback"]["baseline_neural"]["activation"], "pau")
+        self.assertEqual(payload["physical_validation"]["learned_top_terms"], 64)
+        q6_payload = grid_config(
+            6,
+            max_agp_terms=32768,
+            max_initial_residual_terms=4096,
+            holdout_residual_top_k=65536,
+            add_residual_terms=3072,
+            iterations=15,
+            epochs=5000,
+            epochs_per_iteration=1000,
+            temporal_epochs=2500,
+            adaptive_temporal_epochs=1500,
+            evolution_steps=96,
+            max_learned_terms=2048,
+            learned_action_cache_size=128,
+        )
+        self.assertEqual(q6_payload["agp_calibration"]["target_active_terms"], 4096)
+
+        q9_payload = grid_config(
+            9,
+            max_agp_terms=32768,
+            max_initial_residual_terms=4096,
+            holdout_residual_top_k=65536,
+            add_residual_terms=3072,
+            iterations=15,
+            epochs=5000,
+            epochs_per_iteration=1000,
+            temporal_epochs=2500,
+            adaptive_temporal_epochs=1500,
+            evolution_steps=96,
+            max_learned_terms=2048,
+            learned_action_cache_size=128,
+        )
+        self.assertEqual(q9_payload["agp_calibration"]["target_active_terms"], 2048)
+        self.assertEqual(q9_payload["holdout_feedback"]["baseline_neural"]["activation"], "pau")
+        self.assertEqual(payload["default_pipeline"]["entrypoint"], "scripts/agp_holdout_feedback.py")
+        self.assertEqual(payload["physical_validation"]["entrypoint"], "scripts/agp_physical_validation.py")
+        self.assertEqual(payload["summary"]["runs_dir"], "runs/")
 
 
 if __name__ == "__main__":

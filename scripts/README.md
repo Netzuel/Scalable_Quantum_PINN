@@ -13,6 +13,9 @@ Core workflow:
 - `agp_restart.py`: remove generated artifacts for one configured study.
 - `agp_support.py`: support-selection helpers.
 - `agp_physical_validation.py`: statevector physical validation for configured small enough diagnostics.
+- `agp_regenerate_hcd_summaries.py`: overwrite every saved `hcd_connection_summary.pdf` from the adjacent coefficient exports.
+- `agp_plot_annotations.py`: shared physical-metric footer annotations for HCD summary plots.
+- `agp_qubit_grid_benchmark.py`: prepare, run, validate, aggregate, and plot the diagonal-Ising q-grid benchmark with one `qN/` folder per qubit count.
 - `build_driver_problem_hamiltonian.py`: generate analytic driver/problem Hamiltonians.
 
 Shared implementation:
