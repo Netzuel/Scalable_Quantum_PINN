@@ -8,8 +8,10 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+FRAMEWORK_SCRIPTS_DIR = ROOT / "tests" / "sparse_agp_curriculum" / "scripts"
+for path in (SCRIPTS_DIR, FRAMEWORK_SCRIPTS_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from agp_holdout_feedback import payload_with_feedback_baseline_neural
 from agp_baseline_train import settings_for_support
@@ -53,7 +55,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         self.assertEqual(environment["PYTHONHASHSEED"], "0")
 
     def test_common_scripts_exist(self):
-        expected = {
+        expected_common = {
             "agp_baseline_train.py",
             "agp_holdout_feedback.py",
             "agp_holdout_study.py",
@@ -61,17 +63,21 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "agp_residual_calibration.py",
             "agp_restart.py",
             "agp_support.py",
-            "agp_qubit_grid_benchmark.py",
             "full_pauli_training_common.py",
             "projected_sparse_training_common.py",
-            "agp_physical_validation.py",
             "agp_plot_annotations.py",
+        }
+        expected_framework = {
+            "agp_physical_validation.py",
+            "agp_qubit_grid_benchmark.py",
             "build_driver_problem_hamiltonian.py",
             "agp_regenerate_hcd_summaries.py",
         }
 
         self.assertTrue(SCRIPTS_DIR.is_dir())
-        self.assertTrue(expected.issubset({path.name for path in SCRIPTS_DIR.glob("*.py")}))
+        self.assertTrue(expected_common.issubset({path.name for path in SCRIPTS_DIR.glob("*.py")}))
+        self.assertTrue(FRAMEWORK_SCRIPTS_DIR.is_dir())
+        self.assertEqual(expected_framework, {path.name for path in FRAMEWORK_SCRIPTS_DIR.glob("*.py")})
 
     def test_tests_tree_contains_only_unit_tests_and_benchmark_configs(self):
         allowed_python = {
@@ -80,10 +86,15 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "tests/test_agp_guarded_curriculum.py",
             "tests/test_agp_physical_validation.py",
             "tests/test_full_pauli_pinn.py",
+            "tests/test_ising_ground_state_solver.py",
             "tests/test_agp_joint_calibration.py",
             "tests/test_agp_support_swap.py",
             "tests/test_qiskit_hamiltonian_generator.py",
             "tests/test_sparse_pauli.py",
+            "tests/sparse_agp_curriculum/scripts/agp_physical_validation.py",
+            "tests/sparse_agp_curriculum/scripts/agp_qubit_grid_benchmark.py",
+            "tests/sparse_agp_curriculum/scripts/agp_regenerate_hcd_summaries.py",
+            "tests/sparse_agp_curriculum/scripts/build_driver_problem_hamiltonian.py",
         }
         python_files = {
             path.relative_to(ROOT).as_posix()
@@ -109,13 +120,25 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         self.assertTrue((ROOT / "docs").is_dir())
         self.assertFalse((ROOT / "documentation").exists())
 
-    def test_q15_and_q20_configs_live_under_tests_and_point_to_common_scripts(self):
-        for study in ("q15", "q20"):
-            config_path = ROOT / "tests" / study / "sweep_test" / "config.json"
+    def test_q15_and_q20_configs_retain_distinct_physical_systems(self):
+        expected_systems = {
+            "q15": "TransverseIsingDriverProblem",
+            "q20": "Hidrogen",
+        }
+        for study, expected_system in expected_systems.items():
+            config_path = ROOT / "tests" / "sparse_agp_curriculum" / study / "sweep_test" / "config.json"
             self.assertTrue(config_path.is_file(), config_path)
+            self.assertTrue(config_path.with_name("README.md").is_file())
             payload = json.loads(config_path.read_text(encoding="utf-8"))
 
             self.assertEqual(payload["default_pipeline"]["entrypoint"], "scripts/agp_holdout_feedback.py")
+            self.assertEqual(payload["physical"]["parameters"]["system"], expected_system)
+            physical_validation = payload.get("physical_validation")
+            if isinstance(physical_validation, dict):
+                self.assertEqual(
+                    physical_validation["entrypoint"],
+                    "tests/sparse_agp_curriculum/scripts/agp_physical_validation.py",
+                )
             study_python = [
                 path
                 for path in config_path.parent.rglob("*.py")
@@ -124,7 +147,8 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             self.assertEqual(study_python, [])
 
     def test_q15_support_selection_is_configured_not_script_specific(self):
-        payload = json.loads((ROOT / "tests/q15/sweep_test/config.json").read_text(encoding="utf-8"))
+        config_path = ROOT / "tests/sparse_agp_curriculum/q15/sweep_test/config.json"
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
 
         self.assertEqual(
             payload["support_sweep"]["agp_support_selection"]["strategy"],
@@ -205,7 +229,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         self.assertEqual(q9_payload["physical_validation"]["learned_top_terms_sweep"], [1024, 2048])
         self.assertNotIn("trained_run_selection", q9_payload["physical_validation"])
         self.assertEqual(q3_payload["default_pipeline"]["entrypoint"], "scripts/agp_holdout_feedback.py")
-        self.assertEqual(q3_payload["physical_validation"]["entrypoint"], "scripts/agp_physical_validation.py")
+        self.assertEqual(q3_payload["physical_validation"]["entrypoint"], "tests/sparse_agp_curriculum/scripts/agp_physical_validation.py")
         self.assertEqual(q3_payload["summary"]["runs_dir"], "runs/")
 
     def test_grid_summary_contract_rejects_mismatched_deployment(self):

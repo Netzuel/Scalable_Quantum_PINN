@@ -12,11 +12,12 @@ Core workflow:
 - `agp_residual_calibration.py`: optional residual-only continuation for a completed sparse AGP.
 - `agp_restart.py`: remove generated artifacts for one configured study.
 - `agp_support.py`: support-selection helpers.
-- `agp_physical_validation.py`: statevector physical validation for configured small enough diagnostics.
-- `agp_regenerate_hcd_summaries.py`: overwrite every saved `hcd_connection_summary.pdf` from the adjacent coefficient exports.
 - `agp_plot_annotations.py`: shared physical-metric footer annotations for HCD summary plots.
-- `agp_qubit_grid_benchmark.py`: prepare, run, validate, aggregate, and plot the diagonal-Ising q-grid benchmark with one `qN/` folder per qubit count.
-- `build_driver_problem_hamiltonian.py`: generate analytic driver/problem Hamiltonians.
+
+Exact numerical validation:
+
+- `numerical_solver/ising_ground_state.py`: diagonal-Ising parsing, QUBO conversion, exact dynamic programming, and exhaustive checks.
+- `numerical_solver/solve_driver_problem_grid.py`: export exact ground-state data over a configured qubit range.
 
 Shared implementation:
 
@@ -25,3 +26,7 @@ Shared implementation:
 
 Optional diagnostics live under `scripts/diagnostics/`. They are not the
 default benchmark methodology.
+
+Hamiltonian-specific generation, statevector validation, grid orchestration,
+and HCD figure regeneration live under
+`tests/sparse_agp_curriculum/scripts/`.

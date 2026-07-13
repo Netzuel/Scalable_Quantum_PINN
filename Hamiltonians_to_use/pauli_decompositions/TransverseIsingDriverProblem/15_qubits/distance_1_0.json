@@ -233,7 +233,7 @@
     "dense_usage": "None; analytic Pauli strings are exported directly.",
     "field_gradient": 0.15,
     "final_construction": "analytic diagonal Ising problem with Z_i and nearest-neighbor Z_i Z_j terms",
-    "generator": "scripts/build_driver_problem_hamiltonian.py",
+    "generator": "tests/sparse_agp_curriculum/scripts/build_driver_problem_hamiltonian.py",
     "initial_construction": "analytic transverse-field driver H_initial = -sum_i X_i",
     "num_qubits": 15,
     "periodic": false,

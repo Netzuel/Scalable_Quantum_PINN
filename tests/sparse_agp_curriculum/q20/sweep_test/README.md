@@ -71,7 +71,7 @@ same diagnostics.
 Clean generated artifacts and recreate only the run root:
 
 ```bash
-conda run -n torch-mps python scripts/agp_restart.py --config tests/q20/sweep_test/config.json
+conda run -n torch-mps python scripts/agp_restart.py --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 ## Train
@@ -83,21 +83,21 @@ post-curriculum temporal-refinement stages:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 Train only the baseline `K=16384` AGP model:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_baseline_train.py \
-  --config tests/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 Rebuild only the baseline summary from completed runs:
 
 ```bash
 conda run -n torch-mps python scripts/agp_baseline_train.py \
-  --config tests/q20/sweep_test/config.json \
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json \
   --summary-only
 ```
 
@@ -106,8 +106,8 @@ retraining:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_evaluate_holdout.py \
-  --config tests/q20/sweep_test/config.json \
-  --trained-run tests/q20/sweep_test/runs/baselines/agp_16384 \
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json \
+  --trained-run tests/sparse_agp_curriculum/q20/sweep_test/runs/baselines/agp_16384 \
   --residual-top-k 18432 \
   --device cpu
 ```
@@ -117,7 +117,7 @@ plots:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_study.py \
-  --config tests/q20/sweep_test/config.json \
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json \
   --residual-top-k 18432 \
   --device cpu
 ```
@@ -209,7 +209,7 @@ Run the diagnostic fixed-budget support-refinement curriculum:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/diagnostics/agp_coupled_curriculum.py \
-  --config tests/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 With the current config this writes under:
@@ -222,7 +222,7 @@ Build pruned support candidates from the final coefficient ranking:
 
 ```bash
 conda run -n torch-mps python scripts/diagnostics/agp_prune_support.py \
-  --config tests/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 Classify the latest diagnostic coupled result against
@@ -230,7 +230,7 @@ Classify the latest diagnostic coupled result against
 
 ```bash
 conda run -n torch-mps python scripts/diagnostics/agp_certify_coupled.py \
-  --config tests/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 The certification script writes `certification_summary.json` and marks each gate

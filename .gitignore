@@ -11,7 +11,5 @@ outputs/
 results/
 runs/
 wandb/
-tests/q*/sweep_test/Images/*
-tests/q*/sweep_test/Models_Data/*
-tests/diagonal_ising_grid/Images/
-tests/diagonal_ising_grid/Models_Data/
+tests/sparse_agp_curriculum/q*/sweep_test/Images/*
+tests/sparse_agp_curriculum/q*/sweep_test/Models_Data/*

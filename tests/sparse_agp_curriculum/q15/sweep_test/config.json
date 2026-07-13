@@ -148,7 +148,7 @@
     "description": "Trainable scheduling function lambda(t)=lambda_0(t)+tau^2(1-tau)^2*A_sched*tanh(u_NN(t)), with lambda_0 equal to the current sin^2 schedule and A_sched=2.4 chosen to keep lambda within [0,1] for this base schedule. Endpoint values and endpoint derivatives are enforced by construction."
   },
   "physical_validation": {
-    "entrypoint": "scripts/agp_physical_validation.py",
+    "entrypoint": "tests/sparse_agp_curriculum/scripts/agp_physical_validation.py",
     "protocols": ["no_cd", "kipu_dqfm_l1", "learned_sparse_agp"],
     "schedule": "sinusoidal_sin2",
     "statevector_qubits": 15,

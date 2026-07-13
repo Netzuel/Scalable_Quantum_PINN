@@ -13,7 +13,7 @@ The Hamiltonian path is a driver-to-problem transverse Ising example:
 
 ```text
 H_initial = - sum_i X_i
-H_final   = sum_i h_i Z_i + sum_i J_i Z_i Z_{i+1}
+H_final   = - sum_i h_i Z_i - sum_i J_i Z_i Z_{i+1}
 lambda(t) = sin^2(pi t / 2T) + tau^2 (1 - tau)^2 A_sched tanh(u_theta(tau))
 ```
 
@@ -69,7 +69,7 @@ Generate the q15 analytic driver/problem Hamiltonian and update the repository
 Pauli-decomposition index:
 
 ```bash
-conda run -n torch-mps python scripts/build_driver_problem_hamiltonian.py --update-index
+conda run -n torch-mps python tests/sparse_agp_curriculum/scripts/build_driver_problem_hamiltonian.py --update-index
 ```
 
 ## Clean
@@ -77,7 +77,7 @@ conda run -n torch-mps python scripts/build_driver_problem_hamiltonian.py --upda
 Clean generated artifacts and recreate only the run root:
 
 ```bash
-conda run -n torch-mps python scripts/agp_restart.py --config tests/q15/sweep_test/config.json
+conda run -n torch-mps python scripts/agp_restart.py --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
 ```
 
 ## Train
@@ -88,14 +88,14 @@ and then executes the fifteen holdout-feedback rounds:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/q15/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
 ```
 
 Train only the baseline `K=32768` AGP model:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_baseline_train.py \
-  --config tests/q15/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
 ```
 
 ## Physical Validation
@@ -109,8 +109,8 @@ ground-state energy, fidelity, or exact final observables.
 After training, run the q15 statevector diagnostic:
 
 ```bash
-conda run --no-capture-output -n torch-mps python scripts/agp_physical_validation.py \
-  --config tests/q15/sweep_test/config.json
+conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_physical_validation.py \
+  --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
 ```
 
 This compares final observables for:

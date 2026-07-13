@@ -746,7 +746,7 @@ AGP experiment, not as evidence that the unrestricted AGP has been solved.
 The retained q20 workflow is configured under:
 
 ```text
-tests/q20/sweep_test/
+tests/sparse_agp_curriculum/q20/sweep_test/
 ```
 
 Main scripts:
@@ -766,12 +766,12 @@ scripts/diagnostics/agp_coupled_curriculum.py
 ```
 
 The default feedback command reads the configured `K`, `Q=auto`, `i=10`
-curriculum from `tests/q20/sweep_test/config.json`. If the cleaned folder has no baseline
+curriculum from `tests/sparse_agp_curriculum/q20/sweep_test/config.json`. If the cleaned folder has no baseline
 checkpoint, this command trains the baseline first:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 The feedback summary exports round-wise residual plots and, for the final round,

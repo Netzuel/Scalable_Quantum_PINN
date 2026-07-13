@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Iterable
 
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_GRID_ROOT = Path("tests/diagonal_ising_grid")
+ROOT = Path(__file__).resolve().parents[3]
+FRAMEWORK_SCRIPTS_DIR = Path("tests/sparse_agp_curriculum/scripts")
+DEFAULT_GRID_ROOT = Path("tests/sparse_agp_curriculum/grid")
 DEFAULT_QUBITS = list(range(2, 21))
 METHODS = ("no_cd", "kipu_dqfm_l1", "learned_sparse_agp")
 METHOD_LABELS = {
@@ -276,7 +277,7 @@ def grid_config(
             "lr": 0.001,
         },
         "physical_validation": {
-            "entrypoint": "scripts/agp_physical_validation.py",
+            "entrypoint": str(FRAMEWORK_SCRIPTS_DIR / "agp_physical_validation.py"),
             "protocols": ["no_cd", "kipu_dqfm_l1", "learned_sparse_agp"],
             "schedule": "sinusoidal_sin2",
             "statevector_qubits": int(q),
@@ -340,7 +341,7 @@ def prepare_one(q: int, args: argparse.Namespace) -> Path:
     run_command(
         [
             sys.executable,
-            "scripts/build_driver_problem_hamiltonian.py",
+            str(FRAMEWORK_SCRIPTS_DIR / "build_driver_problem_hamiltonian.py"),
             "--num-qubits",
             str(q),
             "--distance",
@@ -379,7 +380,15 @@ def validate_one(config: Path, *, force: bool) -> None:
     if physical_summary_exists(config) and not force:
         print(f"skip_validation config={config.relative_to(ROOT)} reason=physical_summary_exists")
         return
-    run_command([sys.executable, "-u", "scripts/agp_physical_validation.py", "--config", str(config)])
+    run_command(
+        [
+            sys.executable,
+            "-u",
+            str(FRAMEWORK_SCRIPTS_DIR / "agp_physical_validation.py"),
+            "--config",
+            str(config),
+        ]
+    )
 
 
 def flatten_summary(q: int, summary_path: Path) -> list[dict[str, object]]:

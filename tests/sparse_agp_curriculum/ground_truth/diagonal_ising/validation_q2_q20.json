@@ -1,0 +1,1817 @@
+{
+  "format": "diagonal_ising_ground_truth_validation_v1",
+  "system": "TransverseIsingDriverProblem",
+  "validation_summary": {
+    "validation_min_qubits": 2,
+    "validation_max_qubits": 20,
+    "validated_size_count": 19,
+    "all_passed": true
+  },
+  "solutions": [
+    {
+      "q": 2,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/2_qubits/distance_1_0.json",
+      "problem_sha256": "12c851188ac763a010c7ff9893bd8c18a938b8eeec5b421e343e86c5be5a1342",
+      "field_term_count": 2,
+      "coupling_term_count": 1,
+      "ground_energy": -1.7,
+      "ground_bitstrings": [
+        "00"
+      ],
+      "ground_state_kets": [
+        "|00>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -0.3,
+      "spectral_gap": 1.4,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -1.7,
+        "linear": [
+          2.6475,
+          2.7525
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -4.0
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 3,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/3_qubits/distance_1_0.json",
+      "problem_sha256": "f86eaebb290ab71b35155428a88df59675ff542adce004fcf011eb83c4c867b8",
+      "field_term_count": 3,
+      "coupling_term_count": 2,
+      "ground_energy": -3.05,
+      "ground_bitstrings": [
+        "000"
+      ],
+      "ground_state_kets": [
+        "|000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -0.95,
+      "spectral_gap": 2.1,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -3.05,
+        "linear": [
+          2.495,
+          4.7,
+          2.905
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.8
+          ],
+          [
+            1,
+            2,
+            -4.2
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 4,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/4_qubits/distance_1_0.json",
+      "problem_sha256": "b85d6fc8459d3f105219706f6e3e37fcddb9aec868d37ce640f933f8e504eeb6",
+      "field_term_count": 4,
+      "coupling_term_count": 3,
+      "ground_energy": -4.4,
+      "ground_bitstrings": [
+        "0000"
+      ],
+      "ground_state_kets": [
+        "|0000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -2.005,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -4.4,
+        "linear": [
+          2.395,
+          4.465,
+          4.935,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -4.0
+          ],
+          [
+            2,
+            3,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 5,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/5_qubits/distance_1_0.json",
+      "problem_sha256": "fc5f410c5f3117f25979d1b1b9f6ed6c67b312a01599acc9b5e359e52946b125",
+      "field_term_count": 5,
+      "coupling_term_count": 4,
+      "ground_energy": -5.75,
+      "ground_bitstrings": [
+        "00000"
+      ],
+      "ground_state_kets": [
+        "|00000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -3.355,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -5.75,
+        "linear": [
+          2.395,
+          4.38083333333333,
+          4.7,
+          5.01916666666667,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.86666666666667
+          ],
+          [
+            2,
+            3,
+            -4.13333333333333
+          ],
+          [
+            3,
+            4,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 6,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/6_qubits/distance_1_0.json",
+      "problem_sha256": "dcc45d72827d07ebf450aa9cd49256303e441abe7213cbc80de6bc3bb23f6bc8",
+      "field_term_count": 6,
+      "coupling_term_count": 5,
+      "ground_energy": -7.1,
+      "ground_bitstrings": [
+        "000000"
+      ],
+      "ground_state_kets": [
+        "|000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -4.705,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -7.1,
+        "linear": [
+          2.395,
+          4.337,
+          4.579,
+          4.821,
+          5.063,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.8
+          ],
+          [
+            2,
+            3,
+            -4.0
+          ],
+          [
+            3,
+            4,
+            -4.2
+          ],
+          [
+            4,
+            5,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 7,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/7_qubits/distance_1_0.json",
+      "problem_sha256": "abff571a3ad55e374c3e15ccd1d04a73c0f199c4b560e3e6bca510d392a72fe2",
+      "field_term_count": 7,
+      "coupling_term_count": 6,
+      "ground_energy": -8.45,
+      "ground_bitstrings": [
+        "0000000"
+      ],
+      "ground_state_kets": [
+        "|0000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -6.055,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -8.45,
+        "linear": [
+          2.395,
+          4.31,
+          4.505,
+          4.7,
+          4.895,
+          5.09,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.76
+          ],
+          [
+            2,
+            3,
+            -3.92
+          ],
+          [
+            3,
+            4,
+            -4.08
+          ],
+          [
+            4,
+            5,
+            -4.24
+          ],
+          [
+            5,
+            6,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 8,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/8_qubits/distance_1_0.json",
+      "problem_sha256": "2a05d3dd7ecf3d4c25bc2673bf7106b5aca3073e247891f6de420168261a889a",
+      "field_term_count": 8,
+      "coupling_term_count": 7,
+      "ground_energy": -9.8,
+      "ground_bitstrings": [
+        "00000000"
+      ],
+      "ground_state_kets": [
+        "|00000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -7.405,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -9.8,
+        "linear": [
+          2.395,
+          4.29166666666667,
+          4.455,
+          4.61833333333333,
+          4.78166666666667,
+          4.945,
+          5.10833333333333,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.73333333333333
+          ],
+          [
+            2,
+            3,
+            -3.86666666666667
+          ],
+          [
+            3,
+            4,
+            -4.0
+          ],
+          [
+            4,
+            5,
+            -4.13333333333333
+          ],
+          [
+            5,
+            6,
+            -4.26666666666667
+          ],
+          [
+            6,
+            7,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 9,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/9_qubits/distance_1_0.json",
+      "problem_sha256": "d5b7b185044d0c9e39ca5054d99c7c8b3585cc1ec8021fda88130be91c4cd5dd",
+      "field_term_count": 9,
+      "coupling_term_count": 8,
+      "ground_energy": -11.15,
+      "ground_bitstrings": [
+        "000000000"
+      ],
+      "ground_state_kets": [
+        "|000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -8.755,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -11.15,
+        "linear": [
+          2.395,
+          4.27839285714286,
+          4.41892857142857,
+          4.55946428571429,
+          4.7,
+          4.84053571428571,
+          4.98107142857143,
+          5.12160714285714,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.71428571428571
+          ],
+          [
+            2,
+            3,
+            -3.82857142857143
+          ],
+          [
+            3,
+            4,
+            -3.94285714285714
+          ],
+          [
+            4,
+            5,
+            -4.05714285714286
+          ],
+          [
+            5,
+            6,
+            -4.17142857142857
+          ],
+          [
+            6,
+            7,
+            -4.28571428571429
+          ],
+          [
+            7,
+            8,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 10,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/10_qubits/distance_1_0.json",
+      "problem_sha256": "3b199ce89bcbbdc3d055439753846e1205184c3a06586be2e7cfefbfdbc7ac52",
+      "field_term_count": 10,
+      "coupling_term_count": 9,
+      "ground_energy": -12.5,
+      "ground_bitstrings": [
+        "0000000000"
+      ],
+      "ground_state_kets": [
+        "|0000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -10.105,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -12.5,
+        "linear": [
+          2.395,
+          4.26833333333333,
+          4.39166666666667,
+          4.515,
+          4.63833333333333,
+          4.76166666666667,
+          4.885,
+          5.00833333333333,
+          5.13166666666667,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.7
+          ],
+          [
+            2,
+            3,
+            -3.8
+          ],
+          [
+            3,
+            4,
+            -3.9
+          ],
+          [
+            4,
+            5,
+            -4.0
+          ],
+          [
+            5,
+            6,
+            -4.1
+          ],
+          [
+            6,
+            7,
+            -4.2
+          ],
+          [
+            7,
+            8,
+            -4.3
+          ],
+          [
+            8,
+            9,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 11,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/11_qubits/distance_1_0.json",
+      "problem_sha256": "b461ff8f3d0d957cad14fc2c331a2c1588114db3b2678963e5f73749fffd43a9",
+      "field_term_count": 11,
+      "coupling_term_count": 10,
+      "ground_energy": -13.85,
+      "ground_bitstrings": [
+        "00000000000"
+      ],
+      "ground_state_kets": [
+        "|00000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -11.455,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -13.85,
+        "linear": [
+          2.395,
+          4.26044444444444,
+          4.37033333333333,
+          4.48022222222222,
+          4.59011111111111,
+          4.7,
+          4.80988888888889,
+          4.91977777777778,
+          5.02966666666667,
+          5.13955555555556,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.68888888888889
+          ],
+          [
+            2,
+            3,
+            -3.77777777777778
+          ],
+          [
+            3,
+            4,
+            -3.86666666666667
+          ],
+          [
+            4,
+            5,
+            -3.95555555555556
+          ],
+          [
+            5,
+            6,
+            -4.04444444444444
+          ],
+          [
+            6,
+            7,
+            -4.13333333333333
+          ],
+          [
+            7,
+            8,
+            -4.22222222222222
+          ],
+          [
+            8,
+            9,
+            -4.31111111111111
+          ],
+          [
+            9,
+            10,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 12,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/12_qubits/distance_1_0.json",
+      "problem_sha256": "a5f7db13312a61edd12582759dcb32387e44154381a6201aa8c3cabc8aee9d9c",
+      "field_term_count": 12,
+      "coupling_term_count": 11,
+      "ground_energy": -15.2,
+      "ground_bitstrings": [
+        "000000000000"
+      ],
+      "ground_state_kets": [
+        "|000000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -12.805,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -15.2,
+        "linear": [
+          2.395,
+          4.25409090909091,
+          4.35318181818182,
+          4.45227272727273,
+          4.55136363636364,
+          4.65045454545455,
+          4.74954545454545,
+          4.84863636363636,
+          4.94772727272727,
+          5.04681818181818,
+          5.14590909090909,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.68
+          ],
+          [
+            2,
+            3,
+            -3.76
+          ],
+          [
+            3,
+            4,
+            -3.84
+          ],
+          [
+            4,
+            5,
+            -3.92
+          ],
+          [
+            5,
+            6,
+            -4.0
+          ],
+          [
+            6,
+            7,
+            -4.08
+          ],
+          [
+            7,
+            8,
+            -4.16
+          ],
+          [
+            8,
+            9,
+            -4.24
+          ],
+          [
+            9,
+            10,
+            -4.32
+          ],
+          [
+            10,
+            11,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 13,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/13_qubits/distance_1_0.json",
+      "problem_sha256": "f16015f58c0a024438b4302d1f9054ec8d7e26dbaf55c83fb048aa312c460d9a",
+      "field_term_count": 13,
+      "coupling_term_count": 12,
+      "ground_energy": -16.55,
+      "ground_bitstrings": [
+        "0000000000000"
+      ],
+      "ground_state_kets": [
+        "|0000000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -14.155,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -16.55,
+        "linear": [
+          2.395,
+          4.24886363636364,
+          4.33909090909091,
+          4.42931818181818,
+          4.51954545454545,
+          4.60977272727273,
+          4.7,
+          4.79022727272727,
+          4.88045454545455,
+          4.97068181818182,
+          5.06090909090909,
+          5.15113636363636,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.67272727272727
+          ],
+          [
+            2,
+            3,
+            -3.74545454545455
+          ],
+          [
+            3,
+            4,
+            -3.81818181818182
+          ],
+          [
+            4,
+            5,
+            -3.89090909090909
+          ],
+          [
+            5,
+            6,
+            -3.96363636363636
+          ],
+          [
+            6,
+            7,
+            -4.03636363636364
+          ],
+          [
+            7,
+            8,
+            -4.10909090909091
+          ],
+          [
+            8,
+            9,
+            -4.18181818181818
+          ],
+          [
+            9,
+            10,
+            -4.25454545454545
+          ],
+          [
+            10,
+            11,
+            -4.32727272727273
+          ],
+          [
+            11,
+            12,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 14,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/14_qubits/distance_1_0.json",
+      "problem_sha256": "08e05e4fa719947b93363b14cc921fcc98a69380325d9a90fa87b223959f8fff",
+      "field_term_count": 14,
+      "coupling_term_count": 13,
+      "ground_energy": -17.9,
+      "ground_bitstrings": [
+        "00000000000000"
+      ],
+      "ground_state_kets": [
+        "|00000000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -15.505,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -17.9,
+        "linear": [
+          2.395,
+          4.24448717948718,
+          4.32730769230769,
+          4.4101282051282,
+          4.49294871794872,
+          4.57576923076923,
+          4.65858974358974,
+          4.74141025641026,
+          4.82423076923077,
+          4.90705128205128,
+          4.98987179487179,
+          5.07269230769231,
+          5.15551282051282,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.66666666666667
+          ],
+          [
+            2,
+            3,
+            -3.73333333333333
+          ],
+          [
+            3,
+            4,
+            -3.8
+          ],
+          [
+            4,
+            5,
+            -3.86666666666667
+          ],
+          [
+            5,
+            6,
+            -3.93333333333333
+          ],
+          [
+            6,
+            7,
+            -4.0
+          ],
+          [
+            7,
+            8,
+            -4.06666666666667
+          ],
+          [
+            8,
+            9,
+            -4.13333333333333
+          ],
+          [
+            9,
+            10,
+            -4.2
+          ],
+          [
+            10,
+            11,
+            -4.26666666666667
+          ],
+          [
+            11,
+            12,
+            -4.33333333333333
+          ],
+          [
+            12,
+            13,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 15,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/15_qubits/distance_1_0.json",
+      "problem_sha256": "74ae3e68b4a4328f9aee3f851c4aa61c0e6c1001949818b790c093194adaa78c",
+      "field_term_count": 15,
+      "coupling_term_count": 14,
+      "ground_energy": -19.25,
+      "ground_bitstrings": [
+        "000000000000000"
+      ],
+      "ground_state_kets": [
+        "|000000000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -16.855,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -19.25,
+        "linear": [
+          2.395,
+          4.24076923076923,
+          4.31730769230769,
+          4.39384615384615,
+          4.47038461538462,
+          4.54692307692308,
+          4.62346153846154,
+          4.7,
+          4.77653846153846,
+          4.85307692307692,
+          4.92961538461538,
+          5.00615384615385,
+          5.08269230769231,
+          5.15923076923077,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.66153846153846
+          ],
+          [
+            2,
+            3,
+            -3.72307692307692
+          ],
+          [
+            3,
+            4,
+            -3.78461538461538
+          ],
+          [
+            4,
+            5,
+            -3.84615384615385
+          ],
+          [
+            5,
+            6,
+            -3.90769230769231
+          ],
+          [
+            6,
+            7,
+            -3.96923076923077
+          ],
+          [
+            7,
+            8,
+            -4.03076923076923
+          ],
+          [
+            8,
+            9,
+            -4.09230769230769
+          ],
+          [
+            9,
+            10,
+            -4.15384615384615
+          ],
+          [
+            10,
+            11,
+            -4.21538461538462
+          ],
+          [
+            11,
+            12,
+            -4.27692307692308
+          ],
+          [
+            12,
+            13,
+            -4.33846153846154
+          ],
+          [
+            13,
+            14,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 16,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/16_qubits/distance_1_0.json",
+      "problem_sha256": "0ca25c97ddaeec38515985674ed2784d488c91f3ed7953a284612a2abb3a049a",
+      "field_term_count": 16,
+      "coupling_term_count": 15,
+      "ground_energy": -20.6,
+      "ground_bitstrings": [
+        "0000000000000000"
+      ],
+      "ground_state_kets": [
+        "|0000000000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -18.205,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -20.6,
+        "linear": [
+          2.395,
+          4.23757142857143,
+          4.30871428571429,
+          4.37985714285714,
+          4.451,
+          4.52214285714286,
+          4.59328571428571,
+          4.66442857142857,
+          4.73557142857143,
+          4.80671428571429,
+          4.87785714285714,
+          4.949,
+          5.02014285714286,
+          5.09128571428571,
+          5.16242857142857,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.65714285714286
+          ],
+          [
+            2,
+            3,
+            -3.71428571428571
+          ],
+          [
+            3,
+            4,
+            -3.77142857142857
+          ],
+          [
+            4,
+            5,
+            -3.82857142857143
+          ],
+          [
+            5,
+            6,
+            -3.88571428571429
+          ],
+          [
+            6,
+            7,
+            -3.94285714285714
+          ],
+          [
+            7,
+            8,
+            -4.0
+          ],
+          [
+            8,
+            9,
+            -4.05714285714286
+          ],
+          [
+            9,
+            10,
+            -4.11428571428571
+          ],
+          [
+            10,
+            11,
+            -4.17142857142857
+          ],
+          [
+            11,
+            12,
+            -4.22857142857143
+          ],
+          [
+            12,
+            13,
+            -4.28571428571429
+          ],
+          [
+            13,
+            14,
+            -4.34285714285714
+          ],
+          [
+            14,
+            15,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 17,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/17_qubits/distance_1_0.json",
+      "problem_sha256": "cfe781cf1c6a38af3be2ebb2d3e07413cb8174131ef0f6bc4bcb25d17fc6b3da",
+      "field_term_count": 17,
+      "coupling_term_count": 16,
+      "ground_energy": -21.95,
+      "ground_bitstrings": [
+        "00000000000000000"
+      ],
+      "ground_state_kets": [
+        "|00000000000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -19.555,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -21.95,
+        "linear": [
+          2.395,
+          4.23479166666667,
+          4.30125,
+          4.36770833333333,
+          4.43416666666667,
+          4.500625,
+          4.56708333333333,
+          4.63354166666667,
+          4.7,
+          4.76645833333333,
+          4.83291666666667,
+          4.899375,
+          4.96583333333333,
+          5.03229166666667,
+          5.09875,
+          5.16520833333333,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.65333333333333
+          ],
+          [
+            2,
+            3,
+            -3.70666666666667
+          ],
+          [
+            3,
+            4,
+            -3.76
+          ],
+          [
+            4,
+            5,
+            -3.81333333333333
+          ],
+          [
+            5,
+            6,
+            -3.86666666666667
+          ],
+          [
+            6,
+            7,
+            -3.92
+          ],
+          [
+            7,
+            8,
+            -3.97333333333333
+          ],
+          [
+            8,
+            9,
+            -4.02666666666667
+          ],
+          [
+            9,
+            10,
+            -4.08
+          ],
+          [
+            10,
+            11,
+            -4.13333333333333
+          ],
+          [
+            11,
+            12,
+            -4.18666666666667
+          ],
+          [
+            12,
+            13,
+            -4.24
+          ],
+          [
+            13,
+            14,
+            -4.29333333333333
+          ],
+          [
+            14,
+            15,
+            -4.34666666666667
+          ],
+          [
+            15,
+            16,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 18,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/18_qubits/distance_1_0.json",
+      "problem_sha256": "fc10af4882d0bb22394407a1684d566feb53abf19a10750b7c3129ced252d019",
+      "field_term_count": 18,
+      "coupling_term_count": 17,
+      "ground_energy": -23.3,
+      "ground_bitstrings": [
+        "000000000000000000"
+      ],
+      "ground_state_kets": [
+        "|000000000000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -20.905,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -23.3,
+        "linear": [
+          2.395,
+          4.23235294117647,
+          4.29470588235294,
+          4.35705882352941,
+          4.41941176470588,
+          4.48176470588235,
+          4.54411764705882,
+          4.60647058823529,
+          4.66882352941176,
+          4.73117647058823,
+          4.79352941176471,
+          4.85588235294118,
+          4.91823529411765,
+          4.98058823529412,
+          5.04294117647059,
+          5.10529411764706,
+          5.16764705882353,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.65
+          ],
+          [
+            2,
+            3,
+            -3.7
+          ],
+          [
+            3,
+            4,
+            -3.75
+          ],
+          [
+            4,
+            5,
+            -3.8
+          ],
+          [
+            5,
+            6,
+            -3.85
+          ],
+          [
+            6,
+            7,
+            -3.9
+          ],
+          [
+            7,
+            8,
+            -3.95
+          ],
+          [
+            8,
+            9,
+            -4.0
+          ],
+          [
+            9,
+            10,
+            -4.05
+          ],
+          [
+            10,
+            11,
+            -4.1
+          ],
+          [
+            11,
+            12,
+            -4.15
+          ],
+          [
+            12,
+            13,
+            -4.2
+          ],
+          [
+            13,
+            14,
+            -4.25
+          ],
+          [
+            14,
+            15,
+            -4.3
+          ],
+          [
+            15,
+            16,
+            -4.35
+          ],
+          [
+            16,
+            17,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 19,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/19_qubits/distance_1_0.json",
+      "problem_sha256": "c535b2b4e56be25d1adb913fbe237220b5b381516e7ef222ce999cc36fe81b2f",
+      "field_term_count": 19,
+      "coupling_term_count": 18,
+      "ground_energy": -24.65,
+      "ground_bitstrings": [
+        "0000000000000000000"
+      ],
+      "ground_state_kets": [
+        "|0000000000000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -22.255,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -24.65,
+        "linear": [
+          2.395,
+          4.23019607843137,
+          4.28892156862745,
+          4.34764705882353,
+          4.40637254901961,
+          4.46509803921569,
+          4.52382352941176,
+          4.58254901960784,
+          4.64127450980392,
+          4.7,
+          4.75872549019608,
+          4.81745098039216,
+          4.87617647058824,
+          4.93490196078431,
+          4.99362745098039,
+          5.05235294117647,
+          5.11107843137255,
+          5.16980392156863,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.64705882352941
+          ],
+          [
+            2,
+            3,
+            -3.69411764705882
+          ],
+          [
+            3,
+            4,
+            -3.74117647058824
+          ],
+          [
+            4,
+            5,
+            -3.78823529411765
+          ],
+          [
+            5,
+            6,
+            -3.83529411764706
+          ],
+          [
+            6,
+            7,
+            -3.88235294117647
+          ],
+          [
+            7,
+            8,
+            -3.92941176470588
+          ],
+          [
+            8,
+            9,
+            -3.97647058823529
+          ],
+          [
+            9,
+            10,
+            -4.02352941176471
+          ],
+          [
+            10,
+            11,
+            -4.07058823529412
+          ],
+          [
+            11,
+            12,
+            -4.11764705882353
+          ],
+          [
+            12,
+            13,
+            -4.16470588235294
+          ],
+          [
+            13,
+            14,
+            -4.21176470588235
+          ],
+          [
+            14,
+            15,
+            -4.25882352941176
+          ],
+          [
+            15,
+            16,
+            -4.30588235294118
+          ],
+          [
+            16,
+            17,
+            -4.35294117647059
+          ],
+          [
+            17,
+            18,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    },
+    {
+      "q": 20,
+      "source": "Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/20_qubits/distance_1_0.json",
+      "problem_sha256": "79fdd63bd7c8cb3bd79765cd336a21b098039f8dbac83699733f6d4e7e06a284",
+      "field_term_count": 20,
+      "coupling_term_count": 19,
+      "ground_energy": -26.0,
+      "ground_bitstrings": [
+        "00000000000000000000"
+      ],
+      "ground_state_kets": [
+        "|00000000000000000000>"
+      ],
+      "ground_state_degeneracy": 1,
+      "ground_bitstrings_truncated": false,
+      "first_excited_energy": -23.605,
+      "spectral_gap": 2.395,
+      "solver": "exact_path_dynamic_programming",
+      "qubo": {
+        "constant": -26.0,
+        "linear": [
+          2.395,
+          4.22827485380117,
+          4.28377192982456,
+          4.33926900584795,
+          4.39476608187134,
+          4.45026315789474,
+          4.50576023391813,
+          4.56125730994152,
+          4.61675438596491,
+          4.6722514619883,
+          4.7277485380117,
+          4.78324561403509,
+          4.83874269005848,
+          4.89423976608187,
+          4.94973684210526,
+          5.00523391812865,
+          5.06073099415205,
+          5.11622807017544,
+          5.17172514619883,
+          3.005
+        ],
+        "quadratic": [
+          [
+            0,
+            1,
+            -3.6
+          ],
+          [
+            1,
+            2,
+            -3.64444444444444
+          ],
+          [
+            2,
+            3,
+            -3.68888888888889
+          ],
+          [
+            3,
+            4,
+            -3.73333333333333
+          ],
+          [
+            4,
+            5,
+            -3.77777777777778
+          ],
+          [
+            5,
+            6,
+            -3.82222222222222
+          ],
+          [
+            6,
+            7,
+            -3.86666666666667
+          ],
+          [
+            7,
+            8,
+            -3.91111111111111
+          ],
+          [
+            8,
+            9,
+            -3.95555555555556
+          ],
+          [
+            9,
+            10,
+            -4.0
+          ],
+          [
+            10,
+            11,
+            -4.04444444444444
+          ],
+          [
+            11,
+            12,
+            -4.08888888888889
+          ],
+          [
+            12,
+            13,
+            -4.13333333333333
+          ],
+          [
+            13,
+            14,
+            -4.17777777777778
+          ],
+          [
+            14,
+            15,
+            -4.22222222222222
+          ],
+          [
+            15,
+            16,
+            -4.26666666666667
+          ],
+          [
+            16,
+            17,
+            -4.31111111111111
+          ],
+          [
+            17,
+            18,
+            -4.35555555555556
+          ],
+          [
+            18,
+            19,
+            -4.4
+          ]
+        ]
+      },
+      "validation": {
+        "source_matches_analytic_construction": true,
+        "termwise_closed_form_performed": true,
+        "termwise_closed_form_passed": true,
+        "exhaustive_enumeration_performed": true,
+        "exhaustive_enumeration_passed": true,
+        "qubo_ground_energy_passed": true
+      }
+    }
+  ]
+}

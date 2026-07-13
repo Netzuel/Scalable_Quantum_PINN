@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-Q20_DIR = ROOT / "tests" / "q20" / "sweep_test"
+Q20_DIR = ROOT / "tests" / "sparse_agp_curriculum" / "q20" / "sweep_test"
 SCRIPTS_DIR = ROOT / "scripts"
 DIAGNOSTICS_DIR = SCRIPTS_DIR / "diagnostics"
 TESTS_DIR = ROOT / "tests"

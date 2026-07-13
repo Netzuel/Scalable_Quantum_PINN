@@ -13,6 +13,9 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+FRAMEWORK_SCRIPTS_DIR = ROOT / "tests" / "sparse_agp_curriculum" / "scripts"
+if str(FRAMEWORK_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(FRAMEWORK_SCRIPTS_DIR))
 
 from agp_baseline_train import settings_for_support  # noqa: E402
 from agp_holdout_feedback import make_support_with_residual_labels  # noqa: E402

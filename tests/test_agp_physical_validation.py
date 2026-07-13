@@ -9,8 +9,9 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "scripts"
+FRAMEWORK_SCRIPTS_DIR = ROOT / "tests" / "sparse_agp_curriculum" / "scripts"
 TESTS_DIR = ROOT / "tests"
-for path in (SCRIPTS_DIR, TESTS_DIR, ROOT):
+for path in (SCRIPTS_DIR, FRAMEWORK_SCRIPTS_DIR, TESTS_DIR, ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 

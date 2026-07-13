@@ -94,9 +94,11 @@ the model or loss. No endpoint loss is added for the fixed schedule:
   chemistry inputs and analytic spin-model smoke inputs.
 - `examples/`: short smoke examples, not paper-scale training runs.
 - `scripts/`: reusable AGP training, holdout, evaluation, support-selection,
-  restart, physical-validation, and optional diagnostic entrypoints.
-- `tests/`: unit and regression tests, plus benchmark configuration folders
-  under `tests/q*/sweep_test/`. Python training logic does not live here.
+  restart, numerical-solver, and optional diagnostic entrypoints.
+- `tests/`: unit and regression tests plus retained benchmark configurations
+  under `tests/sparse_agp_curriculum/`. Framework-specific orchestration lives
+  in its `scripts/` subfolder; reusable training logic remains at repository
+  level.
 - `docs/`: manuscript PDF and project notes.
 - `AGP_CERTIFICATION_CRITERIA.md`: required gate checklist for deciding whether
   a sparse large-`q` AGP is certified, promising, or only a projected sparse
@@ -128,46 +130,61 @@ simultaneously on training, holdout, unseen, and fixed probe residual bases.
 
 ## Benchmark Studies
 
-The retained AGP benchmark studies are configuration folders, not script
-forks:
+The retained AGP benchmark studies and their physical-scenario entrypoints are
+grouped together:
 
 ```text
-tests/q15/sweep_test/
-tests/q20/sweep_test/
+tests/sparse_agp_curriculum/q15/sweep_test/
+tests/sparse_agp_curriculum/q20/sweep_test/
 ```
 
-Each folder contains `config.json` and a README. The same script entrypoints are
-used for any `q`, `K`, residual budget `Q`, and feedback iteration count `i`.
-The study config chooses the Hamiltonian, support-selection policy, residual
-budget, output root, and physical-validation protocol.
+Each study contains `config.json`, a README, and ignored local `runs/` artifacts.
+Reusable curriculum code remains under the repository-level `scripts/`; the
+transverse-Ising Hamiltonian, validation, grid, and figure entrypoints live under
+`tests/sparse_agp_curriculum/scripts/`.
 
 Default fixed-`K` curriculum:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 Baseline only:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_baseline_train.py \
-  --config tests/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 Clean generated artifacts for one configured study:
 
 ```bash
 conda run -n torch-mps python scripts/agp_restart.py \
-  --config tests/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
 ```
 
 The q15 study adds a statevector physical-validation diagnostic:
 
 ```bash
-conda run --no-capture-output -n torch-mps python scripts/agp_physical_validation.py \
-  --config tests/q15/sweep_test/config.json
+conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_physical_validation.py \
+  --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
 ```
+
+The diagonal-Ising final Hamiltonian also has a scalable exact ground-state
+oracle that does not construct a statevector or dense Hamiltonian:
+
+```bash
+conda run --no-capture-output -n torch-mps python \
+  scripts/numerical_solver/solve_driver_problem_grid.py \
+  --min-qubits 2 --max-qubits 156 --validation-max-qubits 20
+```
+
+Curated energies, ground bitstrings, degeneracies, first excitation energies,
+and gaps are stored under
+`tests/sparse_agp_curriculum/ground_truth/diagonal_ising/`. Exhaustive
+enumeration validates every size through `q=20`; the exact path dynamic program
+and closed-form ferromagnetic solution cover the full range through `q=156`.
 
 The exported diagnostics include raw and normalized Euler-Lagrange residuals.
 The normalized residual is computed against the no-AGP baseline on the same
@@ -241,7 +258,8 @@ conda run -n torch-mps python tools/generate_qiskit_pauli_hamiltonian.py transve
 ```
 
 For large generated Hamiltonians such as `q=156`, create a new
-`tests/q156/sweep_test/config.json` and reuse the same `scripts/` entrypoints.
+`tests/sparse_agp_curriculum/q156/sweep_test/config.json` and reuse the
+same shared and framework-specific entrypoints.
 Do not add a new script fork for each qubit count.
 
 ## Quick Validation

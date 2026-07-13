@@ -6,7 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 TOOLS_DIR = ROOT / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
@@ -98,7 +98,7 @@ def main() -> None:
         drop_tol=args.drop_tol,
     )
     source = {
-        "generator": "scripts/build_driver_problem_hamiltonian.py",
+        "generator": "tests/sparse_agp_curriculum/scripts/build_driver_problem_hamiltonian.py",
         "backend": "analytic_driver_to_problem_transverse_ising",
         "num_qubits": args.num_qubits,
         "x_field": args.x_field,

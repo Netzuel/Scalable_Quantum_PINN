@@ -244,6 +244,30 @@ scale, and soft gates using only the projected residual objective and
 regularizers. They do not use final ground-state energy, final fidelity, or
 exact final observables.
 
+## Exact Diagonal-Ising Final-State Oracle
+
+For the `TransverseIsingDriverProblem` validation family, `H_final` contains
+only `Z_i` and nearest-neighbor `Z_i Z_{i+1}` terms on an open chain. Its exact
+ground energy and computational-basis ground bitstrings are therefore available
+without constructing a dense Hamiltonian or statevector.
+
+The retained solver under `scripts/numerical_solver/` uses exact path dynamic
+programming in `O(q)` time. It cross-checks the Ising-to-QUBO mapping and the
+closed-form ferromagnetic result. For `q=2..20`, it additionally enumerates all
+`2**q` bitstrings as an independent oracle. The current family has
+
+```text
+ground bitstring = 00...0
+ground-state degeneracy = 1
+E0(q) = 1 - 1.35 q.
+```
+
+Curated results through `q=156`, including the first distinct excitation and
+spectral gap, are tracked under
+`tests/sparse_agp_curriculum/ground_truth/diagonal_ising/`. These final-state
+targets support energy and bitstring-probability validation at large `q`, but
+they do not make the full time-dependent statevector or exact AGP accessible.
+
 For the current retained q15 benchmark instance, the accepted
 adaptive-refinement residual diagnostics were:
 
@@ -264,7 +288,7 @@ The general pipeline is controlled by one test-local configuration file:
 ```text
 config = tests/<case>/sweep_test/config.json
 training entrypoint = scripts/agp_holdout_feedback.py
-physical validation entrypoint = scripts/agp_physical_validation.py
+physical validation entrypoint = tests/sparse_agp_curriculum/scripts/agp_physical_validation.py
 optional baseline entrypoint = scripts/agp_baseline_train.py
 optional cleanup entrypoint = scripts/agp_restart.py
 ```
@@ -272,9 +296,9 @@ optional cleanup entrypoint = scripts/agp_restart.py
 The current retained q15 benchmark instance is:
 
 ```text
-config = tests/q15/sweep_test/config.json
+config = tests/sparse_agp_curriculum/q15/sweep_test/config.json
 current run root =
-  tests/q15/sweep_test/runs/
+  tests/sparse_agp_curriculum/q15/sweep_test/runs/
   fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/
   agp_32768_residual_65536_add_3072_rounds_15/
 ```
@@ -285,7 +309,7 @@ From a cleaned `tests/<case>/sweep_test/` folder, the full retained pipeline is:
    configured problem.
 
 ```bash
-conda run -n torch-mps python scripts/build_driver_problem_hamiltonian.py --update-index
+conda run -n torch-mps python tests/sparse_agp_curriculum/scripts/build_driver_problem_hamiltonian.py --update-index
 ```
 
 2. Clean generated artifacts without recreating top-level `Images/` or
@@ -314,7 +338,7 @@ conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.p
    Kipu/DQFM `l=1`, and the learned sparse AGP.
 
 ```bash
-conda run --no-capture-output -n torch-mps python scripts/agp_physical_validation.py \
+conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_physical_validation.py \
   --config tests/<case>/sweep_test/config.json
 ```
 
@@ -322,8 +346,9 @@ conda run --no-capture-output -n torch-mps python scripts/agp_physical_validatio
    the configured `q`. When a physical table is available, the deciding retained
    metrics are final energy error and ground-state fidelity, with local
    observables such as `<Z_i>` and `<Z_i Z_{i+1}>` RMSEs as consistency checks.
-   For larger `q`, where exact statevector ground truth is not available, the
-   candidate must be reported at the correct certification level using
+   For larger `q`, the diagonal-Ising final energy and ground bitstring remain
+   exact, but full statevector evolution is not available. The candidate must
+   still be reported at the correct certification level using
    `AGP_CERTIFICATION_CRITERIA.md`.
 
 Generated run artifacts are local and ignored by git. The repository stores the
