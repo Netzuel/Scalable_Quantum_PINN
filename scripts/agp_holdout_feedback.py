@@ -56,6 +56,7 @@ from agp_baseline_train import (  # noqa: E402
     run_training,
     settings_for_support,
 )
+from models import PadeActivation  # noqa: E402
 from utils import load_pauli_hamiltonian_pair  # noqa: E402
 
 
@@ -100,6 +101,35 @@ class AdaptiveTemporalRefinementSettings:
     difficulty: str = "residual"
 
 
+@dataclass(frozen=True)
+class PauTransferStabilitySettings:
+    enabled: bool = True
+    max_initial_relative_residual: float = 1.0e8
+    fallback: str = "silu_rational_fit"
+
+
+def feedback_refinements_complete(
+    summary: dict[str, object],
+    output_dir: Path,
+    temporal: TemporalRefinementSettings,
+    adaptive: AdaptiveTemporalRefinementSettings,
+) -> bool:
+    required = (
+        (temporal.enabled, "temporal_refinement", temporal.run_dir),
+        (adaptive.enabled, "adaptive_temporal_refinement", adaptive.run_dir),
+    )
+    for enabled, summary_key, default_run_dir in required:
+        if not enabled:
+            continue
+        entry = summary.get(summary_key, {})
+        if not isinstance(entry, dict) or not bool(entry.get("enabled", False)):
+            return False
+        run_dir = output_dir / str(entry.get("run_dir", default_run_dir))
+        if not (run_dir / "Models_Data" / "training_checkpoint.pt").is_file():
+            return False
+    return True
+
+
 def configure_run_dir(config_path: Path) -> None:
     global RUN_DIR
     RUN_DIR = config_path.resolve().parent
@@ -134,6 +164,19 @@ def support_swap_settings_from_feedback(feedback: dict[str, object]) -> SupportS
         candidate_pool_multiplier=max(1, int(raw.get("candidate_pool_multiplier", 16))),
         protect_top_fraction=max(0.0, float(raw.get("protect_top_fraction", 0.02))),
         new_gate_logit=float(raw.get("new_gate_logit", 2.0)),
+    )
+
+
+def pau_transfer_stability_settings_from_feedback(
+    feedback: dict[str, object],
+) -> PauTransferStabilitySettings:
+    raw = feedback.get("pau_transfer_stability", {})
+    if not isinstance(raw, dict):
+        return PauTransferStabilitySettings()
+    return PauTransferStabilitySettings(
+        enabled=bool(raw.get("enabled", True)),
+        max_initial_relative_residual=max(0.0, float(raw.get("max_initial_relative_residual", 1.0e8))),
+        fallback=str(raw.get("fallback", "silu_rational_fit")),
     )
 
 
@@ -445,6 +488,7 @@ def train_feedback_round(
     support_swap_plan: dict[str, object] | None = None,
     tau_override: torch.Tensor | None = None,
     temporal_sampling_metadata: dict[str, object] | None = None,
+    pau_transfer_stability: PauTransferStabilitySettings | None = None,
 ) -> tuple[dict[str, object], dict[str, float], dict[str, object]]:
     config = settings.model
     torch.manual_seed(settings.seed + round_index)
@@ -461,7 +505,6 @@ def train_feedback_round(
         device=device,
     )
 
-    optimizer, optimizer_info = make_optimizer(model, settings)
     loss_weights = ProjectedSparseLossWeights(
         residual=settings.residual_weight,
         agp_l2=settings.agp_l2_weight,
@@ -479,6 +522,43 @@ def train_feedback_round(
     else:
         tau = tau_override.detach().to(device=device, dtype=torch.float32).view(-1, 1)
     t = config.t_initial + config.physical_time * tau
+    transfer_metadata: dict[str, object] = {"enabled": False, "triggered": False}
+    if pau_transfer_stability is not None and pau_transfer_stability.enabled and round_index == 1:
+        initial_loss, initial_diagnostics = model.loss(t, weights=loss_weights)
+        initial_relative = float(initial_diagnostics["relative_residual"].detach().cpu())
+        transfer_metadata = {
+            "enabled": True,
+            "triggered": False,
+            "initial_relative_residual": initial_relative,
+            "max_initial_relative_residual": pau_transfer_stability.max_initial_relative_residual,
+            "fallback": pau_transfer_stability.fallback,
+        }
+        if not np.isfinite(initial_relative) or initial_relative > pau_transfer_stability.max_initial_relative_residual:
+            if pau_transfer_stability.fallback != "silu_rational_fit":
+                raise ValueError(f"Unsupported PAU transfer fallback {pau_transfer_stability.fallback!r}.")
+            reset_count = 0
+            for module in model.body.modules():
+                if isinstance(module, PadeActivation):
+                    module.reset_to_silu_rational_fit()
+                    reset_count += 1
+            fallback_loss, fallback_diagnostics = model.loss(t, weights=loss_weights)
+            fallback_relative = float(fallback_diagnostics["relative_residual"].detach().cpu())
+            transfer_metadata.update(
+                {
+                    "triggered": True,
+                    "reset_activation_count": reset_count,
+                    "fallback_relative_residual": fallback_relative,
+                }
+            )
+            print(
+                "pau_transfer_stability_fallback "
+                f"initial_relative={initial_relative:.6e} fallback_relative={fallback_relative:.6e} "
+                f"activations={reset_count}"
+            )
+            del fallback_loss, fallback_diagnostics
+        del initial_loss, initial_diagnostics
+        model.zero_grad(set_to_none=True)
+    optimizer, optimizer_info = make_optimizer(model, settings)
     history: list[dict[str, float]] = []
     train_stage(
         model,
@@ -500,6 +580,7 @@ def train_feedback_round(
     metadata["feedback_added_terms"] = additions
     metadata["feedback_added_term_count"] = len(additions)
     metadata["support_swap"] = compact_support_swap_plan(support_swap_plan)
+    metadata["pau_transfer_stability"] = transfer_metadata
     metadata["adaptive_enabled"] = False
     if temporal_sampling_metadata is not None:
         metadata["temporal_sampling"] = temporal_sampling_metadata
@@ -1054,6 +1135,7 @@ def main() -> None:
     device_name = str(args.device if args.device is not None else feedback.get("device", "auto"))
     min_rms = float(args.min_rms if args.min_rms is not None else feedback.get("min_rms", 0.0))
     support_swap_settings = support_swap_settings_from_feedback(feedback)
+    pau_transfer_stability_settings = pau_transfer_stability_settings_from_feedback(feedback)
     temporal_refinement_settings = temporal_refinement_settings_from_feedback(feedback)
     adaptive_temporal_settings = adaptive_temporal_refinement_settings_from_feedback(feedback)
     output_root_arg = args.output_root if args.output_root is not None else Path(str(feedback.get("output_root", "runs/holdout_feedback")))
@@ -1213,24 +1295,23 @@ def main() -> None:
         )
     else:
         rows, round_rows, spectra, completed_round = existing_state
-        if completed_round >= rounds:
-            write_feedback_summary(
-                output_dir=output_dir,
-                rows=rows,
-                spectra=spectra,
-                round_rows=round_rows,
-                residual_top_k=residual_top_k,
-                thresholds=thresholds,
-                residual_budget=residual_budget,
-                keep_round_images=keep_round_images,
-            )
-            print(f"feedback_already_complete rounds={rounds}")
-            return
         last_checkpoint = round_run_dir(output_dir, completed_round) / "Models_Data" / "training_checkpoint.pt"
         if completed_round > 0:
             agp_labels, residual_labels = load_checkpoint_labels(last_checkpoint)
             current_residual_labels = set(residual_labels)
             trainable_state = projected_trainable_state_from_checkpoint(last_checkpoint)
+        if completed_round >= rounds:
+            summary_path = data_dir / f"holdout_feedback_summary_residual_{residual_top_k}.json"
+            summary_payload = load_json(summary_path)
+            if isinstance(summary_payload, dict) and feedback_refinements_complete(
+                summary_payload,
+                output_dir,
+                temporal_refinement_settings,
+                adaptive_temporal_settings,
+            ):
+                print(f"feedback_already_complete rounds={rounds}")
+                return
+            print(f"resume_feedback_refinements completed_round={completed_round}")
 
     for round_index in range(completed_round + 1, rounds + 1):
         previous_run = base_run if round_index == 1 else round_run_dir(output_dir, round_index - 1)
@@ -1292,6 +1373,7 @@ def main() -> None:
             round_index=round_index,
             additions=additions,
             support_swap_plan=support_swap_plan,
+            pau_transfer_stability=pau_transfer_stability_settings,
         )
         row, spectrum = evaluate_one_run(
             run_dir=round_run,
@@ -1342,6 +1424,16 @@ def main() -> None:
             f"holdout_relative={row['holdout_relative_residual']:.6e} "
             f"unseen_relative={optional_float(row['unseen_relative_residual']):.6e} "
             f"unseen_status={row.get('unseen_relative_residual_status', {}).get('reason', 'unknown')}"
+        )
+        write_feedback_summary(
+            output_dir=output_dir,
+            rows=rows,
+            spectra=spectra,
+            round_rows=round_rows,
+            residual_top_k=residual_top_k,
+            thresholds=thresholds,
+            residual_budget=residual_budget,
+            keep_round_images=keep_round_images,
         )
 
     temporal_refinement_summary: dict[str, object] | None = None

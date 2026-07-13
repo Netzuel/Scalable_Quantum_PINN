@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,7 +18,9 @@ from projected_sparse_training_common import (  # noqa: E402
 from agp_holdout_feedback import (  # noqa: E402
     adaptive_temporal_refinement_settings_from_feedback,
     compact_support_swap_plan,
+    feedback_refinements_complete,
     make_adaptive_tau_grid,
+    pau_transfer_stability_settings_from_feedback,
     support_swap_settings_from_feedback,
     temporal_refinement_settings_from_feedback,
 )
@@ -25,6 +28,42 @@ from utils import SparsePauliOperator  # noqa: E402
 
 
 class AGPSupportSwapTests(unittest.TestCase):
+    def test_pau_transfer_stability_settings_are_read_from_config(self):
+        settings = pau_transfer_stability_settings_from_feedback(
+            {
+                "pau_transfer_stability": {
+                    "enabled": True,
+                    "max_initial_relative_residual": 1.0e8,
+                    "fallback": "silu_rational_fit",
+                }
+            }
+        )
+
+        self.assertTrue(settings.enabled)
+        self.assertEqual(settings.max_initial_relative_residual, 1.0e8)
+        self.assertEqual(settings.fallback, "silu_rational_fit")
+
+    def test_feedback_refinements_require_summary_entries_and_checkpoints(self):
+        temporal = temporal_refinement_settings_from_feedback(
+            {"temporal_refinement": {"enabled": True, "run_dir": "temporal_refinement"}}
+        )
+        adaptive = adaptive_temporal_refinement_settings_from_feedback(
+            {"adaptive_temporal_refinement": {"enabled": True, "run_dir": "adaptive_temporal_refinement"}}
+        )
+        summary = {
+            "temporal_refinement": {"enabled": True, "run_dir": "temporal_refinement"},
+            "adaptive_temporal_refinement": {"enabled": True, "run_dir": "adaptive_temporal_refinement"},
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            self.assertFalse(feedback_refinements_complete(summary, output_dir, temporal, adaptive))
+            for run_dir in ("temporal_refinement", "adaptive_temporal_refinement"):
+                checkpoint = output_dir / run_dir / "Models_Data" / "training_checkpoint.pt"
+                checkpoint.parent.mkdir(parents=True)
+                checkpoint.touch()
+            self.assertTrue(feedback_refinements_complete(summary, output_dir, temporal, adaptive))
+
     def test_support_swap_settings_are_read_from_holdout_feedback_config(self):
         settings = support_swap_settings_from_feedback(
             {

@@ -77,6 +77,36 @@ class PadeActivation(nn.Module):
             power = power * x
         return numerator / (1.0 + torch.abs(denominator_poly))
 
+    def reset_to_silu_rational_fit(self) -> None:
+        """Reset a catastrophic SiLU-to-PAU transfer to a bounded rational fit."""
+
+        numerator = [
+            0.0093122767,
+            0.4999999720,
+            0.2354375574,
+            0.0404303232,
+            0.0028942993,
+            0.0000719501,
+        ]
+        denominator = [-5.5385029e-8, 0.0808606583, -8.4226952e-10, 0.0001439002]
+        with torch.no_grad():
+            self.numerator.zero_()
+            self.denominator.zero_()
+            self.numerator[: min(len(self.numerator), len(numerator))].copy_(
+                torch.tensor(
+                    numerator[: min(len(self.numerator), len(numerator))],
+                    dtype=self.numerator.dtype,
+                    device=self.numerator.device,
+                )
+            )
+            self.denominator[: min(len(self.denominator), len(denominator))].copy_(
+                torch.tensor(
+                    denominator[: min(len(self.denominator), len(denominator))],
+                    dtype=self.denominator.dtype,
+                    device=self.denominator.device,
+                )
+            )
+
 
 def _activation(name: str) -> nn.Module:
     name = name.lower()

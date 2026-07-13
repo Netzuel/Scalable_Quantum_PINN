@@ -2,6 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 
@@ -16,6 +17,7 @@ for path in (SCRIPTS_DIR, TESTS_DIR, ROOT):
 from agp_support import KrylovSupportConfig, select_krylov_agp_labels
 from agp_holdout_feedback import fit_residual_budget_to_available
 from agp_holdout_study import relative_metric_with_reference_status
+from agp_plot_annotations import find_physical_summary_for_images_dir
 from agp_physical_validation import (
     apply_pauli_sum,
     build_action_cache,
@@ -28,7 +30,22 @@ import agp_physical_validation
 from utils import SparsePauliOperator, transverse_field_ising_problem
 
 
-class Q15PhysicalValidationTests(unittest.TestCase):
+class AGPPhysicalValidationTests(unittest.TestCase):
+    def test_physical_summary_search_tolerates_vanished_directories(self):
+        calls = 0
+
+        def flaky_glob(_path, _pattern):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise FileNotFoundError("directory disappeared during traversal")
+            return iter(())
+
+        with patch.object(Path, "glob", flaky_glob):
+            summary = find_physical_summary_for_images_dir(Path("/tmp/run/Images"))
+
+        self.assertIsNone(summary)
+
     def test_pauli_action_matches_single_qubit_matrices(self):
         ket_zero = np.asarray([1.0 + 0.0j, 0.0 + 0.0j], dtype=np.complex128)
 

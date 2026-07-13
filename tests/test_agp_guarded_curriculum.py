@@ -26,7 +26,7 @@ from agp_support_refinement import (
 )
 
 
-class Q20GuardedCurriculumTests(unittest.TestCase):
+class AGPGuardedCurriculumTests(unittest.TestCase):
     def test_q20_summary_paths_are_run_scoped(self):
         payload = json.loads((Q20_DIR / "config.json").read_text(encoding="utf-8"))
         summary = payload["summary"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,8 @@ PALETTE = {
     "learned_sparse_agp": "#009E73",
     "exact": "#000000",
 }
+RETAINED_DEPLOYMENT_TERMS = 2048
+RETAINED_EVOLUTION_STEPS = 96
 
 
 def parse_qubits(raw: str | None) -> list[int]:
@@ -113,10 +116,9 @@ def grid_config(
     effective_additions = 0 if exact_full_basis else int(add_residual_terms)
     effective_iterations = 1 if exact_full_basis else int(iterations)
     target_active_terms = k_terms if exact_full_basis else min(max_learned_terms, k_terms)
-    # Keep the baseline and feedback body architecture identical. Cross-activation
-    # warm starts can evaluate SiLU-trained weights inside a PAU body and create
-    # spurious large residuals at larger q.
-    baseline_activation = "pau"
+    # Match the retained benchmark: train the baseline with SiLU, then load its
+    # compatible body weights into the PAU feedback curriculum.
+    baseline_activation = "silu"
     return {
         "physical": {
             "parameters": {
@@ -190,6 +192,11 @@ def grid_config(
                 "n_neurons": 96,
                 "activation": baseline_activation,
                 "layer_type": "quadratic",
+            },
+            "pau_transfer_stability": {
+                "enabled": True,
+                "max_initial_relative_residual": 1.0e8,
+                "fallback": "silu_rational_fit",
             },
             "support_swap": {
                 "enabled": not exact_full_basis,
@@ -282,7 +289,6 @@ def grid_config(
             "learned_scale_sweep": [1.0],
             "learned_action_cache_size": int(learned_action_cache_size),
             "selection_metric": "energy_error",
-            "trained_run_selection": "best_holdout_residual",
             "description": (
                 "Statevector diagnostic for the diagonal-Ising grid benchmark. "
                 "The final Hamiltonian is diagonal, so exact final ground-space "
@@ -307,7 +313,9 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
 
 def run_command(command: list[str]) -> None:
     print("$ " + " ".join(command), flush=True)
-    subprocess.run(command, cwd=ROOT, check=True)
+    environment = os.environ.copy()
+    environment["PYTHONHASHSEED"] = "0"
+    subprocess.run(command, cwd=ROOT, check=True, env=environment)
 
 
 def prepare_one(q: int, args: argparse.Namespace) -> Path:
@@ -415,6 +423,39 @@ def flatten_summary(q: int, summary_path: Path) -> list[dict[str, object]]:
     return rows
 
 
+def validate_physical_summary_contract(q: int, payload: dict[str, object]) -> None:
+    expected_terms = 4 ** int(q) if int(q) <= 8 else RETAINED_DEPLOYMENT_TERMS
+    if int(payload.get("n_qubits", -1)) != int(q):
+        raise ValueError(f"q{q} physical summary reports n_qubits={payload.get('n_qubits')!r}.")
+    if int(payload.get("steps", -1)) != RETAINED_EVOLUTION_STEPS:
+        raise ValueError(
+            f"q{q} physical summary uses {payload.get('steps')!r} steps; "
+            f"expected {RETAINED_EVOLUTION_STEPS}."
+        )
+    trained_run = str(payload.get("trained_run", "")).rstrip("/")
+    if not trained_run.endswith("adaptive_temporal_refinement"):
+        raise ValueError(
+            f"q{q} physical summary used {trained_run!r}; expected adaptive_temporal_refinement."
+        )
+    truncation = payload.get("learned_agp_truncation", {})
+    truncation = truncation if isinstance(truncation, dict) else {}
+    selected_terms = int(truncation.get("selected_terms", -1))
+    if selected_terms != expected_terms:
+        raise ValueError(
+            f"q{q} physical summary selected {selected_terms} learned terms; "
+            f"expected {expected_terms} learned terms."
+        )
+    results = payload.get("results", {})
+    results = results if isinstance(results, dict) else {}
+    missing = [method for method in METHODS if method not in results]
+    if missing:
+        raise ValueError(f"q{q} physical summary is missing methods: {missing}.")
+    learned = results.get("learned_sparse_agp", {})
+    learned = learned if isinstance(learned, dict) else {}
+    if int(learned.get("learned_terms", -1)) != expected_terms:
+        raise ValueError(f"q{q} learned result does not use the expected {expected_terms} terms.")
+
+
 def aggregate(grid_root: Path, qubits: Iterable[int]) -> list[dict[str, object]]:
     all_rows: list[dict[str, object]] = []
     missing: list[int] = []
@@ -423,7 +464,13 @@ def aggregate(grid_root: Path, qubits: Iterable[int]) -> list[dict[str, object]]
         if not summaries:
             missing.append(int(q))
             continue
-        all_rows.extend(flatten_summary(q, summaries[-1]))
+        summary_path = summaries[-1]
+        with summary_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise TypeError(f"Unexpected physical summary payload in {summary_path}.")
+        validate_physical_summary_contract(q, payload)
+        all_rows.extend(flatten_summary(q, summary_path))
     data_dir = grid_root / "Models_Data"
     data_dir.mkdir(parents=True, exist_ok=True)
     json_path = data_dir / "grid_physical_validation_summary.json"

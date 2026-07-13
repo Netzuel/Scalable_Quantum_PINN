@@ -54,14 +54,28 @@ def find_physical_summary_for_images_dir(images_dir: Path) -> Path | None:
             "*/*/*/Models_Data/physical_validation_summary.json",
             "*/*/*/*/Models_Data/physical_validation_summary.json",
         ):
-            for candidate in root.glob(pattern):
-                resolved = candidate.resolve()
-                if candidate.is_file() and resolved not in seen:
-                    candidates.append(candidate)
-                    seen.add(resolved)
+            try:
+                for candidate in root.glob(pattern):
+                    try:
+                        resolved = candidate.resolve()
+                        if candidate.is_file() and resolved not in seen:
+                            candidates.append(candidate)
+                            seen.add(resolved)
+                    except OSError:
+                        continue
+            except OSError:
+                continue
     if not candidates:
         return None
-    return max(candidates, key=lambda path: path.stat().st_mtime)
+    existing: list[tuple[float, Path]] = []
+    for candidate in candidates:
+        try:
+            existing.append((candidate.stat().st_mtime, candidate))
+        except OSError:
+            continue
+    if not existing:
+        return None
+    return max(existing, key=lambda item: item[0])[1]
 
 
 def physical_footer_lines_from_summary(summary_path: Path) -> list[str]:
