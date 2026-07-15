@@ -250,6 +250,18 @@ checkpoints without training or changing checkpoint files. Such a manifest is
 explicitly marked `certification_eligible=false` with
 `provenance=diagnostic_backfill`, so its fixed active and null metrics remain
 `not tested` for certification with reason `historical_diagnostic_backfill`.
+The current manifest schema requires a valid `manifest_sha256`: normal
+certification-eligible manifests additionally require
+`provenance=pre_training_fixed_probe`, while diagnostics require
+`certification_eligible=false` and `provenance=diagnostic_backfill`. Missing,
+invalid, or inconsistent provenance/hash data fails the certification gate
+closed; legacy historical manifests remain explicitly `not tested`.
+
+Diagnostic refresh is preflighted against a complete historical summary and
+every expected stage checkpoint before it writes a manifest. It refuses an
+incomplete history without creating diagnostic artifacts, never trains or
+overwrites checkpoints, and preserves existing round-level artifacts while it
+regenerates only diagnostic summaries and plots.
 
 ## Post-Curriculum Temporal Refinement
 

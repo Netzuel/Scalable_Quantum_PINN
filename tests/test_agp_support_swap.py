@@ -49,6 +49,154 @@ from utils import SparsePauliOperator  # noqa: E402
 
 
 class AGPSupportSwapTests(unittest.TestCase):
+    def test_refresh_without_summary_fails_before_training_or_writes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scenario = Path(temporary)
+            config_path = scenario / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "physical": {"parameters": {"num_qubits": 2, "hamiltonian_source": "unused.json"}},
+                        "support_sweep": {"agp_terms": [1], "intermediate_top_k": 8},
+                        "holdout_feedback": {
+                            "base_agp_terms": 1,
+                            "holdout_residual_top_k": 2,
+                            "iterations": 1,
+                            "add_residual_terms_per_iteration": 1,
+                            "baseline_root": "runs/baselines",
+                            "output_root": "runs/feedback",
+                        },
+                        "training": {"parameters": {"epochs": 1, "num_points": 2, "lr": 1.0e-4}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            baseline = scenario / "runs/baselines/agp_1/Models_Data/training_checkpoint.pt"
+            historical = scenario / "runs/feedback/agp_1_residual_2_add_1_rounds_1/rounds/round_01/Models_Data/training_checkpoint.pt"
+            for checkpoint in (baseline, historical):
+                checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                torch.save({"model_state_dict": {}, "agp_labels": ["XI"], "residual_labels": ["XX"]}, checkpoint)
+            before = {path: path.read_bytes() for path in (baseline, historical)}
+            data_dir = historical.parents[3] / "Models_Data"
+
+            with patch("agp_holdout_feedback.run_training", side_effect=AssertionError("must not train")), patch(
+                "agp_holdout_feedback.train_feedback_round", side_effect=AssertionError("must not train")
+            ), self.assertRaisesRegex(RuntimeError, "historical feedback summary"):
+                agp_holdout_feedback.main(["--config", str(config_path), "--refresh-fixed-unseen-only"])
+
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+            self.assertFalse((data_dir / "fixed_unseen_probe_labels.json").exists())
+            self.assertFalse(data_dir.exists())
+
+    def test_refresh_rejects_incomplete_summary_without_artifacts_and_normal_resume_survives(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scenario = Path(temporary)
+            config_path = scenario / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "physical": {"parameters": {"num_qubits": 2, "hamiltonian_source": "unused.json"}},
+                        "support_sweep": {"agp_terms": [1], "intermediate_top_k": 8},
+                        "holdout_feedback": {
+                            "base_agp_terms": 1,
+                            "holdout_residual_top_k": 2,
+                            "iterations": 1,
+                            "add_residual_terms_per_iteration": 1,
+                            "baseline_root": "runs/baselines",
+                            "output_root": "runs/feedback",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = scenario / "runs/feedback/agp_1_residual_2_add_1_rounds_1"
+            data_dir = output_dir / "Models_Data"
+            data_dir.mkdir(parents=True)
+            baseline = scenario / "runs/baselines/agp_1/Models_Data/training_checkpoint.pt"
+            baseline.parent.mkdir(parents=True)
+            torch.save({"model_state_dict": {}, "agp_labels": ["XI"], "residual_labels": ["XX"]}, baseline)
+            (data_dir / "holdout_feedback_summary_residual_2.json").write_text(
+                json.dumps({"rows": [{"feedback_round": 0, "run_dir": str(baseline)}]}),
+                encoding="utf-8",
+            )
+            manifest_path = data_dir / "fixed_unseen_probe_labels.json"
+            save_fixed_unseen_probe(
+                manifest_path,
+                build_fixed_unseen_probe_manifest(
+                    {
+                        "schema_version": 2,
+                        "enabled": True,
+                        "status": "complete",
+                        "active_labels": ["YI"],
+                        "null_labels": ["ZI"],
+                        "reference_rms_metadata": {"selected": {}},
+                    },
+                    certification_eligible=True,
+                    provenance="pre_training_fixed_probe",
+                ),
+            )
+            before = {path.relative_to(output_dir): path.read_bytes() for path in output_dir.rglob("*") if path.is_file()}
+
+            with patch("agp_holdout_feedback.run_training", side_effect=AssertionError("must not train")), patch(
+                "agp_holdout_feedback.train_feedback_round", side_effect=AssertionError("must not train")
+            ), self.assertRaisesRegex(RuntimeError, "incomplete historical feedback summary"):
+                agp_holdout_feedback.main(["--config", str(config_path), "--refresh-fixed-unseen-only"])
+
+            after = {path.relative_to(output_dir): path.read_bytes() for path in output_dir.rglob("*") if path.is_file()}
+            self.assertEqual(after, before)
+            assert_fixed_unseen_manifest_lifecycle(
+                output_dir=output_dir,
+                data_dir=data_dir,
+                residual_top_k=2,
+            )
+
+    def test_refresh_rejects_missing_stage_checkpoint_before_manifest_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scenario = Path(temporary)
+            config_path = scenario / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "physical": {"parameters": {"num_qubits": 2, "hamiltonian_source": "unused.json"}},
+                        "support_sweep": {"agp_terms": [1], "intermediate_top_k": 8},
+                        "holdout_feedback": {
+                            "base_agp_terms": 1,
+                            "holdout_residual_top_k": 2,
+                            "iterations": 1,
+                            "add_residual_terms_per_iteration": 1,
+                            "baseline_root": "runs/baselines",
+                            "output_root": "runs/feedback",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = scenario / "runs/feedback/agp_1_residual_2_add_1_rounds_1"
+            data_dir = output_dir / "Models_Data"
+            data_dir.mkdir(parents=True)
+            baseline = scenario / "runs/baselines/agp_1/Models_Data/training_checkpoint.pt"
+            baseline.parent.mkdir(parents=True)
+            torch.save({"model_state_dict": {}, "agp_labels": ["XI"], "residual_labels": ["XX"]}, baseline)
+            (data_dir / "holdout_feedback_summary_residual_2.json").write_text(
+                json.dumps(
+                    {
+                        "rows": [
+                            {"feedback_round": 0, "run_dir": str(baseline)},
+                            {"feedback_round": 1, "run_dir": "rounds/round_01"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = {path.relative_to(output_dir): path.read_bytes() for path in output_dir.rglob("*") if path.is_file()}
+
+            with self.assertRaisesRegex(RuntimeError, "every expected stage checkpoint"):
+                agp_holdout_feedback.main(["--config", str(config_path), "--refresh-fixed-unseen-only"])
+
+            after = {path.relative_to(output_dir): path.read_bytes() for path in output_dir.rglob("*") if path.is_file()}
+            self.assertEqual(after, before)
+            self.assertFalse((data_dir / "fixed_unseen_probe_labels.json").exists())
+
     def test_feedback_additions_preserve_fixed_unseen_labels(self):
         additions = select_residual_additions(
             [
@@ -398,6 +546,9 @@ class AGPSupportSwapTests(unittest.TestCase):
                     # Model the historical q24 case: retained checkpoints and a summary exist,
                     # but no probe manifest was established before training.
                     manifest_path.unlink()
+                    sentinel = output_dir / "rounds" / "round_01" / "Images" / "preserve-me.bin"
+                    sentinel.parent.mkdir(parents=True, exist_ok=True)
+                    sentinel.write_bytes(b"round image sentinel")
                     retained_checkpoints = sorted(
                         {
                             baseline_checkpoint,
@@ -432,6 +583,7 @@ class AGPSupportSwapTests(unittest.TestCase):
                         path: (path.read_bytes(), path.stat().st_mtime_ns)
                         for path in retained_checkpoints
                     }
+                    sentinel_after = sentinel.read_bytes()
             finally:
                 agp_holdout_feedback.RUN_DIR = old_feedback_run_dir
                 agp_baseline_train.RUN_DIR = old_baseline_run_dir
@@ -451,6 +603,7 @@ class AGPSupportSwapTests(unittest.TestCase):
             "historical_diagnostic_backfill",
         )
         self.assertEqual(len(diagnostic_summary["rows"]), len(retained_checkpoints) - 1)
+        self.assertEqual(sentinel_after, b"round image sentinel")
         for summary in (first_summary, resumed_summary):
             self.assertEqual(len(summary["rows"]), 2)
             for row in summary["rows"]:
@@ -518,14 +671,18 @@ class AGPSupportSwapTests(unittest.TestCase):
             excluded_labels={"II"},
             requested_candidate_terms=3,
         )
-        payload = {
-            **identity,
-            "active_labels": ["XI"],
-            "null_labels": ["YI"],
-            "active_reference_rms": [2.0],
-            "null_reference_rms": [0.0],
-            "reference_rms_metadata": {"selected_hash": "placeholder"},
-        }
+        payload = build_fixed_unseen_probe_manifest(
+            {
+                **identity,
+                "active_labels": ["XI"],
+                "null_labels": ["YI"],
+                "active_reference_rms": [2.0],
+                "null_reference_rms": [0.0],
+                "reference_rms_metadata": {"selected_hash": "placeholder"},
+            },
+            certification_eligible=True,
+            provenance="pre_training_fixed_probe",
+        )
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "fixed_unseen_probe_labels.json"
             save_fixed_unseen_probe(path, payload)
@@ -620,7 +777,14 @@ class AGPSupportSwapTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "fixed_unseen_probe_labels.json"
-            save_fixed_unseen_probe(path, probe)
+            save_fixed_unseen_probe(
+                path,
+                build_fixed_unseen_probe_manifest(
+                    probe,
+                    certification_eligible=True,
+                    provenance="pre_training_fixed_probe",
+                ),
+            )
             with self.assertRaisesRegex(ValueError, "selected active_labels"):
                 load_or_validate_fixed_unseen_probe(
                     path,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -65,6 +66,29 @@ def _finite_series_value(value: object) -> float:
     return numeric if math.isfinite(numeric) else float("nan")
 
 
+def _fixed_unseen_manifest_contract(payload: Mapping[str, object]) -> tuple[bool, str]:
+    schema_version = payload.get("schema_version")
+    if not isinstance(schema_version, int) or schema_version < 2:
+        return False, "legacy_fixed_unseen_manifest"
+    if schema_version != 2:
+        return False, "unsupported_fixed_unseen_manifest_schema"
+    stored_hash = payload.get("manifest_sha256")
+    if not isinstance(stored_hash, str) or not stored_hash:
+        return False, "missing_manifest_sha256"
+    hashed_payload = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    encoded = json.dumps(hashed_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    if stored_hash != hashlib.sha256(encoded).hexdigest():
+        return False, "invalid_fixed_unseen_manifest_hash"
+    eligible = payload.get("certification_eligible")
+    provenance = payload.get("provenance")
+    reason = payload.get("certification_reason")
+    if eligible is True and provenance == "pre_training_fixed_probe" and reason == "pre_training_fixed_probe":
+        return True, "pre_training_fixed_probe"
+    if eligible is False and provenance == "diagnostic_backfill" and reason == "historical_diagnostic_backfill":
+        return True, "historical_diagnostic_backfill"
+    return False, "invalid_fixed_unseen_provenance"
+
+
 def fixed_unseen_gate(
     row: Mapping[str, object],
     *,
@@ -77,6 +101,9 @@ def fixed_unseen_gate(
         return {"status": "not_tested", "value": None, "reason": "missing_fixed_unseen_manifest"}
     if "enabled" not in fixed_unseen_probe or "status" not in fixed_unseen_probe:
         return {"status": "not_tested", "value": None, "reason": "missing_fixed_unseen_lifecycle"}
+    contract_valid, contract_reason = _fixed_unseen_manifest_contract(fixed_unseen_probe)
+    if not contract_valid:
+        return {"status": "not_tested", "value": None, "reason": contract_reason}
     enabled = bool(fixed_unseen_probe["enabled"])
     probe_status = str(fixed_unseen_probe["status"])
     insufficiency_reason = fixed_unseen_probe.get("insufficiency_reason")

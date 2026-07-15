@@ -75,6 +75,7 @@ RUN_DIR = Path.cwd()
 DEFAULT_CONFIG = Path("config.json")
 ROUND_RUNS_DIRNAME = "rounds"
 LEGACY_ROUND_RUNS_DIRNAME = "runs"
+CURRENT_FIXED_UNSEEN_MANIFEST_SCHEMA = 2
 FIXED_UNSEEN_ROW_FIELDS = (
     "fixed_unseen_active_terms",
     "fixed_unseen_active_residual",
@@ -174,12 +175,36 @@ def build_fixed_unseen_probe_manifest(
     manifest["certification_eligible"] = bool(certification_eligible)
     manifest["provenance"] = str(provenance)
     manifest["certification_reason"] = (
-        "established_before_training"
+        "pre_training_fixed_probe"
         if certification_eligible
         else "historical_diagnostic_backfill"
     )
     manifest["manifest_sha256"] = _stable_hash(manifest)
     return manifest
+
+
+def fixed_unseen_manifest_contract(payload: Mapping[str, object]) -> tuple[bool, str]:
+    """Return whether a manifest satisfies the current immutable provenance contract."""
+
+    schema_version = payload.get("schema_version")
+    if not isinstance(schema_version, int) or schema_version < CURRENT_FIXED_UNSEEN_MANIFEST_SCHEMA:
+        return False, "legacy_fixed_unseen_manifest"
+    if schema_version != CURRENT_FIXED_UNSEEN_MANIFEST_SCHEMA:
+        return False, "unsupported_fixed_unseen_manifest_schema"
+    stored_hash = payload.get("manifest_sha256")
+    if not isinstance(stored_hash, str) or not stored_hash:
+        return False, "missing_manifest_sha256"
+    hashed_payload = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    if stored_hash != _stable_hash(hashed_payload):
+        return False, "invalid_fixed_unseen_manifest_hash"
+    eligible = payload.get("certification_eligible")
+    provenance = payload.get("provenance")
+    reason = payload.get("certification_reason")
+    if eligible is True and provenance == "pre_training_fixed_probe" and reason == "pre_training_fixed_probe":
+        return True, "pre_training_fixed_probe"
+    if eligible is False and provenance == "diagnostic_backfill" and reason == "historical_diagnostic_backfill":
+        return True, "historical_diagnostic_backfill"
+    return False, "invalid_fixed_unseen_provenance"
 
 
 def _label_identity(labels: Collection[str]) -> dict[str, object]:
@@ -249,11 +274,9 @@ def load_or_validate_fixed_unseen_probe(
     payload = load_json(path)
     if not isinstance(payload, dict):
         raise TypeError(f"{path} must contain a JSON object.")
-    stored_hash = payload.get("manifest_sha256")
-    if stored_hash is not None:
-        hashed_payload = {key: value for key, value in payload.items() if key != "manifest_sha256"}
-        if str(stored_hash) != _stable_hash(hashed_payload):
-            raise ValueError("immutable fixed unseen probe manifest hash does not match its contents")
+    contract_valid, contract_reason = fixed_unseen_manifest_contract(payload)
+    if not contract_valid and contract_reason != "legacy_fixed_unseen_manifest":
+        raise ValueError(f"immutable fixed unseen probe {contract_reason}")
     active_labels = [str(label) for label in payload.get("active_labels", [])]
     null_labels = [str(label) for label in payload.get("null_labels", [])]
     if set(active_labels) & set(null_labels):
@@ -1610,11 +1633,15 @@ def assert_fixed_unseen_manifest_lifecycle(
         return
     manifest_path = data_dir / "fixed_unseen_probe_labels.json"
     if manifest_path.is_file():
-        manifest = load_json(manifest_path)
-        if not isinstance(manifest, Mapping) or not bool(manifest.get("certification_eligible", False)):
+        manifest = load_or_validate_fixed_unseen_probe(
+            manifest_path,
+            expected_excluded_labels=(),
+        )
+        valid, reason = fixed_unseen_manifest_contract(manifest)
+        if not valid or not bool(manifest.get("certification_eligible", False)):
             raise RuntimeError(
-                "Cannot resume normal training from a diagnostics-only fixed unseen manifest. "
-                "Start a new run root; historical diagnostic backfill remains certification-ineligible."
+                "Cannot resume normal training without a valid pre-training fixed unseen manifest "
+                f"({reason}). Start a new run root; historical diagnostic backfill remains certification-ineligible."
             )
         return
 
@@ -1758,6 +1785,83 @@ def parse_holdout_feedback_args(argv: Sequence[str] | None = None) -> argparse.N
     return build_holdout_feedback_argument_parser().parse_args(argv)
 
 
+def preflight_fixed_unseen_diagnostic_refresh(
+    *,
+    config_path: Path,
+    feedback: Mapping[str, object],
+    args: argparse.Namespace,
+) -> tuple[Path, Path, dict[str, object]]:
+    """Read-only validation required before a historical diagnostics refresh can write."""
+
+    base_agp_terms = int(args.base_agp_terms if args.base_agp_terms is not None else feedback.get("base_agp_terms", 1024))
+    rounds = int(args.rounds if args.rounds is not None else feedback.get("iterations", 1))
+    add_residual_terms = int(
+        args.add_residual_terms
+        if args.add_residual_terms is not None
+        else feedback.get("add_residual_terms_per_iteration", 1024)
+    )
+    requested_residual_terms = (
+        args.residual_top_k if args.residual_top_k is not None else feedback.get("holdout_residual_top_k", "auto")
+    )
+    output_root_arg = args.output_root if args.output_root is not None else Path(str(feedback.get("output_root", "runs/holdout_feedback")))
+    output_root = output_root_arg if output_root_arg.is_absolute() else config_path.parent / output_root_arg
+    if isinstance(requested_residual_terms, int):
+        output_dir = output_root / (
+            f"agp_{base_agp_terms}_residual_{requested_residual_terms}_add_{add_residual_terms}_rounds_{rounds}"
+        )
+    else:
+        matches = sorted(output_root.glob(f"agp_{base_agp_terms}_residual_*_add_{add_residual_terms}_rounds_{rounds}"))
+        if len(matches) != 1:
+            raise RuntimeError(
+                "Diagnostics-only fixed-unseen refresh requires exactly one existing historical run root "
+                "when holdout_residual_top_k is automatic."
+            )
+        output_dir = matches[0]
+    data_dir = output_dir / "Models_Data"
+    summary_paths = sorted(data_dir.glob("holdout_feedback_summary_residual_*.json"))
+    if len(summary_paths) != 1:
+        raise RuntimeError(
+            "Diagnostics-only fixed-unseen refresh requires one complete historical feedback summary before "
+            "it can inspect checkpoints or create diagnostics."
+        )
+    summary = load_json(summary_paths[0])
+    if not isinstance(summary, dict):
+        raise TypeError(f"Unexpected historical feedback summary format in {summary_paths[0]}.")
+    rows = summary.get("rows")
+    if not isinstance(rows, list):
+        raise RuntimeError("Diagnostics-only fixed-unseen refresh found an incomplete historical feedback summary.")
+    row_by_round = {int(row.get("feedback_round", -1)): row for row in rows if isinstance(row, dict)}
+    expected_rounds = set(range(rounds + 1))
+    if set(row_by_round) != expected_rounds or len(row_by_round) != len(rows):
+        raise RuntimeError("Diagnostics-only fixed-unseen refresh found an incomplete historical feedback summary.")
+    baseline_root_arg = args.baseline_root if args.baseline_root is not None else Path(str(feedback.get("baseline_root", "runs/baselines")))
+    baseline_root = baseline_root_arg if baseline_root_arg.is_absolute() else config_path.parent / baseline_root_arg
+    expected_checkpoints = [baseline_root / f"agp_{base_agp_terms}" / "Models_Data" / "training_checkpoint.pt"]
+    for round_index in range(1, rounds + 1):
+        run_label = row_by_round[round_index].get("run_dir")
+        if not isinstance(run_label, str):
+            raise RuntimeError("Diagnostics-only fixed-unseen refresh found a feedback row without run_dir.")
+        expected_checkpoints.append(output_dir / run_label / "Models_Data" / "training_checkpoint.pt")
+    for config_key in ("temporal_refinement", "adaptive_temporal_refinement"):
+        config_stage = feedback.get(config_key, {})
+        if not isinstance(config_stage, Mapping) or not bool(config_stage.get("enabled", False)):
+            continue
+        summary_stage = summary.get(config_key)
+        if not isinstance(summary_stage, Mapping) or not bool(summary_stage.get("enabled", False)):
+            raise RuntimeError("Diagnostics-only fixed-unseen refresh found an incomplete historical feedback summary.")
+        run_label = summary_stage.get("run_dir")
+        if not isinstance(run_label, str):
+            raise RuntimeError("Diagnostics-only fixed-unseen refresh found a refinement row without run_dir.")
+        expected_checkpoints.append(output_dir / run_label / "Models_Data" / "training_checkpoint.pt")
+    missing = [path for path in expected_checkpoints if not path.is_file()]
+    if missing:
+        raise RuntimeError(
+            "Diagnostics-only fixed-unseen refresh requires every expected stage checkpoint before writing: "
+            f"{missing[0]}"
+        )
+    return output_dir, data_dir, summary
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_holdout_feedback_args(argv)
 
@@ -1768,6 +1872,26 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise TypeError("config.json must contain a JSON object.")
     feedback = payload.get("holdout_feedback", {})
     feedback = feedback if isinstance(feedback, dict) else {}
+    if args.refresh_fixed_unseen_only:
+        output_dir, data_dir, summary = preflight_fixed_unseen_diagnostic_refresh(
+            config_path=config_path,
+            feedback=feedback,
+            args=args,
+        )
+        manifest_path = data_dir / "fixed_unseen_probe_labels.json"
+        if manifest_path.is_file():
+            manifest = load_or_validate_fixed_unseen_probe(manifest_path, expected_excluded_labels=())
+            valid, reason = fixed_unseen_manifest_contract(manifest)
+            if not valid:
+                raise RuntimeError(f"Diagnostics-only fixed-unseen refresh rejected manifest: {reason}")
+            if bool(manifest.get("certification_eligible", False)):
+                raise RuntimeError(
+                    "Diagnostics-only fixed-unseen refresh cannot overwrite or reclassify a "
+                    "certification-eligible manifest. Use a normal valid resume instead."
+                )
+            if all(key in summary for key in ("decision", "fixed_unseen_probe")):
+                print(f"fixed_unseen_diagnostic_refresh_already_current output={output_dir}")
+                return
     base_agp_terms = int(args.base_agp_terms if args.base_agp_terms is not None else feedback.get("base_agp_terms", 1024))
     rounds = int(args.rounds if args.rounds is not None else feedback.get("iterations", 1))
     add_residual_terms = int(
@@ -2036,7 +2160,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             provenance=(
                 "diagnostic_backfill"
                 if args.refresh_fixed_unseen_only
-                else "established_before_training"
+                else "pre_training_fixed_probe"
             ),
         )
         fixed_unseen_probe["certification_probe_excluded_terms"] = len(certification_probe_labels)
@@ -2052,7 +2176,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             provenance=(
                 "diagnostic_backfill"
                 if args.refresh_fixed_unseen_only
-                else "established_before_training"
+                else "pre_training_fixed_probe"
             ),
         )
         save_fixed_unseen_probe(fixed_probe_path, fixed_unseen_probe)
@@ -2193,7 +2317,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 fixed_unseen_probe=fixed_unseen_probe,
                 temporal_refinement=temporal_summary if isinstance(temporal_summary, dict) else None,
                 adaptive_temporal_refinement=adaptive_summary if isinstance(adaptive_summary, dict) else None,
-                keep_round_images=keep_round_images,
+                keep_round_images=True,
             )
             print(
                 "fixed_unseen_diagnostic_backfill "

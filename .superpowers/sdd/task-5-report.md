@@ -62,3 +62,24 @@ conda run -n torch-mps python -m unittest \
   tests.test_agp_benchmark_layout \
   tests.test_agp_physical_validation -v
 ```
+
+## Review Follow-Up
+
+- Refresh now performs a read-only preflight before normal setup: a missing or
+  incomplete historical summary, or any missing expected stage checkpoint,
+  fails before manifest creation, model setup, or a training call.
+- Current-schema manifests require a valid `manifest_sha256`. Eligible manifests
+  require `pre_training_fixed_probe`/`true`; diagnostic backfills require
+  `diagnostic_backfill`/`false`. The loader and certification gate reject every
+  inconsistent combination. Legacy manifests remain `not_tested`.
+- TDD regression coverage verifies early CLI refusal with unchanged checkpoint
+  bytes, incomplete-history no-write behavior with normal resumability,
+  checkpoint-stage preflight, artifact preservation, and fail-closed manifest
+  integrity/provenance checks.
+- Focused follow-up validation completed with 44 tests in 1.755 seconds under
+  `torch-mps`. The q24 metric evaluation was not rerun; its existing diagnostic
+  manifest was revalidated under the strengthened loader: 23 stage checkpoints
+  are present, all fixed labels remain disjoint from checkpoint residual
+  support, all 23 null rows are finite, the empty active partition is covered by
+  manifest `status=insufficient_candidates`, and the PDF remains nonempty at
+  18,550 bytes.

@@ -134,6 +134,21 @@ active and fixed null values remain `not tested` for certification, with reason
 `historical_diagnostic_backfill`; the mode must neither train nor modify a
 checkpoint.
 
+For the current manifest schema, integrity and provenance are mandatory. A
+normal eligible manifest must carry `provenance=pre_training_fixed_probe`,
+`certification_eligible=true`, and a valid `manifest_sha256` over its complete
+content. A diagnostic backfill must carry `provenance=diagnostic_backfill` and
+`certification_eligible=false` with the same hash requirement. Any missing,
+invalid, or inconsistent combination fails the fixed-unseen certification gate
+closed as `not tested`. Historical/legacy manifests without this contract also
+remain `not tested`; they are never inferred to be eligible.
+
+Before creating a diagnostic manifest, refresh validates one complete summary
+and every expected baseline, feedback, and enabled refinement checkpoint. A
+failed preflight writes nothing, and a successful refresh preserves existing
+round artifacts while updating only its diagnostic manifest, summary, and
+plots.
+
 ## Gate 1: Enough Number Of Terms
 
 This gate asks whether the chosen size `K` is large enough.

@@ -19,7 +19,10 @@ from agp_residual_probes import (  # noqa: E402
     select_fixed_unseen_probes,
 )
 from agp_holdout_feedback import (  # noqa: E402
+    build_fixed_unseen_probe_manifest,
+    load_or_validate_fixed_unseen_probe,
     plot_fixed_unseen_probes,
+    save_fixed_unseen_probe,
     write_feedback_summary,
 )
 from agp_holdout_study import (  # noqa: E402
@@ -30,6 +33,62 @@ from agp_holdout_study import (  # noqa: E402
 
 
 class AGPResidualProbeTests(unittest.TestCase):
+    def test_current_manifest_loader_rejects_missing_hash_and_invalid_provenance(self):
+        base = {
+            "schema_version": 2,
+            "enabled": True,
+            "status": "complete",
+            "active_labels": ["XI"],
+            "null_labels": ["YI"],
+            "reference_rms_metadata": {"selected": {}},
+            "certification_eligible": True,
+            "provenance": "pre_training_fixed_probe",
+        }
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fixed_unseen_probe_labels.json"
+            save_fixed_unseen_probe(path, base)
+            with self.assertRaisesRegex(ValueError, "missing_manifest_sha256"):
+                load_or_validate_fixed_unseen_probe(path, expected_excluded_labels=set())
+
+            invalid = build_fixed_unseen_probe_manifest(
+                base,
+                certification_eligible=True,
+                provenance="diagnostic_backfill",
+            )
+            save_fixed_unseen_probe(path, invalid)
+            with self.assertRaisesRegex(ValueError, "provenance"):
+                load_or_validate_fixed_unseen_probe(path, expected_excluded_labels=set())
+
+    def test_current_manifest_gate_fails_closed_on_inconsistent_provenance(self):
+        row = {
+            "feedback_round": 1,
+            "holdout_relative_residual": 0.01,
+            "fixed_unseen_active_relative": 0.2,
+            "fixed_unseen_active_status": {"valid": True, "reason": "finite_reference"},
+        }
+        manifest = build_fixed_unseen_probe_manifest(
+            {
+                "schema_version": 2,
+                "enabled": True,
+                "status": "complete",
+                "active_labels": ["XI"],
+                "null_labels": ["YI"],
+                "reference_rms_metadata": {"selected": {}},
+            },
+            certification_eligible=True,
+            provenance="diagnostic_backfill",
+        )
+
+        decision = feedback_threshold_decision(
+            [row],
+            holdout_threshold=0.1,
+            unseen_threshold=1.0,
+            fixed_unseen_probe=manifest,
+        )
+
+        self.assertEqual(decision["unseen_gate"]["status"], "not_tested")
+        self.assertEqual(decision["unseen_gate"]["reason"], "invalid_fixed_unseen_provenance")
+
     def test_fixed_unseen_selection_is_disjoint_and_deterministic(self):
         labels = ["XIII", "YIII", "ZIII", "IXII", "IYII", "IZII"]
         rms = np.asarray([2.0, 0.0, 1.0, 1.0e-15, 3.0, 0.0])
@@ -131,12 +190,11 @@ class AGPResidualProbeTests(unittest.TestCase):
             "fixed_unseen_active_relative": 0.8,
             "fixed_unseen_active_status": {"valid": True, "reason": "finite_reference"},
         }
-        manifest = {
-            "enabled": True,
-            "status": "complete",
-            "schema_version": 2,
-            "certification_eligible": True,
-        }
+        manifest = build_fixed_unseen_probe_manifest(
+            {"enabled": True, "status": "complete", "schema_version": 2},
+            certification_eligible=True,
+            provenance="pre_training_fixed_probe",
+        )
 
         decision = feedback_threshold_decision(
             [row],
@@ -162,11 +220,11 @@ class AGPResidualProbeTests(unittest.TestCase):
             [row],
             holdout_threshold=0.1,
             unseen_threshold=1.0,
-            fixed_unseen_probe={
-                "enabled": True,
-                "status": "insufficient_candidates",
-                "certification_eligible": True,
-            },
+            fixed_unseen_probe=build_fixed_unseen_probe_manifest(
+                {"enabled": True, "status": "insufficient_candidates", "schema_version": 2},
+                certification_eligible=True,
+                provenance="pre_training_fixed_probe",
+            ),
         )
 
         self.assertEqual(decision["status"], "not_found_in_feedback_run")
@@ -185,13 +243,11 @@ class AGPResidualProbeTests(unittest.TestCase):
             [row],
             holdout_threshold=0.1,
             unseen_threshold=1.0,
-            fixed_unseen_probe={
-                "enabled": True,
-                "status": "complete",
-                "certification_eligible": False,
-                "provenance": "diagnostic_backfill",
-                "certification_reason": "historical_diagnostic_backfill",
-            },
+            fixed_unseen_probe=build_fixed_unseen_probe_manifest(
+                {"enabled": True, "status": "complete", "schema_version": 2},
+                certification_eligible=False,
+                provenance="diagnostic_backfill",
+            ),
         )
 
         self.assertEqual(decision["status"], "not_found_in_feedback_run")
@@ -267,13 +323,16 @@ class AGPResidualProbeTests(unittest.TestCase):
             "fixed_unseen_null_absolute_per_term": 0.03,
             "fixed_unseen_null_scaled": 0.04,
         }
-        manifest = {
-            "schema_version": 2,
-            "enabled": True,
-            "status": "complete",
-            "certification_eligible": True,
-            "candidate_universe": {"count": 4, "sha256": "manifest-identity"},
-        }
+        manifest = build_fixed_unseen_probe_manifest(
+            {
+                "schema_version": 2,
+                "enabled": True,
+                "status": "complete",
+                "candidate_universe": {"count": 4, "sha256": "manifest-identity"},
+            },
+            certification_eligible=True,
+            provenance="pre_training_fixed_probe",
+        )
         thresholds = Thresholds(
             plateau=1.0,
             holdout=0.1,
