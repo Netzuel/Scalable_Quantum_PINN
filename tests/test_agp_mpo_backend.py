@@ -7,6 +7,11 @@ import unittest
 
 import numpy as np
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 in the required torch-mps environment.
+    from pip._vendor import tomli as tomllib
+
 from scripts.agp_mpo_backend import (
     factor_direct_cd_coefficients,
     permute_pauli_label,
@@ -17,10 +22,14 @@ from scripts.agp_mpo_backend import (
 
 class OptionalDependencyTests(unittest.TestCase):
     def test_tensor_network_extra_pins_mpo_dependencies(self) -> None:
-        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+        pyproject = tomllib.loads(
+            (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+        )
 
-        self.assertIn('quimb==1.11.2', pyproject)
-        self.assertIn('physics-tenpy==1.1.0', pyproject)
+        self.assertEqual(
+            pyproject["project"]["optional-dependencies"]["tensor-network"],
+            ["quimb==1.11.2", "physics-tenpy==1.1.0"],
+        )
 
 
 class TemporalFactorizationTests(unittest.TestCase):
@@ -37,16 +46,34 @@ class TemporalFactorizationTests(unittest.TestCase):
         self.assertGreaterEqual(result.retained_norm_fraction, 0.999999)
         np.testing.assert_allclose(result.reconstruct(), direct, atol=1.0e-11)
 
-    def test_factorization_chooses_the_smallest_rank_meeting_squared_norm_target(self) -> None:
+    def test_factorization_keeps_global_rank_when_it_preserves_every_term(self) -> None:
         tau = np.linspace(0.0, 1.0, 4)
-        direct = np.asarray([[0.0, 0.0], [3.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
+        direct = np.asarray([[0.0, 0.0], [3.0, 6.0], [0.0, 0.0], [0.0, 0.0]])
 
-        rank_one = factor_direct_cd_coefficients(tau, direct, retained_norm=0.9)
-        rank_two = factor_direct_cd_coefficients(tau, direct, retained_norm=0.900001)
+        result = factor_direct_cd_coefficients(tau, direct, retained_norm=0.9)
 
-        self.assertEqual(rank_one.rank, 1)
-        self.assertAlmostEqual(rank_one.retained_norm_fraction, 0.9)
-        self.assertEqual(rank_two.rank, 2)
+        self.assertEqual(result.rank_for_retained_norm, 1)
+        self.assertEqual(result.rank, 1)
+        self.assertFalse(result.rank_increased_for_term_preservation)
+        self.assertAlmostEqual(result.retained_norm_fraction, 1.0)
+
+    def test_factorization_increases_rank_to_preserve_every_nonzero_term(self) -> None:
+        tau = np.linspace(0.0, 1.0, 5)
+        direct = np.asarray([[0.0, 0.0], [10.0, 0.0], [0.0, 1.0], [0.0, 0.0], [0.0, 0.0]])
+
+        result = factor_direct_cd_coefficients(tau, direct, retained_norm=0.99)
+
+        self.assertEqual(result.rank_for_retained_norm, 1)
+        self.assertEqual(result.rank, 2)
+        self.assertTrue(result.rank_increased_for_term_preservation)
+        self.assertIn("nonzero source coefficient columns", result.rank_increase_reason)
+        reconstructed = result.reconstruct()
+        for column in range(direct.shape[1]):
+            source_norm = np.linalg.norm(direct[:, column])
+            self.assertGreater(
+                np.linalg.norm(reconstructed[:, column]),
+                result.term_preservation_relative_atol * source_norm,
+            )
 
     def test_factorization_preserves_zero_direct_cd_endpoints(self) -> None:
         tau = np.linspace(0.0, 1.0, 5)
@@ -56,9 +83,9 @@ class TemporalFactorizationTests(unittest.TestCase):
 
         result = factor_direct_cd_coefficients(tau, direct, retained_norm=1.0)
 
-        np.testing.assert_array_equal(result.reconstruct()[0], np.zeros(2))
-        np.testing.assert_array_equal(result.reconstruct()[-1], np.zeros(2))
-        self.assertEqual(result.endpoint_max_abs_error, 0.0)
+        np.testing.assert_allclose(result.reconstruct()[0], np.zeros(2), atol=1.0e-12)
+        np.testing.assert_allclose(result.reconstruct()[-1], np.zeros(2), atol=1.0e-12)
+        self.assertLessEqual(result.endpoint_max_abs_error, 1.0e-12)
 
     def test_factorization_rejects_invalid_shapes_nonfinite_values_and_retained_norm(self) -> None:
         tau = np.linspace(0.0, 1.0, 3)
@@ -70,6 +97,36 @@ class TemporalFactorizationTests(unittest.TestCase):
             factor_direct_cd_coefficients(tau, np.asarray([[0.0, 0.0], [np.nan, 0.0], [0.0, 0.0]]))
         with self.assertRaisesRegex(ValueError, "retained_norm"):
             factor_direct_cd_coefficients(tau, direct, retained_norm=0.0)
+
+    def test_factorization_requires_normalized_strictly_increasing_tau(self) -> None:
+        direct = np.zeros((4, 2))
+
+        with self.assertRaisesRegex(ValueError, "start at 0"):
+            factor_direct_cd_coefficients(np.asarray([0.1, 0.4, 0.7, 1.0]), direct)
+        with self.assertRaisesRegex(ValueError, "end at 1"):
+            factor_direct_cd_coefficients(np.asarray([0.0, 0.3, 0.6, 0.9]), direct)
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            factor_direct_cd_coefficients(np.asarray([0.0, 0.5, 0.5, 1.0]), direct)
+
+    def test_factorization_rejects_nonzero_direct_cd_endpoints(self) -> None:
+        tau = np.linspace(0.0, 1.0, 3)
+        direct = np.asarray([[1.0e-4, 0.0], [1.0, -2.0], [0.0, 0.0]])
+
+        with self.assertRaisesRegex(ValueError, "endpoint"):
+            factor_direct_cd_coefficients(tau, direct)
+
+    def test_factorization_diagnostics_describe_the_returned_reconstruction(self) -> None:
+        tau = np.linspace(0.0, 1.0, 5)
+        direct = np.asarray([[0.0, 0.0], [2.0, 0.0], [0.0, 1.0], [0.0, 0.0], [0.0, 0.0]])
+
+        result = factor_direct_cd_coefficients(tau, direct, retained_norm=0.8)
+        reconstructed = result.reconstruct()
+
+        self.assertEqual(result.max_abs_error, float(np.max(np.abs(reconstructed - direct))))
+        self.assertEqual(
+            result.endpoint_max_abs_error,
+            float(np.max(np.abs(reconstructed[[0, -1]] - direct[[0, -1]]))),
+        )
 
 
 class QubitOrderingTests(unittest.TestCase):
@@ -106,6 +163,39 @@ class QubitOrderingTests(unittest.TestCase):
             select_qubit_order([("XII", 1.0)], n_qubits=3, candidates=("unknown",))
         with self.assertRaisesRegex(ValueError, "permutation"):
             permute_pauli_label("XYZ", (0, 0, 2))
+
+    def test_spectral_order_falls_back_deterministically_for_degenerate_graphs(self) -> None:
+        terms = [("XIII", 1.0), ("IYII", 2.0), ("IIZI", 3.0), ("IIIX", 4.0)]
+
+        first = select_qubit_order(terms, n_qubits=4, candidates=("spectral",))
+        second = select_qubit_order(tuple(reversed(terms)), n_qubits=4, candidates=("spectral",))
+
+        self.assertEqual(first.order, (0, 1, 2, 3))
+        self.assertEqual(first, second)
+
+    def test_spectral_order_falls_back_for_symmetric_fiedler_eigenspaces(self) -> None:
+        terms = [
+            ("XXII", 1.0),
+            ("XIXI", 1.0),
+            ("XIIX", 1.0),
+            ("IXXI", 1.0),
+            ("IXIX", 1.0),
+            ("IIXX", 1.0),
+        ]
+
+        result = select_qubit_order(terms, n_qubits=4, candidates=("spectral",))
+
+        self.assertEqual(result.order, (0, 1, 2, 3))
+
+    def test_ordering_rejects_fractional_and_boolean_indices(self) -> None:
+        terms = [("XII", 1.0)]
+
+        for invalid_n_qubits in (3.0, True):
+            with self.assertRaisesRegex(ValueError, "n_qubits"):
+                select_qubit_order(terms, n_qubits=invalid_n_qubits)
+        for invalid_order in ((0, 1.0, 2), (0, False, 2)):
+            with self.assertRaisesRegex(ValueError, "integer"):
+                permute_pauli_label("XYZ", invalid_order)
 
 
 if __name__ == "__main__":

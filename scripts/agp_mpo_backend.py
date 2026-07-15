@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+from numbers import Integral
 from typing import Sequence
 
 import numpy as np
@@ -16,6 +17,9 @@ import numpy as np
 
 _PAULI_SYMBOLS = frozenset("IXYZ")
 _SUPPORTED_ORDER_CANDIDATES = frozenset(("native", "reversed", "spectral"))
+_ENDPOINT_TOLERANCE = 1.0e-12
+_TERM_PRESERVATION_RELATIVE_ATOL = 1.0e-12
+_SPECTRAL_DEGENERACY_RELATIVE_ATOL = 1.0e-12
 
 
 @dataclass(frozen=True)
@@ -30,13 +34,14 @@ class TemporalFactorization:
     retained_norm_fraction: float
     max_abs_error: float
     endpoint_max_abs_error: float
+    rank_for_retained_norm: int
+    rank_increased_for_term_preservation: bool
+    rank_increase_reason: str | None
+    term_preservation_relative_atol: float
 
     def reconstruct(self) -> np.ndarray:
-        """Reconstruct direct-CD coefficients with physically zero endpoints."""
-        result = self.temporal_factors @ self.static_modes
-        result[0] = 0.0
-        result[-1] = 0.0
-        return result
+        """Reconstruct the exact factorized direct-CD coefficient matrix."""
+        return self.temporal_factors @ self.static_modes
 
 
 @dataclass(frozen=True)
@@ -66,12 +71,19 @@ def factor_direct_cd_coefficients(
     direct_cd_coefficients: np.ndarray,
     *,
     retained_norm: float = 0.999999,
+    endpoint_tolerance: float = _ENDPOINT_TOLERANCE,
+    term_preservation_relative_atol: float = _TERM_PRESERVATION_RELATIVE_ATOL,
 ) -> TemporalFactorization:
     """Factor every direct-CD coefficient with the smallest valid SVD rank.
 
-    ``retained_norm`` is a squared-singular-value fraction. Reconstruction
-    explicitly enforces the direct-CD boundary condition at both endpoints and
-    reports any resulting endpoint discrepancy.
+    ``retained_norm`` is a squared-singular-value fraction. Every source
+    coefficient column with nonzero norm must retain a norm greater than
+    ``term_preservation_relative_atol * source_norm``. The rank is increased
+    beyond the global norm target when necessary and records that decision.
+
+    The direct-CD samples must use a normalized, strictly increasing time grid
+    from zero to one. Endpoint coefficient rows must be zero to
+    ``endpoint_tolerance``; reconstruction never mutates them afterwards.
     """
     tau_array = _finite_real_array(tau, name="tau", ndim=1)
     coefficient_array = _finite_real_array(
@@ -85,23 +97,75 @@ def factor_direct_cd_coefficients(
         )
     if not np.isfinite(retained_norm) or not 0.0 < float(retained_norm) <= 1.0:
         raise ValueError("retained_norm must be finite and in the interval (0, 1].")
+    if not np.isfinite(endpoint_tolerance) or float(endpoint_tolerance) < 0.0:
+        raise ValueError("endpoint_tolerance must be finite and nonnegative.")
+    if (
+        not np.isfinite(term_preservation_relative_atol)
+        or not 0.0 < float(term_preservation_relative_atol) < 1.0
+    ):
+        raise ValueError("term_preservation_relative_atol must be finite and in (0, 1).")
+    if abs(float(tau_array[0])) > float(endpoint_tolerance):
+        raise ValueError("tau must start at 0 within endpoint_tolerance.")
+    if abs(float(tau_array[-1]) - 1.0) > float(endpoint_tolerance):
+        raise ValueError("tau must end at 1 within endpoint_tolerance.")
+    if np.any(np.diff(tau_array) <= 0.0):
+        raise ValueError("tau must be strictly increasing.")
+    if np.max(np.abs(coefficient_array[[0, -1]])) > float(endpoint_tolerance):
+        raise ValueError("direct-CD coefficient endpoint rows must be zero within endpoint_tolerance.")
+
     left, singular_values, right = np.linalg.svd(coefficient_array, full_matrices=False)
     squared_singular_values = singular_values * singular_values
     total_norm_sq = float(np.sum(squared_singular_values))
     if total_norm_sq == 0.0:
         rank = 0
+        rank_for_retained_norm = 0
         temporal_factors = np.empty((tau_array.size, 0), dtype=np.float64)
         static_modes = np.empty((0, coefficient_array.shape[1]), dtype=np.float64)
         retained_norm_fraction = 1.0
+        rank_increase_reason = None
     else:
         cumulative_norm_sq = np.cumsum(squared_singular_values)
-        rank = int(np.searchsorted(cumulative_norm_sq, float(retained_norm) * total_norm_sq) + 1)
-        rank = min(rank, singular_values.size)
-        while rank < singular_values.size and cumulative_norm_sq[rank - 1] / total_norm_sq < retained_norm:
+        rank_for_retained_norm = int(
+            np.searchsorted(cumulative_norm_sq, float(retained_norm) * total_norm_sq) + 1
+        )
+        rank_for_retained_norm = min(rank_for_retained_norm, singular_values.size)
+        while (
+            rank_for_retained_norm < singular_values.size
+            and cumulative_norm_sq[rank_for_retained_norm - 1] / total_norm_sq < retained_norm
+        ):
+            rank_for_retained_norm += 1
+
+        source_norms = np.linalg.norm(coefficient_array, axis=0)
+        rank = rank_for_retained_norm
+        while rank < singular_values.size:
+            reconstructed = left[:, :rank] @ (singular_values[:rank, None] * right[:rank, :])
+            retained_norms = np.linalg.norm(reconstructed, axis=0)
+            if np.all(
+                (source_norms == 0.0)
+                | (retained_norms > float(term_preservation_relative_atol) * source_norms)
+            ):
+                break
             rank += 1
+
         temporal_factors = left[:, :rank]
         static_modes = singular_values[:rank, None] * right[:rank, :]
         retained_norm_fraction = float(cumulative_norm_sq[rank - 1] / total_norm_sq)
+        final_reconstruction = temporal_factors @ static_modes
+        final_retained_norms = np.linalg.norm(final_reconstruction, axis=0)
+        if not np.all(
+            (source_norms == 0.0)
+            | (final_retained_norms > float(term_preservation_relative_atol) * source_norms)
+        ):
+            raise ValueError("Unable to preserve every nonzero source coefficient column.")
+        rank_increase_reason = (
+            None
+            if rank == rank_for_retained_norm
+            else (
+                f"Increased rank from {rank_for_retained_norm} to {rank} to preserve nonzero "
+                f"source coefficient columns above relative norm threshold "
+                f"{float(term_preservation_relative_atol):.3e}."
+            )
+        )
 
     provisional = TemporalFactorization(
         tau=tau_array.copy(),
@@ -112,6 +176,10 @@ def factor_direct_cd_coefficients(
         retained_norm_fraction=retained_norm_fraction,
         max_abs_error=0.0,
         endpoint_max_abs_error=0.0,
+        rank_for_retained_norm=rank_for_retained_norm,
+        rank_increased_for_term_preservation=rank > rank_for_retained_norm,
+        rank_increase_reason=rank_increase_reason,
+        term_preservation_relative_atol=float(term_preservation_relative_atol),
     )
     reconstructed = provisional.reconstruct()
     return TemporalFactorization(
@@ -125,6 +193,10 @@ def factor_direct_cd_coefficients(
         endpoint_max_abs_error=float(
             np.max(np.abs(reconstructed[[0, -1]] - coefficient_array[[0, -1]]))
         ),
+        rank_for_retained_norm=provisional.rank_for_retained_norm,
+        rank_increased_for_term_preservation=provisional.rank_increased_for_term_preservation,
+        rank_increase_reason=provisional.rank_increase_reason,
+        term_preservation_relative_atol=provisional.term_preservation_relative_atol,
     )
 
 
@@ -157,8 +229,7 @@ def select_qubit_order(
     cut-count scoring. Candidate ranking uses ``max_cut_terms``, then
     ``mean_cut_terms``, then the candidate name.
     """
-    if n_qubits < 1:
-        raise ValueError("n_qubits must be positive.")
+    n_qubits = _validate_n_qubits(n_qubits)
     candidate_names = tuple(candidates)
     if not candidate_names:
         raise ValueError("At least one ordering candidate is required.")
@@ -173,6 +244,7 @@ def select_qubit_order(
         _validate_pauli_label(label, n_qubits=n_qubits)
         weight = _finite_weight(coefficient)
         normalized_terms.append((label, weight))
+    normalized_terms.sort(key=lambda item: (item[0], item[1]))
 
     interaction = _weighted_interaction_graph(normalized_terms, n_qubits=n_qubits)
     candidate_orders = {
@@ -220,9 +292,20 @@ def _validate_pauli_label(label: str, *, n_qubits: int) -> None:
 
 
 def _validate_order(order: Sequence[int], *, n_qubits: int) -> tuple[int, ...]:
+    if any(isinstance(site, bool) or not isinstance(site, Integral) for site in order):
+        raise ValueError("order entries must be integer qubit indices, not bools or fractions.")
     normalized = tuple(int(site) for site in order)
     if len(normalized) != n_qubits or sorted(normalized) != list(range(n_qubits)):
         raise ValueError("order must be a permutation of the qubit indices.")
+    return normalized
+
+
+def _validate_n_qubits(n_qubits: int) -> int:
+    if isinstance(n_qubits, bool) or not isinstance(n_qubits, Integral):
+        raise ValueError("n_qubits must be a positive integer, not a bool or fraction.")
+    normalized = int(n_qubits)
+    if normalized < 1:
+        raise ValueError("n_qubits must be positive.")
     return normalized
 
 
@@ -250,9 +333,15 @@ def _spectral_order(interaction: np.ndarray) -> tuple[int, ...]:
     if n_qubits == 1:
         return (0,)
     laplacian = np.diag(np.sum(interaction, axis=1)) - interaction
-    _, eigenvectors = np.linalg.eigh(laplacian)
+    eigenvalues, eigenvectors = np.linalg.eigh(laplacian)
+    scale = max(1.0, float(np.max(np.abs(eigenvalues))))
+    degeneracy_tolerance = _SPECTRAL_DEGENERACY_RELATIVE_ATOL * scale
+    if eigenvalues[1] <= degeneracy_tolerance or (
+        n_qubits > 2 and eigenvalues[2] - eigenvalues[1] <= degeneracy_tolerance
+    ):
+        return tuple(range(n_qubits))
     fiedler = eigenvectors[:, 1].copy()
-    nonzero = np.flatnonzero(np.abs(fiedler) > 1.0e-12)
+    nonzero = np.flatnonzero(np.abs(fiedler) > degeneracy_tolerance)
     if nonzero.size and fiedler[nonzero[0]] < 0.0:
         fiedler *= -1.0
     return tuple(int(site) for site in np.lexsort((np.arange(n_qubits), fiedler)))
