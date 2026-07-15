@@ -23,6 +23,7 @@ from agp_plot_annotations import (
     hcd_context_lines_for_images_dir,
     physical_comparison_payload_for_images_dir,
     physical_comparison_rows,
+    physical_validation_note,
     plot_physical_comparison_table,
 )
 from agp_physical_validation import (
@@ -287,6 +288,21 @@ class AGPPhysicalValidationTests(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["energy_error"], 10.0)
         self.assertAlmostEqual(rows[2]["energy_error"], 1.5)
         self.assertAlmostEqual(rows[3]["energy_error"], 0.2)
+
+    def test_unconverged_mps_table_is_labeled_as_diagnostic(self):
+        note = physical_validation_note(
+            {
+                "backend": "quimb_mps",
+                "convergence": {
+                    "status": "not_tested",
+                    "reason": "Only one resolution was run.",
+                },
+                "certification": {"status": "not_tested"},
+            }
+        )
+
+        self.assertIn("MPS convergence: not tested", note)
+        self.assertIn("diagnostic only", note)
 
     def test_q156_comparison_table_marks_dynamical_metrics_unavailable(self):
         with TemporaryDirectory() as tmp:

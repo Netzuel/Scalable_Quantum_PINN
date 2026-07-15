@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -67,6 +68,26 @@ class AGPMPSValidationTests(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(state.to_dense()).reshape(-1), expected, atol=1.0e-11)
         self.assertEqual(diagnostics["pauli_terms"], 3)
         self.assertEqual(diagnostics["support_groups"], 2)
+
+    def test_singleton_support_group_uses_exact_pauli_rotation_without_eigh(self):
+        state = make_product_mps("000")
+        angle = 0.31
+        coefficient = 0.75
+
+        with patch("agp_mps_validation.np.linalg.eigh", side_effect=AssertionError("unexpected eigh")):
+            diagnostics = apply_grouped_hamiltonian_rotation_mps(
+                state,
+                [("XIZ", coefficient)],
+                angle,
+                cutoff=1.0e-14,
+                max_bond=16,
+            )
+
+        expected = pauli_rotation_matrix("XIZ", angle * coefficient) @ np.array(
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.complex128
+        )
+        np.testing.assert_allclose(np.asarray(state.to_dense()).reshape(-1), expected, atol=1.0e-11)
+        self.assertEqual(diagnostics, {"pauli_terms": 1, "support_groups": 1})
 
     def test_protocol_cache_requires_identical_resolution_settings(self):
         previous = [

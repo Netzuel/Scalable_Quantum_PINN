@@ -56,13 +56,68 @@ conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/sc
   --config tests/sparse_agp_curriculum/transverse_field_spin_hubo/run_002_hamiltonian_341/q24/sweep_test/config.json
 ```
 
-For q=24, canonical dynamical validation uses the exact diagonal ground
+For q=24, canonical dynamical validation requires the exact diagonal ground
 reference and a two-resolution quimb MPS ladder. Every one of the 32,768
-learned AGP terms must be deployed in the PINN row.
+learned AGP terms must be deployed in the PINN row. A reduced-term deployment
+is an ablation and cannot satisfy the physical-validation gate.
 
 ## Current Status
 
-The scenario is configured for end-to-end training. Generated checkpoints,
-figures, and MPS summaries remain under the ignored local `runs/` tree. Results
-and certification gates will be added after the complete run and convergence
-ladder finish.
+The end-to-end training run completed. Round 20 used all requested residual
+labels and retained the fixed `K=32768` AGP support:
+
+```text
+round-20 training relative residual     = 0.00546703
+round-20 holdout relative residual      = 0.09397036
+round-20 unseen absolute residual       = 0.14483541
+round-20 unseen relative residual       = not tested (zero reference)
+adaptive training relative residual     = 0.00715475
+adaptive holdout relative residual      = 0.12782112
+```
+
+The adaptive checkpoint passes the training-residual target but fails the
+configured `0.1` holdout target. Support swaps were still active in round 20.
+Fixed probes, K/Q plateaus, cross-seed stability, pruning, and proposal
+exhaustion were not tested. The claim level is therefore **projected sparse AGP
+experiment**, not a certified sparse AGP.
+
+## Full-Support MPS Cost Diagnostic
+
+The full learned support contains 15,025 occupied-support groups; 11,025 are
+single-Pauli groups. One symmetric time step at bond 8 still requires 30,058
+group applications and took 2,502.7 seconds on the reference machine. The
+configured 24/48-step, bond-32/64 ladder was therefore not completed.
+
+The following equal-resolution numbers use one time step, bond 8, cutoff
+`1e-6`, and all 32,768 learned terms. They are a computational diagnostic only:
+
+| Method | Final energy | Energy error | Ground fidelity |
+| --- | ---: | ---: | ---: |
+| No CD | -4.879474 | 23.221991 | 2.421700e-6 |
+| Nested commutator l=1 | -6.508609 | 21.592857 | 1.294986e-5 |
+| Learned sparse AGP | -3.856186 | 24.245280 | 1.235953e-11 |
+
+These values do not establish that l=1 outperforms the learned AGP, because
+time-step, bond-dimension, and cutoff convergence were not demonstrated. The
+physical-validation certification gate is `not tested`.
+
+Generated checkpoints and diagnostics remain in the ignored local `runs/`
+tree. The consolidated diagnostic is under the adaptive checkpoint at
+`mps_validation_diagnostic/`, including
+`Images/physical_method_comparison_table.pdf` and the corresponding JSON.
+
+## Certification Summary
+
+```text
+q, 4**q, K, K/4**q           = 24, 281474976710656, 32768, 1.164153218269e-10
+training residual gate        = pass
+holdout residual gate         = fail (final adaptive checkpoint)
+unseen relative residual gate = not tested (zero reference)
+fixed probe gates             = not tested
+K/Q plateau gates             = not tested
+support stability gates       = not tested
+proposal exhaustion           = fail (swaps active in round 20)
+prune-and-retest               = not tested
+physical MPS validation       = not tested (no convergence ladder)
+claim level                   = projected sparse AGP experiment
+```

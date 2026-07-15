@@ -153,9 +153,27 @@ def apply_grouped_hamiltonian_rotation_mps(
 ) -> dict[str, int]:
     """Apply grouped local exponentials while retaining every Pauli term."""
 
-    grouped = group_hamiltonian_terms_by_support(terms)
+    grouped_terms: defaultdict[tuple[int, ...], list[tuple[str, float]]] = defaultdict(list)
+    for label, coefficient in terms:
+        support = tuple(site for site, symbol in enumerate(label) if symbol != "I")
+        if support and coefficient != 0.0:
+            grouped_terms[support].append((label, coefficient))
+
     applied_groups = 0
-    for support, hamiltonian in grouped.items():
+    for support, support_terms in grouped_terms.items():
+        if len(support_terms) == 1:
+            label, coefficient = support_terms[0]
+            apply_pauli_rotation_mps(
+                state,
+                label,
+                float(angle) * float(coefficient),
+                cutoff=cutoff,
+                max_bond=max_bond,
+            )
+            applied_groups += 1
+            continue
+
+        hamiltonian = group_hamiltonian_terms_by_support(support_terms)[support]
         if not np.allclose(hamiltonian, hamiltonian.conj().T, atol=1.0e-10):
             raise ValueError(f"Non-Hermitian grouped Hamiltonian on support {support}.")
         eigenvalues, eigenvectors = np.linalg.eigh(hamiltonian)

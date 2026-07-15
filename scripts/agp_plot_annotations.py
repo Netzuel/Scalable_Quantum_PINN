@@ -251,6 +251,19 @@ def _table_number(value: object) -> str:
     return "not computed" if parsed is None else f"{parsed:.7g}"
 
 
+def physical_validation_note(payload: Mapping[str, object]) -> str:
+    """Return an explicit qualification for tensor-network table metrics."""
+
+    if payload.get("backend") != "quimb_mps":
+        return ""
+    convergence = payload.get("convergence", {})
+    convergence = convergence if isinstance(convergence, Mapping) else {}
+    status = str(convergence.get("status", "not_tested")).replace("_", " ")
+    if status == "pass":
+        return "MPS convergence: pass."
+    return f"MPS convergence: {status}; physical comparison is diagnostic only."
+
+
 def plot_physical_comparison_table(
     images_dir: Path,
     payload: Mapping[str, object] | None = None,
@@ -282,7 +295,8 @@ def plot_physical_comparison_table(
             "axes.linewidth": 0.8,
         }
     )
-    fig, ax = plt.subplots(figsize=(8.6, 2.8))
+    validation_note = physical_validation_note(normalized)
+    fig, ax = plt.subplots(figsize=(8.6, 3.0 if validation_note else 2.8))
     ax.axis("off")
     column_labels = ["Method", r"$E(T)$", r"$|E(T)-E_0|$", r"$F_0(T)$"]
     cell_text = [
@@ -326,6 +340,8 @@ def plot_physical_comparison_table(
         r"$E_0$ is the exact final-Hamiltonian ground energy; "
         r"$F_0(T)$ is final-state ground-space fidelity."
     )
+    if validation_note:
+        note = f"{note}\n{validation_note}"
     fig.text(0.5, 0.075, note, ha="center", va="center", fontsize=8.5, color="0.25", wrap=True)
     fig.subplots_adjust(left=0.02, right=0.98, top=0.88, bottom=0.02)
     output = images_dir / "physical_method_comparison_table.pdf"
