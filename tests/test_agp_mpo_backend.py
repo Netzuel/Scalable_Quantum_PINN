@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest import mock
+import warnings
 
 import numpy as np
 
@@ -29,6 +31,15 @@ from scripts.agp_mpo_backend import (
 
 
 _TENPY_AVAILABLE = importlib.util.find_spec("tenpy") is not None
+
+
+def _base4_pauli_label(index: int, n_qubits: int) -> str:
+    symbols = "IXYZ"
+    encoded = []
+    for _ in range(n_qubits):
+        encoded.append(symbols[index % 4])
+        index //= 4
+    return "".join(reversed(encoded))
 
 
 class OptionalDependencyTests(unittest.TestCase):
@@ -326,6 +337,56 @@ class ExactPauliMPOTests(unittest.TestCase):
 
 @unittest.skipUnless(_TENPY_AVAILABLE, "TeNPy tensor-network extra is not installed")
 class MPOCompressionTests(unittest.TestCase):
+    def test_adversarial_full_support_compression_never_densifies_exact_mpo(self) -> None:
+        terms = [
+            (
+                _base4_pauli_label((index * 0x9E3779B1) % (4**12), 12),
+                complex((index % 17) + 1) / 17.0,
+            )
+            for index in range(512)
+        ]
+        exact, _ = build_exact_pauli_mpo(
+            terms, n_qubits=12, order=tuple(range(12))
+        )
+        workspace_cap = 8 * 1024 * 1024
+
+        with mock.patch(
+            "tenpy.linalg.np_conserved.Array.to_ndarray",
+            side_effect=AssertionError("exact MPO tensor was densified"),
+        ):
+            compressed, diagnostics = compress_mpo_hilbert_schmidt(
+                exact,
+                max_bond=8,
+                cutoff=1.0e-12,
+                workspace_cap_bytes=workspace_cap,
+            )
+
+        self.assertEqual(diagnostics["status"], "ok")
+        self.assertIsNotNone(compressed)
+        self.assertEqual(diagnostics["input_terms"], 512)
+        self.assertLessEqual(diagnostics["peak_workspace_bytes"], workspace_cap)
+        self.assertTrue(all(bond <= 8 for bond in compressed.chi[1:-1]))
+
+    def test_compression_returns_not_feasible_before_exceeding_workspace_cap(self) -> None:
+        terms = [
+            (_base4_pauli_label(index, 8), complex(index + 1))
+            for index in range(64)
+        ]
+        exact, _ = build_exact_pauli_mpo(terms, n_qubits=8, order=tuple(range(8)))
+
+        compressed, diagnostics = compress_mpo_hilbert_schmidt(
+            exact,
+            max_bond=16,
+            cutoff=0.0,
+            workspace_cap_bytes=1024,
+        )
+
+        self.assertIsNone(compressed)
+        self.assertEqual(diagnostics["status"], "not_feasible")
+        self.assertEqual(diagnostics["workspace_cap_bytes"], 1024)
+        self.assertGreater(diagnostics["required_workspace_bytes"], 1024)
+        self.assertLessEqual(diagnostics["peak_workspace_bytes"], 1024)
+
     def test_compressed_mpo_reports_and_respects_operator_error(self) -> None:
         terms = [("XII", 0.3), ("IYZ", -0.7), ("ZZI", 0.2), ("XYZ", 0.1)]
         exact, _ = build_exact_pauli_mpo(terms, n_qubits=3, order=(0, 1, 2))
@@ -399,8 +460,13 @@ class MPOCompressionTests(unittest.TestCase):
             "seed": 1729,
         }
 
-        first = probe_mpo_compression(exact, compressed, **settings)
-        second = probe_mpo_compression(exact, compressed, **settings)
+        with mock.patch.object(
+            exact,
+            "apply_naively",
+            side_effect=AssertionError("exact MPO action was formed"),
+        ):
+            first = probe_mpo_compression(exact, compressed, **settings)
+            second = probe_mpo_compression(exact, compressed, **settings)
 
         self.assertEqual(first, second)
         self.assertEqual(first["tested_probes"], 4)
@@ -415,6 +481,61 @@ class MPOCompressionTests(unittest.TestCase):
             exact_dense @ product
         )
         self.assertAlmostEqual(first["probes"][1]["relative_action_error"], expected_error)
+        from tenpy.networks.mps import MPS
+
+        random_state = np.random.get_state()
+        try:
+            np.random.seed(settings["seed"])
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                random_mps = MPS.from_random_unitary_evolution(
+                    exact.sites,
+                    chi=2,
+                    p_state=["up"] * exact.L,
+                    bc="finite",
+                    dtype=np.complex128,
+                )
+        finally:
+            np.random.set_state(random_state)
+        random_dense = random_mps.get_theta(0, exact.L).to_ndarray().reshape(-1)
+        expected_random_error = np.linalg.norm(
+            (exact_dense - compressed_dense) @ random_dense
+        ) / np.linalg.norm(exact_dense @ random_dense)
+        self.assertAlmostEqual(
+            first["probes"][2]["relative_action_error"],
+            expected_random_error,
+        )
+
+    def test_random_probe_reports_not_feasible_above_exact_work_cap(self) -> None:
+        terms = [
+            (_base4_pauli_label(index, 4), complex(index + 1) / 16.0)
+            for index in range(16)
+        ]
+        exact, _ = build_exact_pauli_mpo(terms, n_qubits=4, order=(0, 1, 2, 3))
+        compressed, compression = compress_mpo_hilbert_schmidt(
+            exact, max_bond=4, cutoff=1.0e-12
+        )
+        self.assertEqual(compression["status"], "ok")
+
+        with mock.patch.object(
+            exact,
+            "apply_naively",
+            side_effect=AssertionError("exact MPO action was formed"),
+        ):
+            diagnostics = probe_mpo_compression(
+                exact,
+                compressed,
+                product_states=(),
+                random_state_count=1,
+                random_bond=4,
+                seed=7,
+                exact_work_cap=1,
+            )
+
+        self.assertEqual(diagnostics["tested_probes"], 0)
+        self.assertEqual(diagnostics["not_feasible_probes"], 1)
+        self.assertEqual(diagnostics["probes"][0]["status"], "not_feasible")
+        self.assertGreater(diagnostics["probes"][0]["estimated_exact_work"], 1)
 
     def test_zero_action_denominator_is_not_tested(self) -> None:
         zero, _ = build_exact_pauli_mpo(

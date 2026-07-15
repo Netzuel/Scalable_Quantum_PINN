@@ -23,6 +23,10 @@ _ENDPOINT_TOLERANCE = 1.0e-12
 _COLUMN_RETAINED_ENERGY_ATOL = 128.0 * np.finfo(np.float64).eps
 _SPECTRAL_EIGENVALUE_RELATIVE_ATOL = 128.0 * np.finfo(np.float64).eps
 _SPECTRAL_COMPONENT_ATOL_SCALE = 32.0
+_DEFAULT_MPO_WORKSPACE_CAP_BYTES = 256 * 1024 * 1024
+_COMPLEX_BYTES = np.dtype(np.complex128).itemsize
+_INDEX_BYTES = np.dtype(np.uint64).itemsize
+_PAULI_INDEX = {symbol: index for index, symbol in enumerate("IXYZ")}
 
 
 @dataclass(frozen=True)
@@ -345,6 +349,7 @@ def build_exact_pauli_mpo(
     operator_terms: list[list[tuple[str, int]]] = []
     strengths: list[complex] = []
     included_chain_labels: list[str] = []
+    included_chain_terms: list[tuple[str, complex]] = []
     for label, coefficient in included_coefficients.items():
         chain_label = permute_pauli_label(label, normalized_order)
         local_terms = [
@@ -357,6 +362,7 @@ def build_exact_pauli_mpo(
         operator_terms.append(local_terms)
         strengths.append(coefficient)
         included_chain_labels.append(chain_label)
+        included_chain_terms.append((chain_label, coefficient))
 
     if not operator_terms:
         operator_terms = [[("Id", 0)]]
@@ -371,6 +377,7 @@ def build_exact_pauli_mpo(
         unit_cell_width=n_qubits,
     )
     mpo = graph.build_MPO()
+    mpo._agp_pauli_terms = tuple(sorted(included_chain_terms))
     metadata: dict[str, object] = {
         "input_terms": input_terms,
         "unique_labels": len(combined_coefficients),
@@ -393,12 +400,15 @@ def compress_mpo_hilbert_schmidt(
     *,
     max_bond: int,
     cutoff: float,
-) -> tuple[Any, dict[str, object]]:
-    """Compress a finite MPO with a left-to-right Hilbert-Schmidt SVD sweep.
+    workspace_cap_bytes: int = _DEFAULT_MPO_WORKSPACE_CAP_BYTES,
+) -> tuple[Any | None, dict[str, object]]:
+    """Compress a full Pauli sum with a workspace-bounded TT-SVD sweep.
 
     ``cutoff`` is the maximum relative cumulative squared singular weight to
     discard at each bond. ``max_bond`` is a hard cap and can force a larger
-    discarded weight; ``cutoff_satisfied_by_bond`` records that condition.
+    discarded weight. The exact TeNPy MPO tensors are never densified: the
+    sweep consumes the combined Pauli-coordinate provenance retained by
+    :func:`build_exact_pauli_mpo`.
     """
     _, _, _, MPO, npc = _require_tenpy()
     if isinstance(max_bond, bool) or not isinstance(max_bond, Integral) or int(max_bond) < 1:
@@ -413,28 +423,189 @@ def compress_mpo_hilbert_schmidt(
         raise ValueError("Hilbert-Schmidt MPO compression requires finite boundary conditions.")
     if getattr(mpo, "L", 0) < 1:
         raise ValueError("MPO must contain at least one site.")
+    if (
+        isinstance(workspace_cap_bytes, bool)
+        or not isinstance(workspace_cap_bytes, Integral)
+        or int(workspace_cap_bytes) < 1
+    ):
+        raise ValueError("workspace_cap_bytes must be a positive integer.")
 
     hard_max_bond = int(max_bond)
     relative_cutoff = float(cutoff)
-    tensors = _effective_finite_mpo_tensors(mpo)
-    pre_bonds = [tensors[0].shape[0]] + [tensor.shape[1] for tensor in tensors]
-    _right_canonicalize_mpo_tensors(tensors)
-    canonical_bonds = [tensors[0].shape[0]] + [tensor.shape[1] for tensor in tensors]
-    source_hilbert_schmidt_norm_squared = float(np.vdot(tensors[0], tensors[0]).real)
+    workspace_cap = int(workspace_cap_bytes)
+    pauli_terms = getattr(mpo, "_agp_pauli_terms", None)
+    diagnostics: dict[str, object] = {
+        "status": "ok",
+        "algorithm": "workspace_bounded_pauli_tt_svd",
+        "max_bond": hard_max_bond,
+        "cutoff": relative_cutoff,
+        "cutoff_semantics": (
+            "maximum relative cumulative discarded squared singular weight per Pauli unfolding"
+        ),
+        "workspace_cap_bytes": workspace_cap,
+        "peak_workspace_bytes": 0,
+        "peak_explicit_workspace_bytes": 0,
+        "required_workspace_bytes": 0,
+        "source_bonds": list(mpo.chi),
+        "input_terms": 0 if pauli_terms is None else len(pauli_terms),
+    }
+    if pauli_terms is None:
+        return _compression_not_feasible(
+            diagnostics,
+            required_workspace_bytes=0,
+            peak_workspace_bytes=0,
+            failed_bond=None,
+            reason="exact Pauli-coordinate provenance is unavailable",
+        )
+    if mpo.L > 32:
+        return _compression_not_feasible(
+            diagnostics,
+            required_workspace_bytes=0,
+            peak_workspace_bytes=0,
+            failed_bond=None,
+            reason="compact Pauli TT encoding supports at most 32 qubits",
+        )
+
+    source_coefficient_norm_squared = float(
+        math.fsum(abs(coefficient) ** 2 for _, coefficient in pauli_terms)
+    )
+    if not pauli_terms:
+        cores = [np.zeros((1, 4, 1), dtype=np.complex128)]
+        for _ in range(1, mpo.L):
+            core = np.zeros((1, 4, 1), dtype=np.complex128)
+            core[0, 0, 0] = 1.0
+            cores.append(core)
+        zero_output_required = sum(core.nbytes for core in cores) * 4
+        if zero_output_required > workspace_cap:
+            return _compression_not_feasible(
+                diagnostics,
+                required_workspace_bytes=zero_output_required,
+                peak_workspace_bytes=0,
+                failed_bond=None,
+                reason="zero compressed MPO output exceeds workspace cap",
+            )
+        compressed = _mpo_from_pauli_cores(MPO, npc, sites=mpo.sites, cores=cores)
+        diagnostics.update(
+            {
+                "peak_workspace_bytes": zero_output_required,
+                "peak_explicit_workspace_bytes": sum(core.nbytes for core in cores),
+                "required_workspace_bytes": zero_output_required,
+                "post_bonds": list(compressed.chi),
+                "retained_ranks": [1] * max(mpo.L - 1, 0),
+                "per_bond_cutoff_weights": [0.0] * max(mpo.L - 1, 0),
+                "per_bond_discarded_weights": [0.0] * max(mpo.L - 1, 0),
+                "discarded_weight": 0.0,
+                "per_bond_discarded_squared_norms": [0.0] * max(mpo.L - 1, 0),
+                "total_discarded_squared_norm": 0.0,
+                "source_hilbert_schmidt_norm_squared": 0.0,
+                "relative_hilbert_schmidt_error_squared": 0.0,
+                "cutoff_satisfied_by_bond": [True] * max(mpo.L - 1, 0),
+            }
+        )
+        return compressed, diagnostics
+
+    initial_required = len(pauli_terms) * (4 * _INDEX_BYTES + 3 * _COMPLEX_BYTES)
+    diagnostics["required_workspace_bytes"] = initial_required
+    if initial_required > workspace_cap:
+        return _compression_not_feasible(
+            diagnostics,
+            required_workspace_bytes=initial_required,
+            peak_workspace_bytes=0,
+            failed_bond=0,
+            reason="Pauli coefficient workspace exceeds cap",
+        )
+
+    codes = np.fromiter(
+        (_encode_pauli_label(label) for label, _ in pauli_terms),
+        dtype=np.uint64,
+        count=len(pauli_terms),
+    )
+    values = np.asarray(
+        [[coefficient for _, coefficient in pauli_terms]], dtype=np.complex128
+    )
+    sort_order = np.argsort(codes, kind="stable")
+    codes = codes[sort_order]
+    values = values[:, sort_order]
+    cores: list[np.ndarray] = []
     per_bond_cutoff_weights: list[float] = []
-    per_bond_discarded_squared_norms: list[float] = []
+    per_bond_discarded_coefficient_norms: list[float] = []
     cutoff_satisfied_by_bond: list[bool] = []
     retained_ranks: list[int] = []
+    peak_workspace = initial_required
+    peak_explicit_workspace = int(codes.nbytes + values.nbytes)
+    required_workspace = initial_required
 
     for bond in range(mpo.L - 1):
-        left_tensor = tensors[bond]
-        left_dim, right_dim, physical_out, physical_in = left_tensor.shape
-        matrix = left_tensor.transpose(0, 2, 3, 1).reshape(
-            left_dim * physical_out * physical_in, right_dim
+        previous_rank, entry_count = values.shape
+        remaining_sites = mpo.L - bond
+        shift = 2 * (remaining_sites - 1)
+        index_workspace = entry_count * 6 * _INDEX_BYTES
+        pre_index_required = (
+            sum(core.nbytes for core in cores)
+            + codes.nbytes
+            + values.nbytes
+            + index_workspace
         )
-        left_vectors, singular_values, right_vectors = np.linalg.svd(
-            matrix, full_matrices=False
+        required_workspace = max(required_workspace, pre_index_required)
+        if pre_index_required > workspace_cap:
+            return _compression_not_feasible(
+                diagnostics,
+                required_workspace_bytes=pre_index_required,
+                peak_workspace_bytes=peak_workspace,
+                failed_bond=bond,
+                reason="Pauli suffix indexing exceeds workspace cap",
+            )
+
+        symbols = np.asarray(codes >> np.uint64(shift), dtype=np.int64)
+        if shift:
+            suffix_mask = np.uint64((1 << shift) - 1)
+            suffixes = codes & suffix_mask
+        else:
+            suffixes = np.zeros_like(codes)
+        unique_suffixes, inverse = np.unique(suffixes, return_inverse=True)
+        column_count = unique_suffixes.size
+        row_count = previous_rank * 4
+        retained_bound = min(hard_max_bond, row_count, column_count)
+        matrix_bytes = row_count * column_count * _COMPLEX_BYTES
+        gram_bytes = row_count * row_count * _COMPLEX_BYTES
+        next_values_bytes = retained_bound * column_count * _COMPLEX_BYTES
+        core_bytes = sum(core.nbytes for core in cores)
+        conservative_required = (
+            core_bytes
+            + codes.nbytes
+            + values.nbytes
+            + symbols.nbytes
+            + suffixes.nbytes
+            + unique_suffixes.nbytes
+            + inverse.nbytes
+            + 2 * matrix_bytes
+            + 5 * gram_bytes
+            + 2 * next_values_bytes
+            + row_count * np.dtype(np.float64).itemsize
         )
+        required_workspace = max(required_workspace, conservative_required)
+        if conservative_required > workspace_cap:
+            return _compression_not_feasible(
+                diagnostics,
+                required_workspace_bytes=conservative_required,
+                peak_workspace_bytes=peak_workspace,
+                failed_bond=bond,
+                reason="local Pauli unfolding SVD exceeds workspace cap",
+            )
+
+        matrix = np.zeros((row_count, column_count), dtype=np.complex128)
+        for left_index in range(previous_rank):
+            np.add.at(
+                matrix,
+                (left_index * 4 + symbols, inverse),
+                values[left_index],
+            )
+        gram = matrix @ matrix.conj().T
+        eigenvalues, left_vectors = np.linalg.eigh(gram)
+        descending = np.argsort(eigenvalues)[::-1]
+        eigenvalues = np.maximum(eigenvalues[descending], 0.0)
+        left_vectors = left_vectors[:, descending]
+        singular_values = np.sqrt(eigenvalues)
         retained_rank, discarded_weight = _svd_retained_rank(
             singular_values,
             max_bond=hard_max_bond,
@@ -443,54 +614,86 @@ def compress_mpo_hilbert_schmidt(
         retained_ranks.append(retained_rank)
         per_bond_cutoff_weights.append(discarded_weight)
         discarded_values = singular_values[retained_rank:]
-        per_bond_discarded_squared_norms.append(
+        per_bond_discarded_coefficient_norms.append(
             float(np.vdot(discarded_values, discarded_values).real)
         )
         cutoff_satisfied_by_bond.append(
             discarded_weight <= relative_cutoff + 64.0 * np.finfo(np.float64).eps
         )
 
-        tensors[bond] = left_vectors[:, :retained_rank].reshape(
-            left_dim, physical_out, physical_in, retained_rank
-        ).transpose(0, 3, 1, 2)
-        remainder = singular_values[:retained_rank, None] * right_vectors[:retained_rank, :]
-        tensors[bond + 1] = np.tensordot(remainder, tensors[bond + 1], axes=(1, 0))
+        retained_vectors = left_vectors[:, :retained_rank]
+        cores.append(retained_vectors.reshape(previous_rank, 4, retained_rank))
+        next_values = retained_vectors.conj().T @ matrix
+        explicit_workspace = (
+            core_bytes
+            + codes.nbytes
+            + values.nbytes
+            + symbols.nbytes
+            + suffixes.nbytes
+            + unique_suffixes.nbytes
+            + inverse.nbytes
+            + matrix.nbytes
+            + gram.nbytes
+            + eigenvalues.nbytes
+            + left_vectors.nbytes
+            + next_values.nbytes
+        )
+        peak_explicit_workspace = max(peak_explicit_workspace, explicit_workspace)
+        peak_workspace = max(peak_workspace, conservative_required)
+        codes = unique_suffixes
+        values = next_values
 
-    compressed = _mpo_from_effective_tensors(
-        MPO,
-        npc,
-        sites=mpo.sites,
-        tensors=tensors,
-    )
+    final_core = np.zeros((values.shape[0], 4, 1), dtype=np.complex128)
+    for entry, code in enumerate(codes):
+        final_core[:, int(code), 0] += values[:, entry]
+    cores.append(final_core)
+    compressed_output_bytes = sum(core.nbytes for core in cores) * 4
+    final_required = max(required_workspace, compressed_output_bytes)
+    if final_required > workspace_cap:
+        return _compression_not_feasible(
+            diagnostics,
+            required_workspace_bytes=final_required,
+            peak_workspace_bytes=peak_workspace,
+            failed_bond=mpo.L - 1,
+            reason="compressed MPO output exceeds workspace cap",
+        )
+
+    compressed = _mpo_from_pauli_cores(MPO, npc, sites=mpo.sites, cores=cores)
+    hilbert_schmidt_scale = float(2**mpo.L)
+    per_bond_discarded_squared_norms = [
+        weight * hilbert_schmidt_scale for weight in per_bond_discarded_coefficient_norms
+    ]
     total_discarded_squared_norm = float(sum(per_bond_discarded_squared_norms))
-    if source_hilbert_schmidt_norm_squared > 0.0:
+    source_hilbert_schmidt_norm_squared = (
+        source_coefficient_norm_squared * hilbert_schmidt_scale
+    )
+    if source_coefficient_norm_squared > 0.0:
         per_bond_discarded_weights = [
-            weight / source_hilbert_schmidt_norm_squared
-            for weight in per_bond_discarded_squared_norms
+            weight / source_coefficient_norm_squared
+            for weight in per_bond_discarded_coefficient_norms
         ]
     else:
         per_bond_discarded_weights = [0.0] * len(per_bond_discarded_squared_norms)
     discarded_weight = float(sum(per_bond_discarded_weights))
-    diagnostics: dict[str, object] = {
-        "max_bond": hard_max_bond,
-        "cutoff": relative_cutoff,
-        "cutoff_semantics": "maximum relative cumulative discarded squared singular weight per bond",
-        "source_bonds": list(mpo.chi),
-        "pre_bonds": pre_bonds,
-        "canonical_bonds": canonical_bonds,
-        "post_bonds": list(compressed.chi),
-        "retained_ranks": retained_ranks,
-        "per_bond_cutoff_weights": per_bond_cutoff_weights,
-        "per_bond_discarded_weights": per_bond_discarded_weights,
-        "discarded_weight": discarded_weight,
-        "per_bond_discarded_squared_norms": per_bond_discarded_squared_norms,
-        "total_discarded_squared_norm": total_discarded_squared_norm,
-        "source_hilbert_schmidt_norm_squared": source_hilbert_schmidt_norm_squared,
-        "relative_hilbert_schmidt_error_squared": (
-            discarded_weight
-        ),
-        "cutoff_satisfied_by_bond": cutoff_satisfied_by_bond,
-    }
+    diagnostics.update(
+        {
+            "peak_workspace_bytes": max(peak_workspace, compressed_output_bytes),
+            "peak_explicit_workspace_bytes": peak_explicit_workspace,
+            "required_workspace_bytes": final_required,
+            "post_bonds": list(compressed.chi),
+            "retained_ranks": retained_ranks,
+            "per_bond_cutoff_weights": per_bond_cutoff_weights,
+            "per_bond_discarded_weights": per_bond_discarded_weights,
+            "discarded_weight": discarded_weight,
+            "per_bond_discarded_squared_norms": per_bond_discarded_squared_norms,
+            "total_discarded_squared_norm": total_discarded_squared_norm,
+            "source_hilbert_schmidt_norm_squared": (
+                source_hilbert_schmidt_norm_squared
+            ),
+            "relative_hilbert_schmidt_error_squared": discarded_weight,
+            "cutoff_satisfied_by_bond": cutoff_satisfied_by_bond,
+        }
+    )
     return compressed, diagnostics
 
 
@@ -502,11 +705,15 @@ def probe_mpo_compression(
     random_state_count: int = 2,
     random_bond: int = 4,
     seed: int = 0,
+    exact_work_cap: int = 10_000_000,
+    workspace_cap_bytes: int = _DEFAULT_MPO_WORKSPACE_CAP_BYTES,
 ) -> dict[str, object]:
-    """Measure deterministic exact-versus-compressed MPO action errors on MPS probes."""
+    """Measure exact-versus-compressed action errors without forming exact MPO actions."""
     _, _, _, _, npc = _require_tenpy()
     from tenpy.networks.mps import MPS
 
+    if compressed_mpo is None:
+        raise ValueError("compressed_mpo must be feasible before action probing.")
     if exact_mpo.bc != "finite" or compressed_mpo.bc != "finite":
         raise ValueError("Action probes require finite MPOs.")
     if exact_mpo.L != compressed_mpo.L:
@@ -515,10 +722,29 @@ def probe_mpo_compression(
         raise ValueError("random_state_count must be a nonnegative integer.")
     if int(random_state_count) < 0:
         raise ValueError("random_state_count must be a nonnegative integer.")
-    if isinstance(random_bond, bool) or not isinstance(random_bond, Integral) or int(random_bond) < 1:
+    if (
+        isinstance(random_bond, bool)
+        or not isinstance(random_bond, Integral)
+        or int(random_bond) < 1
+    ):
         raise ValueError("random_bond must be a positive integer.")
     if isinstance(seed, bool) or not isinstance(seed, Integral) or int(seed) < 0:
         raise ValueError("seed must be a nonnegative integer.")
+    if (
+        isinstance(exact_work_cap, bool)
+        or not isinstance(exact_work_cap, Integral)
+        or int(exact_work_cap) < 1
+    ):
+        raise ValueError("exact_work_cap must be a positive integer.")
+    if (
+        isinstance(workspace_cap_bytes, bool)
+        or not isinstance(workspace_cap_bytes, Integral)
+        or int(workspace_cap_bytes) < 1
+    ):
+        raise ValueError("workspace_cap_bytes must be a positive integer.")
+    pauli_terms = getattr(exact_mpo, "_agp_pauli_terms", None)
+    if pauli_terms is None:
+        raise ValueError("Exact MPO is missing Pauli-coordinate provenance.")
 
     if product_states is None:
         alternating = tuple("up" if site % 2 == 0 else "down" for site in range(exact_mpo.L))
@@ -532,28 +758,96 @@ def probe_mpo_compression(
     for state in normalized_product_states:
         if len(state) != exact_mpo.L:
             raise ValueError("Each product state must specify one local state per MPO site.")
+        if any(local_state not in ("up", "down") for local_state in state):
+            raise ValueError("Product probes support only computational-basis states up/down.")
 
     probes: list[dict[str, object]] = []
-    states: list[tuple[str, Any]] = [
-        (
-            f"product_{index}",
-            MPS.from_product_state(
-                exact_mpo.sites,
-                state,
-                bc="finite",
-                dtype=np.complex128,
-                unit_cell_width=exact_mpo.L,
-            ),
+    exact_cap = int(exact_work_cap)
+    workspace_cap = int(workspace_cap_bytes)
+    for index, product_state in enumerate(normalized_product_states):
+        estimated_exact_work = len(pauli_terms) * exact_mpo.L
+        estimated_sparse_bytes = max(len(pauli_terms), 1) * 192
+        if estimated_exact_work > exact_cap or estimated_sparse_bytes > workspace_cap:
+            probes.append(
+                _not_feasible_probe(
+                    f"product_{index}",
+                    estimated_exact_work=estimated_exact_work,
+                    required_workspace_bytes=estimated_sparse_bytes,
+                    reason="sparse exact product action exceeds configured cap",
+                )
+            )
+            continue
+        input_bits = tuple(0 if state == "up" else 1 for state in product_state)
+        exact_action = _sparse_pauli_product_action(pauli_terms, input_bits)
+        exact_norm_squared = float(sum(abs(value) ** 2 for value in exact_action.values()))
+        if exact_norm_squared == 0.0:
+            probes.append(
+                {
+                    "name": f"product_{index}",
+                    "kind": "product",
+                    "status": "not_tested",
+                    "action_norm": 0.0,
+                    "relative_action_error": None,
+                    "estimated_exact_work": estimated_exact_work,
+                    "peak_workspace_bytes": estimated_sparse_bytes,
+                }
+            )
+            continue
+        compressed_metrics = _compressed_product_action_metrics(
+            compressed_mpo,
+            input_bits=input_bits,
+            exact_action=exact_action,
+            workspace_cap_bytes=workspace_cap,
         )
-        for index, state in enumerate(normalized_product_states)
-    ]
+        if compressed_metrics["status"] == "not_feasible":
+            probes.append(
+                _not_feasible_probe(
+                    f"product_{index}",
+                    estimated_exact_work=estimated_exact_work,
+                    required_workspace_bytes=int(
+                        compressed_metrics["required_workspace_bytes"]
+                    ),
+                    reason=str(compressed_metrics["resource_reason"]),
+                )
+            )
+            continue
+        probes.append(
+            _action_error_probe(
+                name=f"product_{index}",
+                kind="product",
+                exact_norm_squared=exact_norm_squared,
+                compressed_norm_squared=float(compressed_metrics["compressed_norm_squared"]),
+                cross_overlap=complex(compressed_metrics["cross_overlap"]),
+                estimated_exact_work=estimated_exact_work,
+                peak_workspace_bytes=max(
+                    estimated_sparse_bytes,
+                    int(compressed_metrics["peak_workspace_bytes"]),
+                ),
+            )
+        )
 
     random_generator_state = np.random.get_state()
     maximum_finite_bond = 2 ** (exact_mpo.L // 2)
     effective_random_bond = min(int(random_bond), maximum_finite_bond)
+    estimated_random_work = (
+        len(pauli_terms)
+        * len(pauli_terms)
+        * exact_mpo.L
+        * max(effective_random_bond**3, 1)
+    )
     try:
         np.random.seed(int(seed))
         for index in range(int(random_state_count)):
+            if estimated_random_work > exact_cap:
+                probes.append(
+                    _not_feasible_probe(
+                        f"random_{index}",
+                        estimated_exact_work=estimated_random_work,
+                        required_workspace_bytes=0,
+                        reason="Pauli-pair random-MPS contractions exceed exact_work_cap",
+                    )
+                )
+                continue
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
@@ -568,49 +862,56 @@ def probe_mpo_compression(
                     bc="finite",
                     dtype=np.complex128,
                 )
-            states.append(
-                (
-                    f"random_{index}",
-                    random_state,
+            random_metrics = _random_mps_action_metrics(
+                pauli_terms,
+                compressed_mpo,
+                random_state,
+                npc=npc,
+                workspace_cap_bytes=workspace_cap,
+            )
+            if random_metrics["status"] == "not_feasible":
+                probes.append(
+                    _not_feasible_probe(
+                        f"random_{index}",
+                        estimated_exact_work=estimated_random_work,
+                        required_workspace_bytes=int(
+                            random_metrics["required_workspace_bytes"]
+                        ),
+                        reason=str(random_metrics["resource_reason"]),
+                    )
+                )
+                continue
+            exact_norm_squared = float(random_metrics["exact_norm_squared"])
+            if exact_norm_squared == 0.0:
+                probes.append(
+                    {
+                        "name": f"random_{index}",
+                        "kind": "random_mps",
+                        "status": "not_tested",
+                        "action_norm": 0.0,
+                        "relative_action_error": None,
+                        "estimated_exact_work": estimated_random_work,
+                        "peak_workspace_bytes": int(
+                            random_metrics["peak_workspace_bytes"]
+                        ),
+                    }
+                )
+                continue
+            probes.append(
+                _action_error_probe(
+                    name=f"random_{index}",
+                    kind="random_mps",
+                    exact_norm_squared=exact_norm_squared,
+                    compressed_norm_squared=float(
+                        random_metrics["compressed_norm_squared"]
+                    ),
+                    cross_overlap=complex(random_metrics["cross_overlap"]),
+                    estimated_exact_work=estimated_random_work,
+                    peak_workspace_bytes=int(random_metrics["peak_workspace_bytes"]),
                 )
             )
     finally:
         np.random.set_state(random_generator_state)
-
-    for name, state in states:
-        exact_action = _apply_mpo_action(exact_mpo, state, npc)
-        compressed_action = _apply_mpo_action(compressed_mpo, state, npc)
-        exact_norm_sq = _real_overlap(exact_action, exact_action)
-        if exact_norm_sq == 0.0:
-            probes.append(
-                {
-                    "name": name,
-                    "status": "not_tested",
-                    "action_norm": 0.0,
-                    "relative_action_error": None,
-                }
-            )
-            continue
-        compressed_norm_sq = _real_overlap(compressed_action, compressed_action)
-        cross_overlap = exact_action.overlap(compressed_action, ignore_form=True)
-        difference_norm_sq = exact_norm_sq + compressed_norm_sq - 2.0 * float(
-            np.real(cross_overlap)
-        )
-        roundoff_scale = max(exact_norm_sq, compressed_norm_sq, 1.0)
-        if difference_norm_sq < 0.0 and abs(difference_norm_sq) <= (
-            256.0 * np.finfo(np.float64).eps * roundoff_scale
-        ):
-            difference_norm_sq = 0.0
-        if difference_norm_sq < 0.0:
-            raise ValueError("MPS action-overlap contraction produced a negative squared norm.")
-        probes.append(
-            {
-                "name": name,
-                "status": "tested",
-                "action_norm": float(np.sqrt(exact_norm_sq)),
-                "relative_action_error": float(np.sqrt(difference_norm_sq / exact_norm_sq)),
-            }
-        )
 
     tested_errors = [
         float(probe["relative_action_error"])
@@ -623,14 +924,291 @@ def probe_mpo_compression(
         "random_state_count": int(random_state_count),
         "random_bond": int(random_bond),
         "effective_random_bond": effective_random_bond,
+        "exact_work_cap": exact_cap,
+        "workspace_cap_bytes": workspace_cap,
+        "peak_workspace_bytes": max(
+            (int(probe.get("peak_workspace_bytes", 0)) for probe in probes),
+            default=0,
+        ),
         "tested_probes": len(tested_errors),
-        "not_tested_probes": len(probes) - len(tested_errors),
+        "not_tested_probes": sum(probe["status"] == "not_tested" for probe in probes),
+        "not_feasible_probes": sum(
+            probe["status"] == "not_feasible" for probe in probes
+        ),
         "max_relative_action_error": max(tested_errors) if tested_errors else None,
         "mean_relative_action_error": (
             float(np.mean(tested_errors)) if tested_errors else None
         ),
         "probes": probes,
     }
+
+
+def _sparse_pauli_product_action(
+    pauli_terms: Sequence[tuple[str, complex]],
+    input_bits: Sequence[int],
+) -> dict[int, complex]:
+    amplitudes: dict[int, complex] = {}
+    for label, coefficient in pauli_terms:
+        output = 0
+        phase = 1.0 + 0.0j
+        for symbol, bit in zip(label, input_bits):
+            output_bit = bit
+            if symbol == "X":
+                output_bit = 1 - bit
+            elif symbol == "Y":
+                output_bit = 1 - bit
+                phase *= 1.0j if bit == 0 else -1.0j
+            elif symbol == "Z" and bit == 1:
+                phase *= -1.0
+            output = (output << 1) | output_bit
+        amplitudes[output] = amplitudes.get(output, 0.0j) + coefficient * phase
+    return {state: amplitude for state, amplitude in amplitudes.items() if amplitude != 0.0j}
+
+
+def _compressed_product_action_metrics(
+    mpo: Any,
+    *,
+    input_bits: Sequence[int],
+    exact_action: dict[int, complex],
+    workspace_cap_bytes: int,
+) -> dict[str, object]:
+    output_states = np.asarray(sorted(exact_action), dtype=np.uint64)
+    exact_amplitudes = np.asarray(
+        [exact_action[int(state)] for state in output_states], dtype=np.complex128
+    )
+    maximum_bond = max(mpo.chi)
+    maximum_local_bytes = max(
+        mpo.chi[site] * mpo.chi[site + 1] * 4 * _COMPLEX_BYTES
+        for site in range(mpo.L)
+    )
+    query_bytes = max(output_states.size, 1) * maximum_bond * _COMPLEX_BYTES
+    transfer_bytes = maximum_bond * maximum_bond * _COMPLEX_BYTES
+    required_workspace = maximum_local_bytes + 2 * query_bytes + 4 * transfer_bytes
+    if required_workspace > workspace_cap_bytes:
+        return {
+            "status": "not_feasible",
+            "required_workspace_bytes": required_workspace,
+            "resource_reason": "compressed product-state transfer exceeds workspace cap",
+        }
+
+    left_boundary = mpo.get_IdL(0)
+    right_boundary = mpo.get_IdR(mpo.L - 1)
+    if left_boundary is None or right_boundary is None:
+        raise ValueError("Compressed finite MPO must expose both boundary indices.")
+    query = np.zeros((output_states.size, mpo.chi[0]), dtype=np.complex128)
+    query[:, int(left_boundary)] = 1.0
+    density = np.zeros((mpo.chi[0], mpo.chi[0]), dtype=np.complex128)
+    density[int(left_boundary), int(left_boundary)] = 1.0
+    peak_workspace = query.nbytes + density.nbytes
+
+    for site, input_bit in enumerate(input_bits):
+        tensor = _mpo_tensor_ndarray(mpo, site)
+        next_query = np.zeros((output_states.size, tensor.shape[1]), dtype=np.complex128)
+        next_density = np.zeros((tensor.shape[1], tensor.shape[1]), dtype=np.complex128)
+        output_bits = (output_states >> np.uint64(mpo.L - site - 1)) & np.uint64(1)
+        for output_bit in (0, 1):
+            local = tensor[:, :, output_bit, input_bit]
+            selected = output_bits == output_bit
+            if np.any(selected):
+                next_query[selected] = query[selected] @ local
+            next_density += local.T @ density @ local.conj()
+        peak_workspace = max(
+            peak_workspace,
+            tensor.nbytes
+            + query.nbytes
+            + next_query.nbytes
+            + density.nbytes
+            + next_density.nbytes,
+        )
+        query = next_query
+        density = next_density
+
+    compressed_amplitudes = query[:, int(right_boundary)]
+    compressed_norm_squared = float(np.real(density[int(right_boundary), int(right_boundary)]))
+    return {
+        "status": "ok",
+        "compressed_norm_squared": _nonnegative_roundoff(
+            compressed_norm_squared, scale=max(abs(compressed_norm_squared), 1.0)
+        ),
+        "cross_overlap": np.vdot(exact_amplitudes, compressed_amplitudes),
+        "peak_workspace_bytes": max(peak_workspace, required_workspace),
+    }
+
+
+def _random_mps_action_metrics(
+    pauli_terms: Sequence[tuple[str, complex]],
+    compressed_mpo: Any,
+    state: Any,
+    *,
+    npc: Any,
+    workspace_cap_bytes: int,
+) -> dict[str, object]:
+    state_bonds = [1] + list(state.chi) + [1]
+    action_bonds = [
+        state_bond * mpo_bond
+        for state_bond, mpo_bond in zip(state_bonds, compressed_mpo.chi)
+    ]
+    compressed_action_bytes = sum(
+        action_bonds[site] * 2 * action_bonds[site + 1] * _COMPLEX_BYTES
+        for site in range(compressed_mpo.L)
+    )
+    pauli_state_bytes = sum(
+        state_bonds[site] * 2 * state_bonds[site + 1] * _COMPLEX_BYTES
+        for site in range(compressed_mpo.L)
+    )
+    required_workspace = 3 * compressed_action_bytes + 2 * pauli_state_bytes
+    if required_workspace > workspace_cap_bytes:
+        return {
+            "status": "not_feasible",
+            "required_workspace_bytes": required_workspace,
+            "resource_reason": "compressed random-MPS action exceeds workspace cap",
+        }
+
+    exact_norm_squared = 0.0j
+    for left_label, left_coefficient in pauli_terms:
+        for right_label, right_coefficient in pauli_terms:
+            phase, product_label = _multiply_pauli_labels(left_label, right_label)
+            expectation = _mps_pauli_expectation(state, product_label)
+            exact_norm_squared += (
+                left_coefficient.conjugate()
+                * right_coefficient
+                * phase
+                * expectation
+            )
+    exact_norm_real = _nonnegative_roundoff(
+        float(np.real(exact_norm_squared)),
+        scale=max(float(abs(exact_norm_squared)), 1.0),
+    )
+    if exact_norm_real == 0.0:
+        return {
+            "status": "ok",
+            "exact_norm_squared": 0.0,
+            "compressed_norm_squared": 0.0,
+            "cross_overlap": 0.0j,
+            "peak_workspace_bytes": required_workspace,
+        }
+
+    compressed_action = _apply_mpo_action(compressed_mpo, state, npc)
+    compressed_norm_squared = _real_overlap(compressed_action, compressed_action)
+    cross_overlap = 0.0j
+    for label, coefficient in pauli_terms:
+        pauli_state = _apply_pauli_string(state, label)
+        cross_overlap += coefficient.conjugate() * pauli_state.overlap(
+            compressed_action, ignore_form=True
+        )
+    return {
+        "status": "ok",
+        "exact_norm_squared": exact_norm_real,
+        "compressed_norm_squared": compressed_norm_squared,
+        "cross_overlap": cross_overlap,
+        "peak_workspace_bytes": required_workspace,
+    }
+
+
+def _action_error_probe(
+    *,
+    name: str,
+    kind: str,
+    exact_norm_squared: float,
+    compressed_norm_squared: float,
+    cross_overlap: complex,
+    estimated_exact_work: int,
+    peak_workspace_bytes: int,
+) -> dict[str, object]:
+    difference_norm_squared = (
+        exact_norm_squared + compressed_norm_squared - 2.0 * float(np.real(cross_overlap))
+    )
+    difference_norm_squared = _nonnegative_roundoff(
+        difference_norm_squared,
+        scale=max(exact_norm_squared, compressed_norm_squared, 1.0),
+    )
+    return {
+        "name": name,
+        "kind": kind,
+        "status": "tested",
+        "action_norm": float(np.sqrt(exact_norm_squared)),
+        "relative_action_error": float(
+            np.sqrt(difference_norm_squared / exact_norm_squared)
+        ),
+        "estimated_exact_work": int(estimated_exact_work),
+        "peak_workspace_bytes": int(peak_workspace_bytes),
+    }
+
+
+def _not_feasible_probe(
+    name: str,
+    *,
+    estimated_exact_work: int,
+    required_workspace_bytes: int,
+    reason: str,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "status": "not_feasible",
+        "relative_action_error": None,
+        "estimated_exact_work": int(estimated_exact_work),
+        "required_workspace_bytes": int(required_workspace_bytes),
+        "peak_workspace_bytes": 0,
+        "resource_reason": reason,
+    }
+
+
+def _mpo_tensor_ndarray(mpo: Any, site: int) -> np.ndarray:
+    tensor = mpo.get_W(site)
+    labels = tensor.get_leg_labels()
+    axes = [labels.index(label) for label in ("wL", "wR", "p", "p*")]
+    return np.transpose(tensor.to_ndarray(), axes)
+
+
+def _multiply_pauli_labels(left: str, right: str) -> tuple[complex, str]:
+    multiplication = {
+        ("I", "I"): (1.0, "I"),
+        ("I", "X"): (1.0, "X"),
+        ("I", "Y"): (1.0, "Y"),
+        ("I", "Z"): (1.0, "Z"),
+        ("X", "I"): (1.0, "X"),
+        ("Y", "I"): (1.0, "Y"),
+        ("Z", "I"): (1.0, "Z"),
+        ("X", "X"): (1.0, "I"),
+        ("Y", "Y"): (1.0, "I"),
+        ("Z", "Z"): (1.0, "I"),
+        ("X", "Y"): (1.0j, "Z"),
+        ("Y", "X"): (-1.0j, "Z"),
+        ("Y", "Z"): (1.0j, "X"),
+        ("Z", "Y"): (-1.0j, "X"),
+        ("Z", "X"): (1.0j, "Y"),
+        ("X", "Z"): (-1.0j, "Y"),
+    }
+    phase = 1.0 + 0.0j
+    symbols = []
+    for left_symbol, right_symbol in zip(left, right):
+        local_phase, symbol = multiplication[(left_symbol, right_symbol)]
+        phase *= local_phase
+        symbols.append(symbol)
+    return phase, "".join(symbols)
+
+
+def _mps_pauli_expectation(state: Any, label: str) -> complex:
+    term = [(symbol, site) for site, symbol in enumerate(label) if symbol != "I"]
+    if not term:
+        return complex(abs(state.norm) ** 2)
+    return complex(state.expectation_value_term(term)) * abs(state.norm) ** 2
+
+
+def _apply_pauli_string(state: Any, label: str) -> Any:
+    result = state.copy()
+    for site, symbol in enumerate(label):
+        if symbol != "I":
+            result.apply_local_op(site, symbol, unitary=True)
+    return result
+
+
+def _nonnegative_roundoff(value: float, *, scale: float) -> float:
+    if value < 0.0 and abs(value) <= 512.0 * np.finfo(np.float64).eps * scale:
+        return 0.0
+    if value < 0.0:
+        raise ValueError("Action contraction produced a negative squared norm.")
+    return value
 
 
 def dense_pauli_sum(terms: Sequence[tuple[str, complex]]) -> np.ndarray:
@@ -758,20 +1336,54 @@ def _mpo_from_effective_tensors(
     )
 
 
-def _right_canonicalize_mpo_tensors(tensors: list[np.ndarray]) -> None:
-    for site in range(len(tensors) - 1, 0, -1):
-        tensor = tensors[site]
-        left_dim, right_dim, physical_out, physical_in = tensor.shape
-        matrix = tensor.transpose(0, 2, 3, 1).reshape(
-            left_dim, physical_out * physical_in * right_dim
-        )
-        right_vectors, transfer = np.linalg.qr(matrix.T, mode="reduced")
-        canonical_left_dim = right_vectors.shape[1]
-        tensors[site] = right_vectors.T.reshape(
-            canonical_left_dim, physical_out, physical_in, right_dim
-        ).transpose(0, 3, 1, 2)
-        previous = np.tensordot(tensors[site - 1], transfer.T, axes=(1, 0))
-        tensors[site - 1] = previous.transpose(0, 3, 1, 2)
+def _mpo_from_pauli_cores(
+    MPO: Any,
+    npc: Any,
+    *,
+    sites: Sequence[Any],
+    cores: Sequence[np.ndarray],
+) -> Any:
+    pauli_matrices = np.asarray(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[0.0, 1.0], [1.0, 0.0]],
+            [[0.0, -1.0j], [1.0j, 0.0]],
+            [[1.0, 0.0], [0.0, -1.0]],
+        ],
+        dtype=np.complex128,
+    )
+    tensors = [
+        np.tensordot(core, pauli_matrices, axes=(1, 0))
+        for core in cores
+    ]
+    return _mpo_from_effective_tensors(MPO, npc, sites=sites, tensors=tensors)
+
+
+def _encode_pauli_label(label: str) -> int:
+    encoded = 0
+    for symbol in label:
+        encoded = (encoded << 2) | _PAULI_INDEX[symbol]
+    return encoded
+
+
+def _compression_not_feasible(
+    diagnostics: dict[str, object],
+    *,
+    required_workspace_bytes: int,
+    peak_workspace_bytes: int,
+    failed_bond: int | None,
+    reason: str,
+) -> tuple[None, dict[str, object]]:
+    diagnostics.update(
+        {
+            "status": "not_feasible",
+            "required_workspace_bytes": int(required_workspace_bytes),
+            "peak_workspace_bytes": int(peak_workspace_bytes),
+            "failed_bond": failed_bond,
+            "resource_reason": reason,
+        }
+    )
+    return None, diagnostics
 
 
 def _svd_retained_rank(
