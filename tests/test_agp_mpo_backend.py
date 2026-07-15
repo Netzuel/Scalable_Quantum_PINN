@@ -46,6 +46,165 @@ def _base4_pauli_label(index: int, n_qubits: int) -> str:
     return "".join(reversed(encoded))
 
 
+_TEST_PAULI = {
+    "I": np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.complex128),
+    "X": np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128),
+    "Y": np.asarray([[0.0, -1.0j], [1.0j, 0.0]], dtype=np.complex128),
+    "Z": np.asarray([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128),
+}
+
+
+def _test_order_label(label: str, order: tuple[int, ...]) -> str:
+    return "".join(label[index] for index in order)
+
+
+def _test_dense_pauli(label: str) -> np.ndarray:
+    matrix = np.asarray([[1.0]], dtype=np.complex128)
+    for symbol in label:
+        matrix = np.kron(matrix, _TEST_PAULI[symbol])
+    return matrix
+
+
+def _test_dense_sum(
+    terms: list[tuple[str, complex]], order: tuple[int, ...]
+) -> np.ndarray:
+    dimension = 2 ** len(order)
+    matrix = np.zeros((dimension, dimension), dtype=np.complex128)
+    for label, coefficient in terms:
+        matrix += complex(coefficient) * _test_dense_pauli(_test_order_label(label, order))
+    return matrix
+
+
+def _test_product_state(initial_state: tuple[object, ...], order: tuple[int, ...]) -> np.ndarray:
+    vectors: list[np.ndarray] = []
+    for index in order:
+        value = initial_state[index]
+        if isinstance(value, str) and value in {"0", "up"}:
+            vectors.append(np.asarray([1.0, 0.0], dtype=np.complex128))
+        elif isinstance(value, str) and value in {"1", "down"}:
+            vectors.append(np.asarray([0.0, 1.0], dtype=np.complex128))
+        elif isinstance(value, str) and value == "+":
+            vectors.append(np.asarray([1.0, 1.0], dtype=np.complex128) / np.sqrt(2.0))
+        elif isinstance(value, str) and value == "-":
+            vectors.append(np.asarray([1.0, -1.0], dtype=np.complex128) / np.sqrt(2.0))
+        else:
+            vector = np.asarray(value, dtype=np.complex128)
+            vectors.append(vector / np.linalg.norm(vector))
+    state = np.asarray([1.0], dtype=np.complex128)
+    for vector in vectors:
+        state = np.kron(state, vector)
+    return state
+
+
+def _test_mps_vector(state: object) -> np.ndarray:
+    theta = state.get_theta(0, int(state.L)).to_ndarray()
+    return complex(state.norm) * np.asarray(theta, dtype=np.complex128)[0, ..., 0].reshape(-1)
+
+
+def _test_default_schedule(tau: float, total_time: float) -> tuple[float, float]:
+    return (
+        float(np.sin(0.5 * np.pi * tau) ** 2),
+        float(0.5 * np.pi / total_time * np.sin(np.pi * tau)),
+    )
+
+
+def _test_mode_values(factorization: object | None, tau: float) -> np.ndarray:
+    if factorization is None:
+        return np.empty(0, dtype=np.float64)
+    return np.asarray(
+        [
+            np.interp(tau, factorization.tau, factorization.temporal_factors[:, mode])
+            for mode in range(factorization.rank)
+        ],
+        dtype=np.float64,
+    )
+
+
+def _test_learned_hamiltonian(
+    h0_terms: list[tuple[str, complex]],
+    h1_terms: list[tuple[str, complex]],
+    cd_labels: tuple[str, ...],
+    factorization: object,
+    tau: float,
+    total_time: float,
+    order: tuple[int, ...],
+    schedule: object | None,
+) -> np.ndarray:
+    schedule_function = _test_default_schedule if schedule is None else schedule
+    lam, _ = schedule_function(tau, total_time)
+    hamiltonian = (1.0 - lam) * _test_dense_sum(h0_terms, order)
+    hamiltonian += lam * _test_dense_sum(h1_terms, order)
+    mode_values = _test_mode_values(factorization, tau)
+    for column, label in enumerate(cd_labels):
+        coefficient = np.dot(mode_values, factorization.static_modes[:, column])
+        hamiltonian += coefficient * _test_dense_pauli(_test_order_label(label, order))
+    return hamiltonian
+
+
+def _test_nested_l1_hamiltonian(
+    h0_terms: list[tuple[str, complex]],
+    h1_terms: list[tuple[str, complex]],
+    tau: float,
+    total_time: float,
+    order: tuple[int, ...],
+    schedule: object | None,
+) -> np.ndarray:
+    schedule_function = _test_default_schedule if schedule is None else schedule
+    lam, dlam_dt = schedule_function(tau, total_time)
+    h0 = _test_dense_sum(h0_terms, order)
+    h1 = _test_dense_sum(h1_terms, order)
+    h_ad = (1.0 - lam) * h0 + lam * h1
+    d_h = h1 - h0
+    candidate = 1.0j * (h_ad @ d_h - d_h @ h_ad)
+    direction = candidate @ h_ad - h_ad @ candidate
+    denominator = float(np.vdot(direction, direction).real)
+    if denominator <= 1.0e-24:
+        return h_ad
+    alpha = float(np.real(np.vdot(direction, 1.0j * d_h)) / denominator)
+    return h_ad + dlam_dt * alpha * candidate
+
+
+def _test_dense_midpoint_oracle(
+    *,
+    h0_terms: list[tuple[str, complex]],
+    h1_terms: list[tuple[str, complex]],
+    total_time: float,
+    steps: int,
+    order: tuple[int, ...],
+    initial_state: tuple[object, ...],
+    protocol: str,
+    cd_labels: tuple[str, ...] = (),
+    factorization: object | None = None,
+    schedule: object | None = None,
+) -> np.ndarray:
+    if len(order) > 4:
+        raise ValueError("test oracle is limited to at most four qubits")
+    state = _test_product_state(initial_state, order)
+    for step in range(steps):
+        tau = (step + 0.5) / steps
+        if protocol == "no_cd":
+            schedule_function = _test_default_schedule if schedule is None else schedule
+            lam, _ = schedule_function(tau, total_time)
+            hamiltonian = (1.0 - lam) * _test_dense_sum(h0_terms, order)
+            hamiltonian += lam * _test_dense_sum(h1_terms, order)
+        elif protocol == "learned":
+            assert factorization is not None
+            hamiltonian = _test_learned_hamiltonian(
+                h0_terms, h1_terms, cd_labels, factorization, tau, total_time, order, schedule
+            )
+        elif protocol == "nested_l1":
+            hamiltonian = _test_nested_l1_hamiltonian(
+                h0_terms, h1_terms, tau, total_time, order, schedule
+            )
+        else:
+            raise ValueError(f"unsupported test protocol {protocol!r}")
+        eigenvalues, eigenvectors = np.linalg.eigh(hamiltonian)
+        state = (eigenvectors * np.exp(-1.0j * total_time / steps * eigenvalues)) @ (
+            eigenvectors.conj().T @ state
+        )
+    return state
+
+
 class OptionalDependencyTests(unittest.TestCase):
     def test_tensor_network_extra_pins_mpo_dependencies(self) -> None:
         pyproject = tomllib.loads(
@@ -1034,18 +1193,21 @@ class TDVPEvolutionTests(unittest.TestCase):
             "mpo_cutoff": 1.0e-13,
         }
 
-    def test_tdvp_no_cd_matches_dense_midpoint_evolution(self) -> None:
+    def test_tdvp_no_cd_matches_independent_dense_midpoint_oracle(self) -> None:
         settings = self._single_qubit_settings()
         state, diagnostics = mpo_backend.evolve_protocol_tdvp(**settings)
-        reference = mpo_backend.dense_midpoint_evolution(
-            settings["h0_terms"],
-            settings["h1_terms"],
+        reference = _test_dense_midpoint_oracle(
+            h0_terms=settings["h0_terms"],
+            h1_terms=settings["h1_terms"],
             total_time=1.0,
             steps=4096,
+            order=(0,),
+            initial_state=("+",),
+            protocol="no_cd",
         )
 
         self.assertGreater(
-            abs(mpo_backend.state_overlap_dense(state, reference)) ** 2,
+            abs(np.vdot(_test_mps_vector(state), reference)) ** 2,
             1.0 - 1.0e-7,
         )
         self.assertEqual(diagnostics["steps"], 64)
@@ -1093,7 +1255,7 @@ class TDVPEvolutionTests(unittest.TestCase):
             )
         )
 
-    def test_expm_mpo_matches_tdvp_on_one_and_two_qubits(self) -> None:
+    def test_expm_mpo_matches_tdvp_only_when_operator_equivalence_is_lossless(self) -> None:
         cases = (
             self._single_qubit_settings(),
             {
@@ -1124,8 +1286,10 @@ class TDVPEvolutionTests(unittest.TestCase):
                 self.assertEqual(tdvp_diagnostics["status"], "ok")
                 self.assertEqual(expm_diagnostics["status"], "ok")
                 self.assertEqual(expm_diagnostics["integrator"], "expm_mpo")
+                self.assertEqual(tdvp_diagnostics["operator_equivalence_status"], "pass")
+                self.assertEqual(expm_diagnostics["operator_equivalence_status"], "pass")
 
-    def test_learned_and_nested_l1_paths_match_dense_midpoint_evolution(self) -> None:
+    def test_learned_and_nested_l1_paths_match_independent_dense_oracles(self) -> None:
         h0 = [("XI", -1.0), ("IX", -0.8)]
         h1 = [("ZI", -0.7), ("IZ", -1.1), ("ZZ", 0.15)]
         tau = np.linspace(0.0, 1.0, 65)
@@ -1155,34 +1319,38 @@ class TDVPEvolutionTests(unittest.TestCase):
             cd_factorization=factorization,
             protocol="learned",
         )
-        learned_reference = mpo_backend.dense_midpoint_evolution(
-            h0,
-            h1,
+        learned_reference = _test_dense_midpoint_oracle(
+            h0_terms=h0,
+            h1_terms=h1,
             total_time=0.6,
             steps=4096,
             cd_labels=("YI", "IY"),
-            cd_factorization=factorization,
             protocol="learned",
+            factorization=factorization,
+            order=(0, 1),
+            initial_state=("+", "+"),
         )
         nested_state, nested_diagnostics = mpo_backend.evolve_protocol_tdvp(
             **common,
             cd_factorization=None,
             protocol="nested_l1",
         )
-        nested_reference = mpo_backend.dense_midpoint_evolution(
-            h0,
-            h1,
+        nested_reference = _test_dense_midpoint_oracle(
+            h0_terms=h0,
+            h1_terms=h1,
             total_time=0.6,
             steps=4096,
             protocol="nested_l1",
+            order=(0, 1),
+            initial_state=("+", "+"),
         )
 
         self.assertGreater(
-            abs(mpo_backend.state_overlap_dense(learned_state, learned_reference)) ** 2,
+            abs(np.vdot(_test_mps_vector(learned_state), learned_reference)) ** 2,
             1.0 - 2.0e-6,
         )
         self.assertGreater(
-            abs(mpo_backend.state_overlap_dense(nested_state, nested_reference)) ** 2,
+            abs(np.vdot(_test_mps_vector(nested_state), nested_reference)) ** 2,
             1.0 - 2.0e-6,
         )
         self.assertEqual(learned_diagnostics["evaluated_cd_terms"], 2)
@@ -1222,6 +1390,150 @@ class TDVPEvolutionTests(unittest.TestCase):
         self.assertEqual(diagnostics["ground_bitstring_chain"], "01")
         self.assertEqual(getattr(state, "_agp_qubit_order"), (1, 0))
         self.assertEqual(diagnostics["ground_fidelity_status"], "ok")
+
+        reference = _test_dense_midpoint_oracle(
+            h0_terms=[("XI", -1.0), ("IZ", -0.25)],
+            h1_terms=[("ZI", -0.8), ("IZ", 0.4)],
+            total_time=0.2,
+            steps=4,
+            order=(1, 0),
+            initial_state=("0", "+"),
+            protocol="no_cd",
+            schedule=lambda tau, total_time: (tau, 1.0 / total_time),
+        )
+        self.assertGreater(abs(np.vdot(_test_mps_vector(state), reference)) ** 2, 1.0 - 2.0e-6)
+
+    def test_ground_fidelity_uses_canonical_overlap_for_learned_cd_and_nontrivial_order(self) -> None:
+        h0 = [("XI", -1.0), ("IX", -0.6), ("ZZ", 0.3)]
+        h1 = [("ZI", -0.7), ("IZ", -1.1), ("XX", 0.2)]
+        tau = np.linspace(0.0, 1.0, 33)
+        factorization = factor_direct_cd_coefficients(
+            tau,
+            np.column_stack((0.2 * np.sin(np.pi * tau), -0.1 * np.sin(2.0 * np.pi * tau))),
+            retained_norm=1.0,
+        )
+        state, diagnostics = mpo_backend.evolve_protocol_tdvp(
+            h0_terms=h0,
+            h1_terms=h1,
+            cd_factorization=factorization,
+            cd_labels=("YI", "IY"),
+            protocol="learned",
+            total_time=0.3,
+            steps=32,
+            order=(1, 0),
+            initial_state=("+", "+"),
+            ground_bitstring="10",
+            mps_max_bond=8,
+            mps_cutoff=1.0e-13,
+            mpo_max_bond=16,
+            mpo_cutoff=1.0e-13,
+        )
+        reference = _test_dense_midpoint_oracle(
+            h0_terms=h0,
+            h1_terms=h1,
+            total_time=0.3,
+            steps=32,
+            order=(1, 0),
+            initial_state=("+", "+"),
+            protocol="learned",
+            cd_labels=("YI", "IY"),
+            factorization=factorization,
+        )
+        target = _test_product_state(("1", "0"), (1, 0))
+        dense_fidelity = float(abs(np.vdot(target, reference)) ** 2)
+
+        self.assertAlmostEqual(diagnostics["ground_fidelity"], dense_fidelity, places=6)
+        self.assertGreater(abs(np.vdot(_test_mps_vector(state), reference)) ** 2, 1.0 - 2.0e-6)
+
+    def test_lossy_mpo_comparison_is_not_presented_as_integrator_agreement(self) -> None:
+        labels = tuple(_base4_pauli_label(index, 3) for index in range(1, 16))
+        terms = [(label, 0.1 + 0.03 * index) for index, label in enumerate(labels)]
+        settings = {
+            "h0_terms": terms,
+            "h1_terms": [(label, -coefficient) for label, coefficient in terms],
+            "cd_factorization": None,
+            "total_time": 0.2,
+            "steps": 2,
+            "mps_max_bond": 8,
+            "mps_cutoff": 1.0e-13,
+            "mpo_max_bond": 1,
+            "mpo_cutoff": 0.0,
+        }
+        _, tdvp_diagnostics = mpo_backend.evolve_protocol_tdvp(**settings)
+        _, expm_diagnostics = mpo_backend.evolve_protocol_expm_mpo(**settings)
+
+        self.assertEqual(tdvp_diagnostics["operator_equivalence_status"], "not_comparable")
+        self.assertEqual(expm_diagnostics["operator_equivalence_status"], "not_comparable")
+
+    def test_dynamic_resource_cap_preflights_block_sum_and_expm_midpoints(self) -> None:
+        labels = tuple(_base4_pauli_label(1 + 15 * index, 4) for index in range(16))
+        samples = np.zeros((18, 16), dtype=np.float64)
+        samples[1:17] = np.eye(16)
+        factorization = factor_direct_cd_coefficients(
+            np.linspace(0.0, 1.0, 18), samples, retained_norm=1.0
+        )
+        h0 = [(label, 0.1 + 0.01 * index) for index, label in enumerate(labels)]
+        h1 = [(label, -0.2 - 0.01 * index) for index, label in enumerate(labels)]
+        common = {
+            "h0_terms": h0,
+            "h1_terms": h1,
+            "cd_factorization": factorization,
+            "cd_labels": labels,
+            "protocol": "learned",
+            "total_time": 0.2,
+            "steps": 2,
+            "mps_max_bond": 8,
+            "mps_cutoff": 1.0e-13,
+            "mpo_max_bond": 16,
+            "mpo_cutoff": 0.0,
+            "mpo_workspace_cap_bytes": 2 * 1024 * 1024,
+        }
+        for evolve in (mpo_backend.evolve_protocol_tdvp, mpo_backend.evolve_protocol_expm_mpo):
+            with self.subTest(integrator=evolve.__name__):
+                _, diagnostics = evolve(**common)
+                self.assertEqual(diagnostics["status"], "not_feasible")
+                self.assertEqual(diagnostics["completed_steps"], 0)
+                self.assertEqual(diagnostics["resource_statuses"]["dynamic_mpo_assembly"], "not_feasible")
+                plan = diagnostics["dynamic_mpo_workspace"]
+                self.assertGreater(plan["required_workspace_bytes"], common["mpo_workspace_cap_bytes"])
+                if evolve is mpo_backend.evolve_protocol_tdvp:
+                    self.assertIn("output_tensor_shapes", plan)
+                    self.assertIn("copy_and_conversion_bytes", plan)
+                else:
+                    self.assertIn("worst_case_virtual_dimension", plan)
+                    self.assertIn("copy_and_conversion_bytes", plan)
+
+    def test_per_step_truncation_and_physical_norm_drift_are_reported(self) -> None:
+        settings = {
+            "h0_terms": [("XI", -1.0), ("IX", -1.0)],
+            "h1_terms": [("ZZ", -2.0), ("XX", 0.7)],
+            "cd_factorization": None,
+            "total_time": 0.4,
+            "steps": 4,
+            "mps_max_bond": 1,
+            "mps_cutoff": 1.0e-15,
+            "mpo_max_bond": 16,
+            "mpo_cutoff": 0.0,
+        }
+        for evolve in (mpo_backend.evolve_protocol_tdvp, mpo_backend.evolve_protocol_expm_mpo):
+            with self.subTest(integrator=evolve.__name__):
+                state, diagnostics = evolve(**settings)
+                self.assertGreater(diagnostics["truncation_error"], 0.0)
+                self.assertEqual(len(diagnostics["truncation_error_by_step"]), 4)
+                self.assertAlmostEqual(
+                    diagnostics["norm_drift"],
+                    abs(float(np.vdot(_test_mps_vector(state), _test_mps_vector(state)).real) - 1.0),
+                    places=12,
+                )
+                for key in (
+                    "static_mpo_discarded_weight",
+                    "static_mpo_action_statuses",
+                    "static_mpo_error_statuses",
+                    "dynamic_mpo_discarded_weight",
+                    "dynamic_mpo_action_status",
+                    "dynamic_mpo_error_status",
+                ):
+                    self.assertIn(key, diagnostics)
 
     def test_resource_failures_are_explicit_and_do_not_fallback(self) -> None:
         state, diagnostics = mpo_backend.evolve_protocol_tdvp(

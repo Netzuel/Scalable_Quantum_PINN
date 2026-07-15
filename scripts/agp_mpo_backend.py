@@ -1989,6 +1989,98 @@ def state_overlap_dense(state: Any, dense_state: np.ndarray) -> complex:
     return np.vdot(vector, reference)
 
 
+class _DynamicMPOResourceError(MemoryError):
+    """Raised before a dynamic MPO allocation whose bounded workspace exceeds the cap."""
+
+    def __init__(self, plan: dict[str, object]):
+        super().__init__(str(plan["reason"]))
+        self.plan = plan
+
+
+def _static_mpo_evolution_diagnostics(prepared: PreparedTDVPOperators) -> dict[str, object]:
+    compression = prepared.diagnostics.get("static_mpo_compression", {})
+    components: list[tuple[str, Any, dict[str, object] | None]] = []
+    for name, mpo in (("h0", prepared.h0_mpo), ("h1", prepared.h1_mpo)):
+        item = compression.get(name, {}) if isinstance(compression, dict) else {}
+        components.append((name, mpo, item.get("compression") if isinstance(item, dict) else None))
+    mode_items = compression.get("cd_modes", []) if isinstance(compression, dict) else []
+    for index, mpo in enumerate(prepared.cd_mode_mpos):
+        item = mode_items[index] if index < len(mode_items) else {}
+        components.append((f"cd_mode_{index}", mpo, item.get("compression") if isinstance(item, dict) else None))
+
+    discarded_weight = 0.0
+    action_statuses: dict[str, str] = {}
+    error_statuses: dict[str, str] = {}
+    equivalence_components: dict[str, dict[str, object]] = {}
+    for name, mpo, item in components:
+        if mpo is None or not isinstance(item, dict):
+            action_statuses[name] = "not_tested"
+            error_statuses[name] = "not_feasible"
+            equivalence_components[name] = {"status": "not_tested"}
+            continue
+        weight = item.get("discarded_weight")
+        if weight is None:
+            action_statuses[name] = "not_tested"
+            error_statuses[name] = "not_tested"
+            equivalence_components[name] = {"status": "not_tested"}
+            continue
+        discarded_weight += float(weight)
+        certificate = _exact_identity_certificate_status(
+            mpo, getattr(mpo, "_agp_pauli_terms", ())
+        )
+        action_statuses[name] = "not_tested"
+        if certificate == "verified" and float(weight) == 0.0:
+            error_statuses[name] = "exact_identity_verified"
+            equivalence_components[name] = {
+                "status": "pass",
+                "discarded_weight": float(weight),
+                "exact_identity_certificate_status": certificate,
+            }
+        else:
+            error_statuses[name] = "lossy_or_unverified"
+            equivalence_components[name] = {
+                "status": "not_comparable",
+                "discarded_weight": float(weight),
+                "exact_identity_certificate_status": certificate,
+            }
+
+    status = (
+        "pass"
+        if equivalence_components
+        and all(item["status"] == "pass" for item in equivalence_components.values())
+        else "not_comparable"
+    )
+    return {
+        "static_mpo_discarded_weight": float(discarded_weight),
+        "static_mpo_action_statuses": action_statuses,
+        "static_mpo_error_statuses": error_statuses,
+        "operator_equivalence_status": status,
+        "operator_equivalence": {
+            "status": status,
+            "basis": "exact ExpMPO Pauli graph versus compressed TDVP block-sum components",
+            "components": equivalence_components,
+        },
+    }
+
+
+def _canonical_mps_overlap(left: Any, right: Any) -> complex:
+    """Contract finite MPS copies after restoring TeNPy's canonical form metadata."""
+    if int(left.L) == 1 and int(right.L) == 1:
+        return complex(left.overlap(right))
+    left_canonical = left.copy()
+    right_canonical = right.copy()
+    left_canonical.canonical_form()
+    right_canonical.canonical_form()
+    return complex(left_canonical.overlap(right_canonical))
+
+
+def _physical_mps_norm_squared(state: Any) -> float:
+    overlap = _canonical_mps_overlap(state, state)
+    if abs(overlap.imag) > 1.0e-9 or overlap.real < -1.0e-12:
+        raise ValueError("MPS self-overlap is not a nonnegative real physical norm.")
+    return float(max(overlap.real, 0.0))
+
+
 def _require_tenpy() -> tuple[Any, Any, Any, Any, Any]:
     try:
         from tenpy.linalg import np_conserved as npc
@@ -2071,6 +2163,7 @@ def _evolve_protocol_mpo(
     state = _make_product_mps(prepared.sites, chain_initial)
     state._agp_qubit_order = normalized_order
     chain_ground, original_ground = _chain_ground_bitstring(ground_bitstring, normalized_order)
+    static_evolution = _static_mpo_evolution_diagnostics(prepared)
     base_diagnostics: dict[str, object] = {
         "status": prepared.diagnostics["status"],
         "integrator": integrator,
@@ -2084,9 +2177,13 @@ def _evolve_protocol_mpo(
         "static_mpo_bonds": prepared.diagnostics["static_mpo_bonds"],
         "dynamic_mpo_peak_bond": 1,
         "dynamic_mpo_discarded_weight": 0.0,
+        "dynamic_mpo_action_status": "not_tested",
+        "dynamic_mpo_error_status": "not_tested",
+        "dynamic_mpo_workspace": {"status": "not_tested"},
         "operator_build_seconds": 0.0,
         "evolution_seconds": 0.0,
         "truncation_error": 0.0,
+        "truncation_error_by_step": [],
         "norm_drift": 0.0,
         "peak_mps_bond": _mps_peak_bond(state),
         "final_mps_bond": _mps_peak_bond(state),
@@ -2100,6 +2197,7 @@ def _evolve_protocol_mpo(
         "ground_bitstring_chain": chain_ground,
         "midpoint_lambdas": [],
         "ground_fidelity_status": "not tested" if chain_ground is None else "pending",
+        **static_evolution,
     }
     if prepared.diagnostics["status"] != "ok":
         base_diagnostics["status"] = "not_feasible"
@@ -2109,23 +2207,79 @@ def _evolve_protocol_mpo(
     evolution_start = time.perf_counter()
     operator_build_seconds = 0.0
     truncation_error = 0.0
+    truncation_error_by_step: list[float] = []
     peak_bond = _mps_peak_bond(state)
     dynamic_peak_bond = 1
     midpoint_lambdas: list[float] = []
+    dynamic_details: dict[str, object] = {"status": "not_tested"}
+    engine_name: str | None = None
     for step in range(int(steps)):
         tau = (step + 0.5) / int(steps)
         lam, _ = _schedule_values(schedule, tau, total_time)
         midpoint_lambdas.append(lam)
         temporal_values = _temporal_mode_values(factorization, tau)
         build_start = time.perf_counter()
-        dynamic_mpo = _assemble_dynamic_mpo(
-            prepared,
-            h0_coefficient=1.0 - lam,
-            h1_coefficient=lam,
-            cd_mode_coefficients=temporal_values,
-            workspace_cap_bytes=mpo_workspace_cap_bytes,
-            expm_compatible=integrator == "expm_mpo",
-        )
+        try:
+            dynamic_mpo, dynamic_details = _assemble_dynamic_mpo(
+                prepared,
+                h0_coefficient=1.0 - lam,
+                h1_coefficient=lam,
+                cd_mode_coefficients=temporal_values,
+                workspace_cap_bytes=mpo_workspace_cap_bytes,
+                expm_compatible=integrator == "expm_mpo",
+            )
+        except _DynamicMPOResourceError as error:
+            operator_build_seconds += time.perf_counter() - build_start
+            base_diagnostics.update(
+                {
+                    "status": "not_feasible",
+                    "completed_steps": step,
+                    "midpoint_lambdas": midpoint_lambdas,
+                    "operator_build_seconds": operator_build_seconds,
+                    "evolution_seconds": time.perf_counter() - evolution_start,
+                    "truncation_error": truncation_error,
+                    "truncation_error_by_step": truncation_error_by_step,
+                    "norm_drift": abs(_physical_mps_norm_squared(state) - 1.0),
+                    "peak_mps_bond": peak_bond,
+                    "final_mps_bond": _mps_peak_bond(state),
+                    "dynamic_mpo_peak_bond": dynamic_peak_bond,
+                    "dynamic_mpo_workspace": error.plan,
+                    "resource_statuses": {
+                        "static_mpo_compression": "ok",
+                        "dynamic_mpo_assembly": "not_feasible",
+                    },
+                }
+            )
+            base_diagnostics.update(_final_mpo_metrics(state, prepared.h1_exact_mpo, chain_ground))
+            return state, base_diagnostics
+        except MemoryError as error:
+            operator_build_seconds += time.perf_counter() - build_start
+            dynamic_details = {
+                "status": "not_feasible",
+                "reason": f"allocation failed after dynamic preflight: {error}",
+            }
+            base_diagnostics.update(
+                {
+                    "status": "not_feasible",
+                    "completed_steps": step,
+                    "midpoint_lambdas": midpoint_lambdas,
+                    "operator_build_seconds": operator_build_seconds,
+                    "evolution_seconds": time.perf_counter() - evolution_start,
+                    "truncation_error": truncation_error,
+                    "truncation_error_by_step": truncation_error_by_step,
+                    "norm_drift": abs(_physical_mps_norm_squared(state) - 1.0),
+                    "peak_mps_bond": peak_bond,
+                    "final_mps_bond": _mps_peak_bond(state),
+                    "dynamic_mpo_peak_bond": dynamic_peak_bond,
+                    "dynamic_mpo_workspace": dynamic_details,
+                    "resource_statuses": {
+                        "static_mpo_compression": "ok",
+                        "dynamic_mpo_assembly": "not_feasible",
+                    },
+                }
+            )
+            base_diagnostics.update(_final_mpo_metrics(state, prepared.h1_exact_mpo, chain_ground))
+            return state, base_diagnostics
         operator_build_seconds += time.perf_counter() - build_start
         dynamic_peak_bond = max(dynamic_peak_bond, max(_mpo_bonds(dynamic_mpo), default=1))
         if integrator == "tdvp":
@@ -2147,9 +2301,10 @@ def _evolve_protocol_mpo(
             )
         # TeNPy 1.1.0's run() logging assumes at least one MPS bond; evolve directly
         # so the explicit q=1 single-site path remains supported.
-        engine.run_evolution(1, dt)
+        step_truncation_error = _evolve_one_mpo_step(engine, integrator=integrator, dt=dt)
         state = engine.psi
-        truncation_error += float(engine.trunc_err.eps)
+        truncation_error += step_truncation_error
+        truncation_error_by_step.append(step_truncation_error)
         peak_bond = max(peak_bond, _mps_peak_bond(state))
 
     evolution_seconds = time.perf_counter() - evolution_start
@@ -2162,10 +2317,15 @@ def _evolve_protocol_mpo(
             "operator_build_seconds": operator_build_seconds,
             "evolution_seconds": evolution_seconds,
             "truncation_error": truncation_error,
-            "norm_drift": abs(float(abs(state.norm) ** 2) - 1.0),
+            "truncation_error_by_step": truncation_error_by_step,
+            "norm_drift": abs(_physical_mps_norm_squared(state) - 1.0),
             "peak_mps_bond": peak_bond,
             "final_mps_bond": _mps_peak_bond(state),
             "dynamic_mpo_peak_bond": dynamic_peak_bond,
+            "dynamic_mpo_discarded_weight": 0.0,
+            "dynamic_mpo_action_status": str(dynamic_details["action_status"]),
+            "dynamic_mpo_error_status": str(dynamic_details["error_status"]),
+            "dynamic_mpo_workspace": dynamic_details,
             "resource_statuses": {
                 "static_mpo_compression": "ok",
                 "dynamic_mpo_assembly": "ok",
@@ -2174,6 +2334,20 @@ def _evolve_protocol_mpo(
     )
     base_diagnostics.update(_final_mpo_metrics(state, prepared.h1_exact_mpo, chain_ground))
     return state, base_diagnostics
+
+
+def _evolve_one_mpo_step(engine: Any, *, integrator: str, dt: float) -> float:
+    """Return TeNPy's actual one-step discarded weight for each engine path."""
+    if integrator == "expm_mpo":
+        # TimeDependentExpMPOEvolution.run_evolution() discards the TruncationError
+        # returned by evolve(); reproduce its update sequence while retaining it.
+        engine.prepare_evolve(dt)
+        truncation = engine.evolve(1, dt)
+        engine.reinit_model()
+        return max(float(truncation.eps), 0.0)
+    previous = float(engine.trunc_err.eps)
+    engine.run_evolution(1, dt)
+    return max(float(engine.trunc_err.eps) - previous, 0.0)
 
 
 def _resolve_protocol_factorization(
@@ -2349,22 +2523,41 @@ def _assemble_dynamic_mpo(
     cd_mode_coefficients: np.ndarray,
     workspace_cap_bytes: int,
     expm_compatible: bool = False,
-) -> Any:
+) -> tuple[Any, dict[str, object]]:
     if prepared.h0_mpo is None or prepared.h1_mpo is None:
         raise RuntimeError("Time-dependent evolution requires compressed H_initial and H_final MPOs.")
     if cd_mode_coefficients.shape != (len(prepared.cd_mode_mpos),):
         raise ValueError("Dynamic assembly requires one coefficient for every declared temporal mode.")
+    if (
+        isinstance(workspace_cap_bytes, bool)
+        or not isinstance(workspace_cap_bytes, Integral)
+        or int(workspace_cap_bytes) < 1
+    ):
+        raise ValueError("workspace_cap_bytes must be a positive integer.")
+    components = [prepared.h0_mpo, prepared.h1_mpo, *prepared.cd_mode_mpos]
+    coefficients = [h0_coefficient, h1_coefficient, *cd_mode_coefficients.tolist()]
     if expm_compatible:
-        contributions: dict[str, list[complex]] = {}
-        for scale, mpo in zip(
-            [h0_coefficient, h1_coefficient, *cd_mode_coefficients.tolist()],
-            [prepared.h0_mpo, prepared.h1_mpo, *prepared.cd_mode_mpos],
-            strict=True,
-        ):
+        provenance_terms: list[Sequence[tuple[str, complex]]] = []
+        for mpo in components:
             try:
-                pauli_terms = mpo._agp_pauli_terms
+                provenance_terms.append(mpo._agp_pauli_terms)
             except AttributeError as error:
                 raise RuntimeError("ExpMPO requires Pauli provenance for every full-support component.") from error
+        # The midpoint graph can retain every provenance contribution before duplicate-label
+        # cancellation; use that allocation bound before building aggregation dictionaries.
+        exact_plan = _exact_pauli_graph_workspace_plan(
+            term_count=sum(len(terms) for terms in provenance_terms),
+            n_qubits=len(prepared.sites),
+        )
+        if int(exact_plan["required_workspace_bytes"]) > int(workspace_cap_bytes):
+            exact_plan.update({"status": "not_feasible", "reason": "ExpMPO midpoint graph exceeds mpo_workspace_cap_bytes"})
+            raise _DynamicMPOResourceError(exact_plan)
+        contributions: dict[str, list[complex]] = {}
+        for scale, pauli_terms in zip(
+            coefficients,
+            provenance_terms,
+            strict=True,
+        ):
             for label, coefficient in pauli_terms:
                 contributions.setdefault(label, []).append(float(scale) * coefficient)
         exact_terms = [
@@ -2376,16 +2569,19 @@ def _assemble_dynamic_mpo(
             n_qubits=len(prepared.sites),
             order=tuple(range(len(prepared.sites))),
         )
-        return dynamic
-    components = [prepared.h0_mpo, prepared.h1_mpo, *prepared.cd_mode_mpos]
-    coefficients = [h0_coefficient, h1_coefficient, *cd_mode_coefficients.tolist()]
+        return dynamic, {
+            **exact_plan,
+            "status": "ok",
+            "representation": "exact_pauli_graph",
+            "discarded_weight": 0.0,
+            "action_status": "not_tested",
+            "error_status": "exact_pauli_graph",
+        }
+    block_plan = _dynamic_block_sum_workspace_plan(components)
+    if int(block_plan["required_workspace_bytes"]) > int(workspace_cap_bytes):
+        block_plan.update({"status": "not_feasible", "reason": "dynamic block-sum MPO exceeds mpo_workspace_cap_bytes"})
+        raise _DynamicMPOResourceError(block_plan)
     component_tensors = [_effective_finite_mpo_tensors(mpo) for mpo in components]
-    required_bytes = sum(
-        max(tensors[site].shape[0], 1) * max(tensors[site].shape[1], 1) * 4 * _COMPLEX_BYTES
-        for tensors in component_tensors for site in range(len(tensors))
-    )
-    if required_bytes > int(workspace_cap_bytes):
-        raise MemoryError("Dynamic MPO assembly exceeds mpo_workspace_cap_bytes.")
     _, _, _, MPO, npc = _require_tenpy()
     tensors: list[np.ndarray] = []
     length = len(prepared.sites)
@@ -2410,7 +2606,111 @@ def _assemble_dynamic_mpo(
                 block[left:next_left, right:next_right] = item
                 left, right = next_left, next_right
             tensors.append(block)
-    return _mpo_from_effective_tensors(MPO, npc, sites=prepared.sites, tensors=tensors)
+    return _mpo_from_effective_tensors(MPO, npc, sites=prepared.sites, tensors=tensors), {
+        **block_plan,
+        "status": "ok",
+        "representation": "exact_block_sum_of_compressed_components",
+        "discarded_weight": 0.0,
+        "action_status": "not_tested",
+        "error_status": "exact_block_sum",
+    }
+
+
+def _effective_finite_mpo_tensor_shapes(mpo: Any) -> list[tuple[int, int, int, int]]:
+    shapes: list[tuple[int, int, int, int]] = []
+    for site in range(int(mpo.L)):
+        tensor = mpo.get_W(site)
+        labels = tensor.get_leg_labels()
+        shape = tensor.shape
+        axes = [labels.index(label) for label in ("wL", "wR", "p", "p*")]
+        shapes.append(tuple(int(shape[axis]) for axis in axes))
+    left_boundary = mpo.get_IdL(0)
+    right_boundary = mpo.get_IdR(mpo.L - 1)
+    if left_boundary is None and shapes[0][0] != 1:
+        raise ValueError("Finite MPO has no unambiguous left boundary index.")
+    if right_boundary is None and shapes[-1][1] != 1:
+        raise ValueError("Finite MPO has no unambiguous right boundary index.")
+    first = shapes[0]
+    last = shapes[-1]
+    shapes[0] = (1, first[1], first[2], first[3])
+    shapes[-1] = (last[0], 1, last[2], last[3])
+    for site, shape in enumerate(shapes):
+        if shape[2:] != (2, 2):
+            raise ValueError("MPO tensors must have two-dimensional input and output physical legs.")
+        if site and shapes[site - 1][1] != shape[0]:
+            raise ValueError("Adjacent MPO bond dimensions are inconsistent.")
+    return shapes
+
+
+def _dynamic_block_sum_workspace_plan(components: Sequence[Any]) -> dict[str, object]:
+    if not components:
+        raise ValueError("Dynamic MPO assembly requires at least one component.")
+    component_shapes = [_effective_finite_mpo_tensor_shapes(mpo) for mpo in components]
+    length = len(component_shapes[0])
+    if length < 1 or any(len(shapes) != length for shapes in component_shapes):
+        raise ValueError("Dynamic MPO components must have a common positive chain length.")
+    source_bytes = int(
+        sum(np.prod(shape, dtype=np.int64) * _COMPLEX_BYTES for shapes in component_shapes for shape in shapes)
+    )
+    output_shapes: list[tuple[int, int, int, int]] = []
+    scale_temporary_bytes = 0
+    for site in range(length):
+        local = [shapes[site] for shapes in component_shapes]
+        if length == 1:
+            output_shape = (1, 1, 2, 2)
+        elif site == 0:
+            output_shape = (1, sum(shape[1] for shape in local), 2, 2)
+        elif site == length - 1:
+            output_shape = (sum(shape[0] for shape in local), 1, 2, 2)
+        else:
+            output_shape = (
+                sum(shape[0] for shape in local),
+                sum(shape[1] for shape in local),
+                2,
+                2,
+            )
+        output_shapes.append(output_shape)
+        scale_temporary_bytes = max(
+            scale_temporary_bytes,
+            int(sum(np.prod(shape, dtype=np.int64) * _COMPLEX_BYTES for shape in local)),
+        )
+    output_bytes = int(sum(np.prod(shape, dtype=np.int64) * _COMPLEX_BYTES for shape in output_shapes))
+    max_output_bytes = int(max(np.prod(shape, dtype=np.int64) * _COMPLEX_BYTES for shape in output_shapes))
+    required = int(
+        2 * source_bytes
+        + 3 * output_bytes
+        + 2 * max_output_bytes
+        + scale_temporary_bytes
+        + _MPO_WORKSPACE_SAFETY_MARGIN_BYTES
+    )
+    return {
+        "status": "planned",
+        "representation": "block_sum",
+        "component_count": len(component_shapes),
+        "component_tensor_shapes": component_shapes,
+        "output_tensor_shapes": output_shapes,
+        "component_tensor_bytes": source_bytes,
+        "output_tensor_bytes": output_bytes,
+        "largest_output_tensor_bytes": max_output_bytes,
+        "scale_temporary_bytes": scale_temporary_bytes,
+        "copy_and_conversion_bytes": int(2 * source_bytes + 2 * output_bytes + max_output_bytes),
+        "required_workspace_bytes": required,
+    }
+
+
+def _exact_pauli_graph_workspace_plan(*, term_count: int, n_qubits: int) -> dict[str, object]:
+    virtual_dimension = max(int(term_count) + 1, 1)
+    tensor_bytes = int(n_qubits * virtual_dimension * virtual_dimension * 4 * _COMPLEX_BYTES)
+    required = int(4 * tensor_bytes + _MPO_WORKSPACE_SAFETY_MARGIN_BYTES)
+    return {
+        "status": "planned",
+        "representation": "exact_pauli_graph",
+        "provenance_term_upper_bound": int(term_count),
+        "worst_case_virtual_dimension": virtual_dimension,
+        "tensor_bytes": tensor_bytes,
+        "copy_and_conversion_bytes": int(3 * tensor_bytes),
+        "required_workspace_bytes": required,
+    }
 
 
 def _make_tdvp_engine(
@@ -2429,6 +2729,7 @@ def _make_tdvp_engine(
     options = {
         "dt": dt,
         "N_steps": 1,
+        "max_trunc_err": float("inf"),
         "trunc_params": {"chi_max": mps_max_bond, "svd_min": mps_cutoff},
         "lanczos_params": {"N_max": lanczos_max},
     }
@@ -2450,6 +2751,7 @@ def _make_expm_engine(
     options = {
         "dt": dt,
         "N_steps": 1,
+        "max_trunc_err": float("inf"),
         "trunc_params": {"chi_max": mps_max_bond, "svd_min": mps_cutoff},
         "compression_method": "zip_up",
         "approximation": "I",
@@ -2464,6 +2766,7 @@ def _mark_engine_options_consumed(engine: Any) -> None:
     """Avoid TeNPy 1.1.0 false unused-option warnings when stepping manually."""
     engine.options.get("dt", None)
     engine.options.get("N_steps", None)
+    engine.options.get("max_trunc_err", None)
     truncation = engine.options.subconfig("trunc_params")
     truncation.get("chi_max", None)
     truncation.get("svd_min", None)
@@ -2608,12 +2911,15 @@ def _final_mpo_metrics(state: Any, h1_exact_mpo: Any | None, ground_chain: str |
         target = _make_product_mps(
             state.sites, ["up" if bit == "0" else "down" for bit in ground_chain]
         )
-        metrics.update(
-            {
-                "ground_fidelity": float(abs(state.overlap(target, ignore_form=True)) ** 2),
-                "ground_fidelity_status": "ok",
-            }
-        )
+        try:
+            metrics.update(
+                {
+                    "ground_fidelity": float(abs(_canonical_mps_overlap(state, target)) ** 2),
+                    "ground_fidelity_status": "ok",
+                }
+            )
+        except (ValueError, RuntimeError):
+            metrics["ground_fidelity_status"] = "not_feasible"
     return metrics
 
 
