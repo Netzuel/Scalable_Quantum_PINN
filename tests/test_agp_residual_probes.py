@@ -131,7 +131,12 @@ class AGPResidualProbeTests(unittest.TestCase):
             "fixed_unseen_active_relative": 0.8,
             "fixed_unseen_active_status": {"valid": True, "reason": "finite_reference"},
         }
-        manifest = {"enabled": True, "status": "complete", "schema_version": 2}
+        manifest = {
+            "enabled": True,
+            "status": "complete",
+            "schema_version": 2,
+            "certification_eligible": True,
+        }
 
         decision = feedback_threshold_decision(
             [row],
@@ -157,12 +162,41 @@ class AGPResidualProbeTests(unittest.TestCase):
             [row],
             holdout_threshold=0.1,
             unseen_threshold=1.0,
-            fixed_unseen_probe={"enabled": True, "status": "insufficient_candidates"},
+            fixed_unseen_probe={
+                "enabled": True,
+                "status": "insufficient_candidates",
+                "certification_eligible": True,
+            },
         )
 
         self.assertEqual(decision["status"], "not_found_in_feedback_run")
         self.assertEqual(decision["unseen_gate"]["status"], "not_tested")
         self.assertEqual(decision["unseen_gate"]["reason"], "insufficient_candidates")
+
+    def test_diagnostic_backfill_manifest_cannot_certify_fixed_active_gate(self):
+        row = {
+            "feedback_round": 1,
+            "holdout_relative_residual": 0.01,
+            "fixed_unseen_active_relative": 0.2,
+            "fixed_unseen_active_status": {"valid": True, "reason": "finite_reference"},
+        }
+
+        decision = feedback_threshold_decision(
+            [row],
+            holdout_threshold=0.1,
+            unseen_threshold=1.0,
+            fixed_unseen_probe={
+                "enabled": True,
+                "status": "complete",
+                "certification_eligible": False,
+                "provenance": "diagnostic_backfill",
+                "certification_reason": "historical_diagnostic_backfill",
+            },
+        )
+
+        self.assertEqual(decision["status"], "not_found_in_feedback_run")
+        self.assertEqual(decision["unseen_gate"]["status"], "not_tested")
+        self.assertEqual(decision["unseen_gate"]["reason"], "historical_diagnostic_backfill")
 
     def test_plot_series_preserves_nan_gaps_and_active_null_labels(self):
         series = fixed_unseen_plot_series([
@@ -237,6 +271,7 @@ class AGPResidualProbeTests(unittest.TestCase):
             "schema_version": 2,
             "enabled": True,
             "status": "complete",
+            "certification_eligible": True,
             "candidate_universe": {"count": 4, "sha256": "manifest-identity"},
         }
         thresholds = Thresholds(

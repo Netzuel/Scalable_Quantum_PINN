@@ -80,6 +80,12 @@ def fixed_unseen_gate(
     enabled = bool(fixed_unseen_probe["enabled"])
     probe_status = str(fixed_unseen_probe["status"])
     insufficiency_reason = fixed_unseen_probe.get("insufficiency_reason")
+    if not bool(fixed_unseen_probe.get("certification_eligible", False)):
+        return {
+            "status": "not_tested",
+            "value": None,
+            "reason": str(fixed_unseen_probe.get("certification_reason", "diagnostic_backfill")),
+        }
     if not enabled:
         return {"status": "not_tested", "value": None, "reason": "disabled"}
     if probe_status != "complete":

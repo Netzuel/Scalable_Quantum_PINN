@@ -124,8 +124,15 @@ Use the metrics with their intended claim boundaries:
 For small full-basis cases, selection may realize fewer probes than requested.
 The persisted manifest must say `insufficient_candidates` and record the
 realized counts. The configuration is a future-run default: it does not
-retroactively certify completed artifacts. If a historical run has no fixed
-probe manifest, its fixed active and fixed null gates remain `not tested`.
+retroactively certify completed artifacts. A normal-run manifest is
+certification-eligible only when it is persisted before training starts; a
+resume must validate that existing manifest. The diagnostics-only
+`--refresh-fixed-unseen-only` mode may backfill immutable labels and finite
+metrics for a historical checkpoint lineage, but its manifest records
+`certification_eligible=false` and `provenance=diagnostic_backfill`. Its fixed
+active and fixed null values remain `not tested` for certification, with reason
+`historical_diagnostic_backfill`; the mode must neither train nor modify a
+checkpoint.
 
 ## Gate 1: Enough Number Of Terms
 

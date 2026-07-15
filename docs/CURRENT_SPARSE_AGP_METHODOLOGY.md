@@ -242,9 +242,14 @@ These diagnostics have distinct meanings:
   scaled form); it is not treated as a relative quotient.
 
 The four configuration blocks define defaults for future runs only. They do not
-retroactively add probe manifests to completed runs or certify historical
-artifacts. A historical summary without the persisted fixed-probe manifest must
-continue to report the fixed-probe gates as `not tested`.
+retroactively certify completed artifacts. A normal-run fixed-probe manifest is
+eligible only when established before training, and a valid resume reuses that
+immutable manifest. The diagnostics-only `--refresh-fixed-unseen-only` mode
+can backfill one immutable historical probe manifest and evaluate retained
+checkpoints without training or changing checkpoint files. Such a manifest is
+explicitly marked `certification_eligible=false` with
+`provenance=diagnostic_backfill`, so its fixed active and null metrics remain
+`not tested` for certification with reason `historical_diagnostic_backfill`.
 
 ## Post-Curriculum Temporal Refinement
 

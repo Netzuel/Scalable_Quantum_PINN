@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from projected_sparse_training_common import (  # noqa: E402
 from agp_holdout_feedback import (  # noqa: E402
     adaptive_temporal_refinement_settings_from_feedback,
     build_expanding_fixed_unseen_probe,
+    build_fixed_unseen_probe_manifest,
     compact_support_swap_plan,
     configured_generated_run_roots,
     FIXED_UNSEEN_ROW_FIELDS,
@@ -34,8 +36,10 @@ from agp_holdout_feedback import (  # noqa: E402
     load_or_validate_fixed_unseen_probe,
     make_adaptive_tau_grid,
     merge_fixed_unseen_probe_metrics,
+    parse_holdout_feedback_args,
     pau_transfer_stability_settings_from_feedback,
     save_fixed_unseen_probe,
+    select_residual_additions,
     support_swap_settings_from_feedback,
     temporal_refinement_settings_from_feedback,
 )
@@ -45,6 +49,81 @@ from utils import SparsePauliOperator  # noqa: E402
 
 
 class AGPSupportSwapTests(unittest.TestCase):
+    def test_feedback_additions_preserve_fixed_unseen_labels(self):
+        additions = select_residual_additions(
+            [
+                {"label": "XI", "residual_rms": 3.0},
+                {"label": "YI", "residual_rms": 2.0},
+                {"label": "ZI", "residual_rms": 1.0},
+            ],
+            current_residual_labels=set(),
+            excluded_labels={"XI", "YI"},
+            add_terms=2,
+            min_rms=0.0,
+        )
+
+        self.assertEqual([row["label"] for row in additions], ["ZI"])
+
+    def test_refresh_fixed_unseen_only_parser_selects_diagnostics_mode(self):
+        args = parse_holdout_feedback_args(
+            ["--config", "scenario/config.json", "--refresh-fixed-unseen-only"]
+        )
+
+        self.assertEqual(args.config, Path("scenario/config.json"))
+        self.assertTrue(args.refresh_fixed_unseen_only)
+
+    def test_diagnostic_backfill_manifest_is_ineligible_and_hash_stable(self):
+        manifest = build_fixed_unseen_probe_manifest(
+            {
+                "schema_version": 2,
+                "enabled": True,
+                "status": "complete",
+                "active_labels": ["XI"],
+                "null_labels": ["YI"],
+                "reference_rms_metadata": {"selected": {}},
+            },
+            certification_eligible=False,
+            provenance="diagnostic_backfill",
+        )
+
+        self.assertFalse(manifest["certification_eligible"])
+        self.assertEqual(manifest["provenance"], "diagnostic_backfill")
+        self.assertEqual(manifest["certification_reason"], "historical_diagnostic_backfill")
+        self.assertEqual(
+            manifest["manifest_sha256"],
+            build_fixed_unseen_probe_manifest(
+                manifest,
+                certification_eligible=False,
+                provenance="diagnostic_backfill",
+            )["manifest_sha256"],
+        )
+
+    def test_diagnostic_backfill_does_not_modify_checkpoint_content_or_mtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkpoint = Path(temporary) / "Models_Data" / "training_checkpoint.pt"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"retained checkpoint")
+            before = (checkpoint.read_bytes(), checkpoint.stat().st_mtime_ns)
+
+            manifest = build_fixed_unseen_probe_manifest(
+                {
+                    "schema_version": 2,
+                    "enabled": True,
+                    "status": "complete",
+                    "active_labels": ["XI"],
+                    "null_labels": ["YI"],
+                    "reference_rms_metadata": {"selected": {}},
+                },
+                certification_eligible=False,
+                provenance="diagnostic_backfill",
+            )
+            # The diagnostic manifest is deliberately the only newly written artifact.
+            manifest_path = checkpoint.parents[1] / "fixed_unseen_probe_labels.json"
+            save_fixed_unseen_probe(manifest_path, manifest)
+            os.utime(manifest_path, None)
+
+            self.assertEqual((checkpoint.read_bytes(), checkpoint.stat().st_mtime_ns), before)
+
     def test_uncapped_fixed_unseen_expansion_doubles_until_complete(self):
         settings = fixed_unseen_probe_settings_from_feedback(
             {"fixed_unseen_probes": {"enabled": True, "active_terms": 1, "null_terms": 1}}
@@ -315,6 +394,44 @@ class AGPSupportSwapTests(unittest.TestCase):
                     agp_holdout_feedback.main()
                     resumed_manifest = manifest_path.read_bytes()
                     resumed_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+                    # Model the historical q24 case: retained checkpoints and a summary exist,
+                    # but no probe manifest was established before training.
+                    manifest_path.unlink()
+                    retained_checkpoints = sorted(
+                        {
+                            baseline_checkpoint,
+                            *output_dir.glob("**/Models_Data/training_checkpoint.pt"),
+                        },
+                        key=str,
+                    )
+                    checkpoint_before = {
+                        path: (path.read_bytes(), path.stat().st_mtime_ns)
+                        for path in retained_checkpoints
+                    }
+                    with patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "agp_holdout_feedback.py",
+                            "--config",
+                            str(config_path),
+                            "--refresh-fixed-unseen-only",
+                        ],
+                    ), patch(
+                        "agp_holdout_feedback.train_feedback_round",
+                        side_effect=AssertionError("diagnostic refresh must not train"),
+                    ), patch(
+                        "agp_holdout_feedback.run_training",
+                        side_effect=AssertionError("diagnostic refresh must not train a baseline"),
+                    ):
+                        agp_holdout_feedback.main()
+                    diagnostic_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    diagnostic_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                    checkpoint_after = {
+                        path: (path.read_bytes(), path.stat().st_mtime_ns)
+                        for path in retained_checkpoints
+                    }
             finally:
                 agp_holdout_feedback.RUN_DIR = old_feedback_run_dir
                 agp_baseline_train.RUN_DIR = old_baseline_run_dir
@@ -324,6 +441,16 @@ class AGPSupportSwapTests(unittest.TestCase):
         self.assertIn(str(certification_path.resolve()), manifest["certification_probe_manifest_paths"])
         self.assertEqual(first_manifest, resumed_manifest)
         self.assertEqual(len(train_calls), 2)
+        self.assertEqual(checkpoint_before, checkpoint_after)
+        self.assertFalse(diagnostic_manifest["certification_eligible"])
+        self.assertEqual(diagnostic_manifest["provenance"], "diagnostic_backfill")
+        self.assertIn("manifest_sha256", diagnostic_manifest)
+        self.assertEqual(diagnostic_summary["decision"]["unseen_gate"]["status"], "not_tested")
+        self.assertEqual(
+            diagnostic_summary["decision"]["unseen_gate"]["reason"],
+            "historical_diagnostic_backfill",
+        )
+        self.assertEqual(len(diagnostic_summary["rows"]), len(retained_checkpoints) - 1)
         for summary in (first_summary, resumed_summary):
             self.assertEqual(len(summary["rows"]), 2)
             for row in summary["rows"]:

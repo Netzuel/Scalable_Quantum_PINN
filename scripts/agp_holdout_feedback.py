@@ -5,7 +5,7 @@ import copy
 import hashlib
 import json
 import shutil
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal, getcontext
 from pathlib import Path
@@ -162,6 +162,26 @@ def _stable_hash(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def build_fixed_unseen_probe_manifest(
+    payload: Mapping[str, object],
+    *,
+    certification_eligible: bool,
+    provenance: str,
+) -> dict[str, object]:
+    """Attach immutable provenance and a content hash to a fixed-probe manifest."""
+
+    manifest = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    manifest["certification_eligible"] = bool(certification_eligible)
+    manifest["provenance"] = str(provenance)
+    manifest["certification_reason"] = (
+        "established_before_training"
+        if certification_eligible
+        else "historical_diagnostic_backfill"
+    )
+    manifest["manifest_sha256"] = _stable_hash(manifest)
+    return manifest
+
+
 def _label_identity(labels: Collection[str]) -> dict[str, object]:
     ordered = [str(label) for label in labels]
     return {
@@ -229,6 +249,11 @@ def load_or_validate_fixed_unseen_probe(
     payload = load_json(path)
     if not isinstance(payload, dict):
         raise TypeError(f"{path} must contain a JSON object.")
+    stored_hash = payload.get("manifest_sha256")
+    if stored_hash is not None:
+        hashed_payload = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+        if str(stored_hash) != _stable_hash(hashed_payload):
+            raise ValueError("immutable fixed unseen probe manifest hash does not match its contents")
     active_labels = [str(label) for label in payload.get("active_labels", [])]
     null_labels = [str(label) for label in payload.get("null_labels", [])]
     if set(active_labels) & set(null_labels):
@@ -885,13 +910,15 @@ def select_residual_additions(
     spectrum: list[dict[str, object]],
     current_residual_labels: set[str],
     *,
+    excluded_labels: Collection[str] = (),
     add_terms: int,
     min_rms: float,
 ) -> list[dict[str, object]]:
     additions: list[dict[str, object]] = []
+    excluded = {str(label) for label in excluded_labels}
     for row in spectrum:
         label = str(row["label"])
-        if label in current_residual_labels:
+        if label in current_residual_labels or label in excluded:
             continue
         if float(row["residual_rms"]) < min_rms:
             continue
@@ -1583,6 +1610,12 @@ def assert_fixed_unseen_manifest_lifecycle(
         return
     manifest_path = data_dir / "fixed_unseen_probe_labels.json"
     if manifest_path.is_file():
+        manifest = load_json(manifest_path)
+        if not isinstance(manifest, Mapping) or not bool(manifest.get("certification_eligible", False)):
+            raise RuntimeError(
+                "Cannot resume normal training from a diagnostics-only fixed unseen manifest. "
+                "Start a new run root; historical diagnostic backfill remains certification-ineligible."
+            )
         return
 
     markers: list[Path] = []
@@ -1691,7 +1724,7 @@ def write_feedback_summary(
             shutil.rmtree(round_images, ignore_errors=True)
 
 
-def main() -> None:
+def build_holdout_feedback_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a configured sparse AGP with holdout-residual feedback.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--base-agp-terms", type=int, default=None)
@@ -1710,7 +1743,23 @@ def main() -> None:
     parser.add_argument("--holdout-threshold", type=float, default=None)
     parser.add_argument("--unseen-threshold", type=float, default=None)
     parser.add_argument("--keep-round-images", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--refresh-fixed-unseen-only",
+        action="store_true",
+        help=(
+            "Diagnostics-only historical backfill. Loads existing checkpoints and updates fixed-unseen "
+            "summaries without training or modifying checkpoints; the resulting manifest is ineligible for certification."
+        ),
+    )
+    return parser
+
+
+def parse_holdout_feedback_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    return build_holdout_feedback_argument_parser().parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_holdout_feedback_args(argv)
 
     config_path = args.config.resolve()
     configure_run_dir(config_path)
@@ -1788,6 +1837,11 @@ def main() -> None:
             base_run = legacy_base_run
             base_checkpoint = legacy_checkpoint
     if not base_checkpoint.is_file():
+        if args.refresh_fixed_unseen_only:
+            raise FileNotFoundError(
+                "Diagnostics-only fixed-unseen refresh requires an existing baseline checkpoint; "
+                "it will not train a missing baseline."
+            )
         print(
             f"train_missing_baseline agp_terms={base_agp_terms} "
             f"epochs={base_settings.epochs} residual_terms={base_settings.residual_top_k}"
@@ -1886,7 +1940,7 @@ def main() -> None:
         output_dir=output_dir,
         data_dir=data_dir,
         residual_top_k=residual_top_k,
-        enabled=fixed_unseen_probe_settings.enabled,
+        enabled=fixed_unseen_probe_settings.enabled and not args.refresh_fixed_unseen_only,
     )
     data_dir.mkdir(parents=True, exist_ok=True)
     hamiltonian_path = Path(feedback_settings.model.hamiltonian_source)
@@ -1911,6 +1965,26 @@ def main() -> None:
         | persisted_certification_labels
     )
     fixed_probe_base_excluded_labels = set(residual_labels) | certification_probe_labels
+    historical_training_residual_labels: set[str] = set()
+    if args.refresh_fixed_unseen_only:
+        historical_checkpoints = sorted(
+            {
+                base_checkpoint.resolve(),
+                *(
+                    checkpoint.resolve()
+                    for checkpoint in output_dir.glob("**/Models_Data/training_checkpoint.pt")
+                ),
+            },
+            key=str,
+        )
+        if not historical_checkpoints:
+            raise FileNotFoundError(
+                "Diagnostics-only fixed-unseen refresh requires at least one retained checkpoint."
+            )
+        for checkpoint in historical_checkpoints:
+            _, checkpoint_residual_labels = load_checkpoint_labels(checkpoint)
+            historical_training_residual_labels.update(checkpoint_residual_labels)
+        fixed_probe_base_excluded_labels.update(historical_training_residual_labels)
 
     def generate_fixed_probe_candidates(request: int) -> list[str]:
         labels, _ = build_common_holdout_residual_labels(
@@ -1950,12 +2024,37 @@ def main() -> None:
                 "null": expected_fixed_unseen_probe["null_labels"],
             },
         )
+        if args.refresh_fixed_unseen_only and bool(fixed_unseen_probe.get("certification_eligible", False)):
+            raise RuntimeError(
+                "Diagnostics-only fixed-unseen refresh cannot overwrite or reclassify a "
+                "certification-eligible manifest. Use a normal valid resume instead."
+            )
     else:
-        fixed_unseen_probe = expected_fixed_unseen_probe
+        fixed_unseen_probe = build_fixed_unseen_probe_manifest(
+            expected_fixed_unseen_probe,
+            certification_eligible=not args.refresh_fixed_unseen_only,
+            provenance=(
+                "diagnostic_backfill"
+                if args.refresh_fixed_unseen_only
+                else "established_before_training"
+            ),
+        )
         fixed_unseen_probe["certification_probe_excluded_terms"] = len(certification_probe_labels)
+        fixed_unseen_probe["historical_training_residual_excluded_terms"] = len(
+            historical_training_residual_labels
+        )
         fixed_unseen_probe["certification_probe_manifest_paths"] = [
             str(path) for path in certification_manifest_paths
         ]
+        fixed_unseen_probe = build_fixed_unseen_probe_manifest(
+            fixed_unseen_probe,
+            certification_eligible=not args.refresh_fixed_unseen_only,
+            provenance=(
+                "diagnostic_backfill"
+                if args.refresh_fixed_unseen_only
+                else "established_before_training"
+            ),
+        )
         save_fixed_unseen_probe(fixed_probe_path, fixed_unseen_probe)
     existing_state = load_existing_feedback_state(
         output_dir=output_dir,
@@ -2030,6 +2129,77 @@ def main() -> None:
                 round_row.update(
                     {key: value for key, value in source.items() if key.startswith("fixed_unseen_")}
                 )
+        if args.refresh_fixed_unseen_only:
+            if completed_round < rounds:
+                raise RuntimeError(
+                    "Diagnostics-only fixed-unseen refresh found an incomplete feedback run. "
+                    "It will not train missing rounds."
+                )
+            summary_path = data_dir / f"holdout_feedback_summary_residual_{residual_top_k}.json"
+            summary_payload = load_json(summary_path)
+            if not isinstance(summary_payload, dict):
+                raise TypeError(f"Unexpected feedback summary format in {summary_path}.")
+            temporal_summary = summary_payload.get("temporal_refinement")
+            adaptive_summary = summary_payload.get("adaptive_temporal_refinement")
+            checkpoint_runs = {
+                base_run.resolve(),
+                *(
+                    checkpoint.parent.parent.resolve()
+                    for checkpoint in output_dir.glob("**/Models_Data/training_checkpoint.pt")
+                ),
+            }
+            evaluated_runs = {base_run.resolve()}
+            for row in rows:
+                feedback_round = int(row.get("feedback_round", 0))
+                if feedback_round > 0:
+                    evaluated_runs.add((output_dir / str(row["run_dir"])).resolve())
+            for summary in (temporal_summary, adaptive_summary):
+                if not isinstance(summary, dict) or not bool(summary.get("enabled", False)):
+                    continue
+                refinement_run = output_dir / str(summary["run_dir"])
+                if not (refinement_run / "Models_Data" / "training_checkpoint.pt").is_file():
+                    raise FileNotFoundError(
+                        "Diagnostics-only fixed-unseen refresh requires every listed refinement checkpoint: "
+                        f"{refinement_run}"
+                    )
+                summary.update(
+                    merge_fixed_unseen_probe_metrics(
+                        summary,
+                        evaluate_fixed_unseen_probe(
+                            run_dir=refinement_run,
+                            config_payload=payload,
+                            probe_metadata=fixed_unseen_probe,
+                            intermediate_top_k=intermediate_top_k,
+                            device=select_device("cpu"),
+                        ),
+                    )
+                )
+                evaluated_runs.add(refinement_run.resolve())
+            if checkpoint_runs != evaluated_runs:
+                missing = sorted(str(path) for path in checkpoint_runs - evaluated_runs)
+                extra = sorted(str(path) for path in evaluated_runs - checkpoint_runs)
+                raise RuntimeError(
+                    "Diagnostics-only fixed-unseen refresh must evaluate every available checkpoint; "
+                    f"missing={missing} extra={extra}"
+                )
+            write_feedback_summary(
+                output_dir=output_dir,
+                rows=rows,
+                spectra=spectra,
+                round_rows=round_rows,
+                residual_top_k=residual_top_k,
+                thresholds=thresholds,
+                residual_budget=residual_budget,
+                fixed_unseen_probe=fixed_unseen_probe,
+                temporal_refinement=temporal_summary if isinstance(temporal_summary, dict) else None,
+                adaptive_temporal_refinement=adaptive_summary if isinstance(adaptive_summary, dict) else None,
+                keep_round_images=keep_round_images,
+            )
+            print(
+                "fixed_unseen_diagnostic_backfill "
+                f"checkpoints={len(checkpoint_runs)} certification_eligible=false"
+            )
+            return
         last_checkpoint = round_run_dir(output_dir, completed_round) / "Models_Data" / "training_checkpoint.pt"
         if completed_round > 0:
             agp_labels, residual_labels = load_checkpoint_labels(last_checkpoint)
@@ -2117,6 +2287,10 @@ def main() -> None:
         additions = select_residual_additions(
             spectra[round_index - 1],
             current_residual_labels,
+            excluded_labels=(
+                set(fixed_unseen_probe.get("active_labels", []))
+                | set(fixed_unseen_probe.get("null_labels", []))
+            ),
             add_terms=add_residual_terms,
             min_rms=min_rms,
         )
