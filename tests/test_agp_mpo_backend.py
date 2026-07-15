@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
+import subprocess
+import sys
 import unittest
 
 import numpy as np
@@ -13,11 +16,19 @@ except ModuleNotFoundError:  # Python 3.10 in the required torch-mps environment
     from pip._vendor import tomli as tomllib
 
 from scripts.agp_mpo_backend import (
+    build_exact_pauli_mpo,
+    compress_mpo_hilbert_schmidt,
+    dense_pauli_sum,
     factor_direct_cd_coefficients,
+    mpo_to_dense,
     permute_pauli_label,
+    probe_mpo_compression,
     select_qubit_order,
     unpermute_pauli_label,
 )
+
+
+_TENPY_AVAILABLE = importlib.util.find_spec("tenpy") is not None
 
 
 class OptionalDependencyTests(unittest.TestCase):
@@ -232,6 +243,239 @@ class QubitOrderingTests(unittest.TestCase):
         for invalid_order in ((0, 1.0, 2), (0, False, 2)):
             with self.assertRaisesRegex(ValueError, "integer"):
                 permute_pauli_label("XYZ", invalid_order)
+
+
+@unittest.skipUnless(_TENPY_AVAILABLE, "TeNPy tensor-network extra is not installed")
+class ExactPauliMPOTests(unittest.TestCase):
+    def test_exact_pauli_mpo_contains_every_nonzero_combined_label(self) -> None:
+        terms = [("XI", 0.3), ("YZ", -0.7), ("ZZ", 0.2), ("II", 0.1)]
+
+        mpo, metadata = build_exact_pauli_mpo(terms, n_qubits=2, order=(0, 1))
+
+        np.testing.assert_allclose(mpo_to_dense(mpo), dense_pauli_sum(terms), atol=1.0e-12)
+        self.assertEqual(metadata["input_terms"], 4)
+        self.assertEqual(metadata["unique_labels"], 4)
+        self.assertEqual(metadata["included_terms"], 4)
+        self.assertEqual(metadata["included_labels"], ["II", "XI", "YZ", "ZZ"])
+        self.assertEqual(metadata["dropped_terms"], 0)
+        self.assertEqual(metadata["dropped_labels"], [])
+
+    def test_duplicate_labels_are_combined_before_cancellation_is_reported(self) -> None:
+        terms = [("XI", 0.3), ("YZ", 0.25), ("XI", -0.3), ("YZ", 0.125)]
+
+        mpo, metadata = build_exact_pauli_mpo(terms, n_qubits=2, order=(0, 1))
+
+        np.testing.assert_allclose(
+            mpo_to_dense(mpo), dense_pauli_sum([("YZ", 0.375)]), atol=1.0e-12
+        )
+        self.assertEqual(metadata["input_terms"], 4)
+        self.assertEqual(metadata["unique_labels"], 2)
+        self.assertEqual(metadata["duplicate_labels"], ["XI", "YZ"])
+        self.assertEqual(metadata["dropped_terms"], 1)
+        self.assertEqual(metadata["dropped_labels"], ["XI"])
+        self.assertEqual(metadata["dropped_coefficients"], {"XI": 0j})
+        self.assertEqual(metadata["combined_coefficients"], {"XI": 0j, "YZ": 0.375 + 0j})
+
+    def test_arithmetic_zero_tolerance_is_explicit_and_defaults_to_exact_zero(self) -> None:
+        terms = [("X", 1.0), ("X", -1.0 + 1.0e-15)]
+
+        retained, retained_metadata = build_exact_pauli_mpo(
+            terms, n_qubits=1, order=(0,)
+        )
+        dropped, dropped_metadata = build_exact_pauli_mpo(
+            terms,
+            n_qubits=1,
+            order=(0,),
+            arithmetic_zero_tolerance=1.0e-12,
+        )
+
+        self.assertEqual(retained_metadata["dropped_terms"], 0)
+        self.assertGreater(np.linalg.norm(mpo_to_dense(retained)), 0.0)
+        self.assertEqual(dropped_metadata["dropped_labels"], ["X"])
+        self.assertEqual(dropped_metadata["arithmetic_zero_tolerance"], 1.0e-12)
+        np.testing.assert_array_equal(mpo_to_dense(dropped), np.zeros((2, 2)))
+
+    def test_non_native_order_matches_explicitly_permuted_pauli_sum(self) -> None:
+        terms = [("XYZ", 0.4), ("ZIX", -0.2), ("III", 0.05)]
+        order = (2, 0, 1)
+
+        mpo, metadata = build_exact_pauli_mpo(terms, n_qubits=3, order=order)
+        permuted_terms = [(permute_pauli_label(label, order), value) for label, value in terms]
+
+        np.testing.assert_allclose(
+            mpo_to_dense(mpo), dense_pauli_sum(permuted_terms), atol=1.0e-12
+        )
+        self.assertEqual(metadata["order"], order)
+        self.assertEqual(
+            metadata["included_chain_labels"],
+            sorted(label for label, _ in permuted_terms),
+        )
+
+    def test_builder_handles_large_qubit_count_without_dense_helpers(self) -> None:
+        terms = [("X" + "I" * 11, 0.25), ("I" * 10 + "YZ", -0.5)]
+
+        mpo, metadata = build_exact_pauli_mpo(terms, n_qubits=12, order=tuple(range(12)))
+
+        self.assertEqual(mpo.L, 12)
+        self.assertEqual(metadata["included_terms"], 2)
+        with self.assertRaisesRegex(ValueError, "q <= 4"):
+            mpo_to_dense(mpo)
+        with self.assertRaisesRegex(ValueError, "q <= 4"):
+            dense_pauli_sum(terms)
+
+
+@unittest.skipUnless(_TENPY_AVAILABLE, "TeNPy tensor-network extra is not installed")
+class MPOCompressionTests(unittest.TestCase):
+    def test_compressed_mpo_reports_and_respects_operator_error(self) -> None:
+        terms = [("XII", 0.3), ("IYZ", -0.7), ("ZZI", 0.2), ("XYZ", 0.1)]
+        exact, _ = build_exact_pauli_mpo(terms, n_qubits=3, order=(0, 1, 2))
+
+        compressed, diagnostics = compress_mpo_hilbert_schmidt(
+            exact, max_bond=16, cutoff=1.0e-13
+        )
+
+        relative = np.linalg.norm(mpo_to_dense(exact) - mpo_to_dense(compressed)) / np.linalg.norm(
+            mpo_to_dense(exact)
+        )
+        self.assertLess(relative, 1.0e-11)
+        self.assertGreaterEqual(diagnostics["discarded_weight"], 0.0)
+        self.assertEqual(
+            diagnostics["discarded_weight"],
+            sum(diagnostics["per_bond_discarded_weights"]),
+        )
+        self.assertEqual(len(diagnostics["per_bond_discarded_weights"]), exact.L - 1)
+        self.assertEqual(diagnostics["post_bonds"], list(compressed.chi))
+        self.assertTrue(all(diagnostics["cutoff_satisfied_by_bond"]))
+
+    def test_hard_max_bond_is_enforced_and_reports_cutoff_violation(self) -> None:
+        terms = [
+            ("XXII", 1.0),
+            ("YYII", 0.9),
+            ("IXXI", -0.8),
+            ("IYYI", 0.7),
+            ("IIXX", 0.6),
+            ("IIYY", -0.5),
+        ]
+        exact, _ = build_exact_pauli_mpo(terms, n_qubits=4, order=(0, 1, 2, 3))
+
+        compressed, diagnostics = compress_mpo_hilbert_schmidt(
+            exact, max_bond=1, cutoff=0.0
+        )
+
+        self.assertTrue(all(bond <= 1 for bond in compressed.chi[1:-1]))
+        self.assertGreater(diagnostics["discarded_weight"], 0.0)
+        self.assertIn(False, diagnostics["cutoff_satisfied_by_bond"])
+        self.assertEqual(diagnostics["max_bond"], 1)
+        self.assertEqual(diagnostics["cutoff"], 0.0)
+        dense_error_squared = float(
+            np.linalg.norm(mpo_to_dense(exact) - mpo_to_dense(compressed)) ** 2
+        )
+        self.assertAlmostEqual(
+            diagnostics["total_discarded_squared_norm"],
+            dense_error_squared,
+            places=11,
+        )
+        source_norm_squared = float(np.linalg.norm(mpo_to_dense(exact)) ** 2)
+        self.assertAlmostEqual(
+            diagnostics["discarded_weight"],
+            dense_error_squared / source_norm_squared,
+            places=11,
+        )
+
+    def test_action_probes_are_seeded_deterministic_and_detect_compression_error(self) -> None:
+        terms = [
+            ("XXI", 1.0),
+            ("YYI", -0.8),
+            ("IXX", 0.6),
+            ("IYY", 0.4),
+            ("XYZ", -0.3),
+        ]
+        exact, _ = build_exact_pauli_mpo(terms, n_qubits=3, order=(0, 1, 2))
+        compressed, _ = compress_mpo_hilbert_schmidt(exact, max_bond=1, cutoff=0.0)
+        settings = {
+            "product_states": (("up", "up", "up"), ("up", "down", "up")),
+            "random_state_count": 2,
+            "random_bond": 3,
+            "seed": 1729,
+        }
+
+        first = probe_mpo_compression(exact, compressed, **settings)
+        second = probe_mpo_compression(exact, compressed, **settings)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["tested_probes"], 4)
+        self.assertEqual(first["not_tested_probes"], 0)
+        self.assertGreater(first["max_relative_action_error"], 0.0)
+        self.assertTrue(all(probe["status"] == "tested" for probe in first["probes"]))
+        product = np.zeros(2**3, dtype=np.complex128)
+        product[2] = 1.0  # |up, down, up> in the native computational order.
+        exact_dense = mpo_to_dense(exact)
+        compressed_dense = mpo_to_dense(compressed)
+        expected_error = np.linalg.norm((exact_dense - compressed_dense) @ product) / np.linalg.norm(
+            exact_dense @ product
+        )
+        self.assertAlmostEqual(first["probes"][1]["relative_action_error"], expected_error)
+
+    def test_zero_action_denominator_is_not_tested(self) -> None:
+        zero, _ = build_exact_pauli_mpo(
+            [("X", 1.0), ("X", -1.0)], n_qubits=1, order=(0,)
+        )
+        compressed, _ = compress_mpo_hilbert_schmidt(zero, max_bond=2, cutoff=0.0)
+
+        diagnostics = probe_mpo_compression(
+            zero,
+            compressed,
+            product_states=(("up",),),
+            random_state_count=0,
+            seed=11,
+        )
+
+        self.assertEqual(diagnostics["tested_probes"], 0)
+        self.assertEqual(diagnostics["not_tested_probes"], 1)
+        self.assertIsNone(diagnostics["max_relative_action_error"])
+        self.assertEqual(diagnostics["probes"][0]["status"], "not_tested")
+        self.assertIsNone(diagnostics["probes"][0]["relative_action_error"])
+
+    def test_compression_rejects_invalid_resource_limits(self) -> None:
+        exact, _ = build_exact_pauli_mpo([("X", 1.0)], n_qubits=1, order=(0,))
+
+        for max_bond in (0, True, 1.5):
+            with self.assertRaisesRegex(ValueError, "max_bond"):
+                compress_mpo_hilbert_schmidt(exact, max_bond=max_bond, cutoff=0.0)
+        for cutoff in (-1.0, 1.0, np.nan):
+            with self.assertRaisesRegex(ValueError, "cutoff"):
+                compress_mpo_hilbert_schmidt(exact, max_bond=2, cutoff=cutoff)
+
+
+class LazyOptionalImportTests(unittest.TestCase):
+    def test_module_imports_without_tenpy_and_mpo_call_fails_with_install_hint(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        code = """
+import builtins
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == 'tenpy' or name.startswith('tenpy.'):
+        raise ModuleNotFoundError("blocked optional dependency")
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+import scripts.agp_mpo_backend as backend
+try:
+    backend.build_exact_pauli_mpo([('X', 1.0)], n_qubits=1, order=(0,))
+except ModuleNotFoundError as error:
+    assert 'tensor-network' in str(error)
+else:
+    raise AssertionError('MPO construction did not require the optional dependency')
+"""
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
 
 
 if __name__ == "__main__":

@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+import math
 from numbers import Integral
-from typing import Sequence
+import warnings
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -283,6 +285,580 @@ def select_qubit_order(
         mean_cut_terms=selected.mean_cut_terms,
         candidate_scores=scores,
     )
+
+
+def build_exact_pauli_mpo(
+    terms: Sequence[tuple[str, complex]],
+    *,
+    n_qubits: int,
+    order: Sequence[int],
+    arithmetic_zero_tolerance: float = 0.0,
+) -> tuple[Any, dict[str, object]]:
+    """Build a finite TeNPy MPO from every nonzero combined Pauli label.
+
+    Duplicate labels are combined in the original qubit order. A combined
+    coefficient is omitted only when its magnitude is no larger than the
+    explicitly reported arithmetic-zero tolerance.
+    """
+    SpinHalfSite, TermList, MPOGraph, _, _ = _require_tenpy()
+    n_qubits = _validate_n_qubits(n_qubits)
+    normalized_order = _validate_order(order, n_qubits=n_qubits)
+    if (
+        isinstance(arithmetic_zero_tolerance, bool)
+        or not np.isfinite(arithmetic_zero_tolerance)
+        or float(arithmetic_zero_tolerance) < 0.0
+    ):
+        raise ValueError("arithmetic_zero_tolerance must be finite and nonnegative.")
+    zero_tolerance = float(arithmetic_zero_tolerance)
+
+    contributions: dict[str, list[complex]] = {}
+    input_terms = 0
+    for label, coefficient in terms:
+        _validate_pauli_label(label, n_qubits=n_qubits)
+        value = _finite_complex(coefficient)
+        contributions.setdefault(label, []).append(value)
+        input_terms += 1
+
+    combined_coefficients = {
+        label: _stable_complex_sum(values) for label, values in sorted(contributions.items())
+    }
+    duplicate_labels = sorted(
+        label for label, values in contributions.items() if len(values) > 1
+    )
+    dropped_coefficients = {
+        label: value
+        for label, value in combined_coefficients.items()
+        if abs(value) <= zero_tolerance
+    }
+    included_coefficients = {
+        label: value
+        for label, value in combined_coefficients.items()
+        if label not in dropped_coefficients
+    }
+
+    site = SpinHalfSite(conserve=None)
+    site.add_op("X", site.get_op("Sigmax"), hc="X")
+    site.add_op("Y", site.get_op("Sigmay"), hc="Y")
+    site.add_op("Z", site.get_op("Sigmaz"), hc="Z")
+    sites = [site] * n_qubits
+
+    operator_terms: list[list[tuple[str, int]]] = []
+    strengths: list[complex] = []
+    included_chain_labels: list[str] = []
+    for label, coefficient in included_coefficients.items():
+        chain_label = permute_pauli_label(label, normalized_order)
+        local_terms = [
+            (symbol, chain_site)
+            for chain_site, symbol in enumerate(chain_label)
+            if symbol != "I"
+        ]
+        if not local_terms:
+            local_terms = [("Id", 0)]
+        operator_terms.append(local_terms)
+        strengths.append(coefficient)
+        included_chain_labels.append(chain_label)
+
+    if not operator_terms:
+        operator_terms = [[("Id", 0)]]
+        strengths = [0.0]
+
+    term_list = TermList(operator_terms, strengths)
+    graph = MPOGraph.from_term_list(
+        term_list,
+        sites,
+        bc="finite",
+        insert_all_id=True,
+        unit_cell_width=n_qubits,
+    )
+    mpo = graph.build_MPO()
+    metadata: dict[str, object] = {
+        "input_terms": input_terms,
+        "unique_labels": len(combined_coefficients),
+        "duplicate_labels": duplicate_labels,
+        "combined_coefficients": combined_coefficients,
+        "included_terms": len(included_coefficients),
+        "included_labels": sorted(included_coefficients),
+        "included_chain_labels": sorted(included_chain_labels),
+        "dropped_terms": len(dropped_coefficients),
+        "dropped_labels": sorted(dropped_coefficients),
+        "dropped_coefficients": dropped_coefficients,
+        "arithmetic_zero_tolerance": zero_tolerance,
+        "order": normalized_order,
+    }
+    return mpo, metadata
+
+
+def compress_mpo_hilbert_schmidt(
+    mpo: Any,
+    *,
+    max_bond: int,
+    cutoff: float,
+) -> tuple[Any, dict[str, object]]:
+    """Compress a finite MPO with a left-to-right Hilbert-Schmidt SVD sweep.
+
+    ``cutoff`` is the maximum relative cumulative squared singular weight to
+    discard at each bond. ``max_bond`` is a hard cap and can force a larger
+    discarded weight; ``cutoff_satisfied_by_bond`` records that condition.
+    """
+    _, _, _, MPO, npc = _require_tenpy()
+    if isinstance(max_bond, bool) or not isinstance(max_bond, Integral) or int(max_bond) < 1:
+        raise ValueError("max_bond must be a positive integer.")
+    if (
+        isinstance(cutoff, bool)
+        or not np.isfinite(cutoff)
+        or not 0.0 <= float(cutoff) < 1.0
+    ):
+        raise ValueError("cutoff must be finite and in the interval [0, 1).")
+    if getattr(mpo, "bc", None) != "finite":
+        raise ValueError("Hilbert-Schmidt MPO compression requires finite boundary conditions.")
+    if getattr(mpo, "L", 0) < 1:
+        raise ValueError("MPO must contain at least one site.")
+
+    hard_max_bond = int(max_bond)
+    relative_cutoff = float(cutoff)
+    tensors = _effective_finite_mpo_tensors(mpo)
+    pre_bonds = [tensors[0].shape[0]] + [tensor.shape[1] for tensor in tensors]
+    _right_canonicalize_mpo_tensors(tensors)
+    canonical_bonds = [tensors[0].shape[0]] + [tensor.shape[1] for tensor in tensors]
+    source_hilbert_schmidt_norm_squared = float(np.vdot(tensors[0], tensors[0]).real)
+    per_bond_cutoff_weights: list[float] = []
+    per_bond_discarded_squared_norms: list[float] = []
+    cutoff_satisfied_by_bond: list[bool] = []
+    retained_ranks: list[int] = []
+
+    for bond in range(mpo.L - 1):
+        left_tensor = tensors[bond]
+        left_dim, right_dim, physical_out, physical_in = left_tensor.shape
+        matrix = left_tensor.transpose(0, 2, 3, 1).reshape(
+            left_dim * physical_out * physical_in, right_dim
+        )
+        left_vectors, singular_values, right_vectors = np.linalg.svd(
+            matrix, full_matrices=False
+        )
+        retained_rank, discarded_weight = _svd_retained_rank(
+            singular_values,
+            max_bond=hard_max_bond,
+            cutoff=relative_cutoff,
+        )
+        retained_ranks.append(retained_rank)
+        per_bond_cutoff_weights.append(discarded_weight)
+        discarded_values = singular_values[retained_rank:]
+        per_bond_discarded_squared_norms.append(
+            float(np.vdot(discarded_values, discarded_values).real)
+        )
+        cutoff_satisfied_by_bond.append(
+            discarded_weight <= relative_cutoff + 64.0 * np.finfo(np.float64).eps
+        )
+
+        tensors[bond] = left_vectors[:, :retained_rank].reshape(
+            left_dim, physical_out, physical_in, retained_rank
+        ).transpose(0, 3, 1, 2)
+        remainder = singular_values[:retained_rank, None] * right_vectors[:retained_rank, :]
+        tensors[bond + 1] = np.tensordot(remainder, tensors[bond + 1], axes=(1, 0))
+
+    compressed = _mpo_from_effective_tensors(
+        MPO,
+        npc,
+        sites=mpo.sites,
+        tensors=tensors,
+    )
+    total_discarded_squared_norm = float(sum(per_bond_discarded_squared_norms))
+    if source_hilbert_schmidt_norm_squared > 0.0:
+        per_bond_discarded_weights = [
+            weight / source_hilbert_schmidt_norm_squared
+            for weight in per_bond_discarded_squared_norms
+        ]
+    else:
+        per_bond_discarded_weights = [0.0] * len(per_bond_discarded_squared_norms)
+    discarded_weight = float(sum(per_bond_discarded_weights))
+    diagnostics: dict[str, object] = {
+        "max_bond": hard_max_bond,
+        "cutoff": relative_cutoff,
+        "cutoff_semantics": "maximum relative cumulative discarded squared singular weight per bond",
+        "source_bonds": list(mpo.chi),
+        "pre_bonds": pre_bonds,
+        "canonical_bonds": canonical_bonds,
+        "post_bonds": list(compressed.chi),
+        "retained_ranks": retained_ranks,
+        "per_bond_cutoff_weights": per_bond_cutoff_weights,
+        "per_bond_discarded_weights": per_bond_discarded_weights,
+        "discarded_weight": discarded_weight,
+        "per_bond_discarded_squared_norms": per_bond_discarded_squared_norms,
+        "total_discarded_squared_norm": total_discarded_squared_norm,
+        "source_hilbert_schmidt_norm_squared": source_hilbert_schmidt_norm_squared,
+        "relative_hilbert_schmidt_error_squared": (
+            discarded_weight
+        ),
+        "cutoff_satisfied_by_bond": cutoff_satisfied_by_bond,
+    }
+    return compressed, diagnostics
+
+
+def probe_mpo_compression(
+    exact_mpo: Any,
+    compressed_mpo: Any,
+    *,
+    product_states: Sequence[Sequence[str]] | None = None,
+    random_state_count: int = 2,
+    random_bond: int = 4,
+    seed: int = 0,
+) -> dict[str, object]:
+    """Measure deterministic exact-versus-compressed MPO action errors on MPS probes."""
+    _, _, _, _, npc = _require_tenpy()
+    from tenpy.networks.mps import MPS
+
+    if exact_mpo.bc != "finite" or compressed_mpo.bc != "finite":
+        raise ValueError("Action probes require finite MPOs.")
+    if exact_mpo.L != compressed_mpo.L:
+        raise ValueError("Exact and compressed MPO lengths must match.")
+    if isinstance(random_state_count, bool) or not isinstance(random_state_count, Integral):
+        raise ValueError("random_state_count must be a nonnegative integer.")
+    if int(random_state_count) < 0:
+        raise ValueError("random_state_count must be a nonnegative integer.")
+    if isinstance(random_bond, bool) or not isinstance(random_bond, Integral) or int(random_bond) < 1:
+        raise ValueError("random_bond must be a positive integer.")
+    if isinstance(seed, bool) or not isinstance(seed, Integral) or int(seed) < 0:
+        raise ValueError("seed must be a nonnegative integer.")
+
+    if product_states is None:
+        alternating = tuple("up" if site % 2 == 0 else "down" for site in range(exact_mpo.L))
+        normalized_product_states = (
+            tuple("up" for _ in range(exact_mpo.L)),
+            tuple("down" for _ in range(exact_mpo.L)),
+            alternating,
+        )
+    else:
+        normalized_product_states = tuple(tuple(state) for state in product_states)
+    for state in normalized_product_states:
+        if len(state) != exact_mpo.L:
+            raise ValueError("Each product state must specify one local state per MPO site.")
+
+    probes: list[dict[str, object]] = []
+    states: list[tuple[str, Any]] = [
+        (
+            f"product_{index}",
+            MPS.from_product_state(
+                exact_mpo.sites,
+                state,
+                bc="finite",
+                dtype=np.complex128,
+                unit_cell_width=exact_mpo.L,
+            ),
+        )
+        for index, state in enumerate(normalized_product_states)
+    ]
+
+    random_generator_state = np.random.get_state()
+    maximum_finite_bond = 2 ** (exact_mpo.L // 2)
+    effective_random_bond = min(int(random_bond), maximum_finite_bond)
+    try:
+        np.random.seed(int(seed))
+        for index in range(int(random_state_count)):
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="unit_cell_width is a new argument.*",
+                    category=UserWarning,
+                    module=r"tenpy\.networks\.mps",
+                )
+                random_state = MPS.from_random_unitary_evolution(
+                    exact_mpo.sites,
+                    chi=effective_random_bond,
+                    p_state=["up"] * exact_mpo.L,
+                    bc="finite",
+                    dtype=np.complex128,
+                )
+            states.append(
+                (
+                    f"random_{index}",
+                    random_state,
+                )
+            )
+    finally:
+        np.random.set_state(random_generator_state)
+
+    for name, state in states:
+        exact_action = _apply_mpo_action(exact_mpo, state, npc)
+        compressed_action = _apply_mpo_action(compressed_mpo, state, npc)
+        exact_norm_sq = _real_overlap(exact_action, exact_action)
+        if exact_norm_sq == 0.0:
+            probes.append(
+                {
+                    "name": name,
+                    "status": "not_tested",
+                    "action_norm": 0.0,
+                    "relative_action_error": None,
+                }
+            )
+            continue
+        compressed_norm_sq = _real_overlap(compressed_action, compressed_action)
+        cross_overlap = exact_action.overlap(compressed_action, ignore_form=True)
+        difference_norm_sq = exact_norm_sq + compressed_norm_sq - 2.0 * float(
+            np.real(cross_overlap)
+        )
+        roundoff_scale = max(exact_norm_sq, compressed_norm_sq, 1.0)
+        if difference_norm_sq < 0.0 and abs(difference_norm_sq) <= (
+            256.0 * np.finfo(np.float64).eps * roundoff_scale
+        ):
+            difference_norm_sq = 0.0
+        if difference_norm_sq < 0.0:
+            raise ValueError("MPS action-overlap contraction produced a negative squared norm.")
+        probes.append(
+            {
+                "name": name,
+                "status": "tested",
+                "action_norm": float(np.sqrt(exact_norm_sq)),
+                "relative_action_error": float(np.sqrt(difference_norm_sq / exact_norm_sq)),
+            }
+        )
+
+    tested_errors = [
+        float(probe["relative_action_error"])
+        for probe in probes
+        if probe["status"] == "tested"
+    ]
+    return {
+        "seed": int(seed),
+        "product_states": [list(state) for state in normalized_product_states],
+        "random_state_count": int(random_state_count),
+        "random_bond": int(random_bond),
+        "effective_random_bond": effective_random_bond,
+        "tested_probes": len(tested_errors),
+        "not_tested_probes": len(probes) - len(tested_errors),
+        "max_relative_action_error": max(tested_errors) if tested_errors else None,
+        "mean_relative_action_error": (
+            float(np.mean(tested_errors)) if tested_errors else None
+        ),
+        "probes": probes,
+    }
+
+
+def dense_pauli_sum(terms: Sequence[tuple[str, complex]]) -> np.ndarray:
+    """Return a tiny dense Pauli sum for tests, rejecting systems above four qubits."""
+    normalized_terms = list(terms)
+    if not normalized_terms:
+        raise ValueError("dense_pauli_sum requires at least one Pauli term.")
+    first_label = normalized_terms[0][0]
+    if not isinstance(first_label, str):
+        raise ValueError("Pauli labels must be strings.")
+    n_qubits = len(first_label)
+    _validate_dense_helper_size(n_qubits)
+    matrices = {
+        "I": np.eye(2, dtype=np.complex128),
+        "X": np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128),
+        "Y": np.asarray([[0.0, -1.0j], [1.0j, 0.0]], dtype=np.complex128),
+        "Z": np.asarray([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128),
+    }
+    result = np.zeros((2**n_qubits, 2**n_qubits), dtype=np.complex128)
+    for label, coefficient in normalized_terms:
+        _validate_pauli_label(label, n_qubits=n_qubits)
+        local_operator = np.asarray([[1.0]], dtype=np.complex128)
+        for symbol in label:
+            local_operator = np.kron(local_operator, matrices[symbol])
+        result += _finite_complex(coefficient) * local_operator
+    return result
+
+
+def mpo_to_dense(mpo: Any) -> np.ndarray:
+    """Contract a finite MPO to a dense matrix only for test systems with q <= 4."""
+    n_qubits = int(mpo.L)
+    _validate_dense_helper_size(n_qubits)
+    if mpo.bc != "finite":
+        raise ValueError("mpo_to_dense requires finite boundary conditions.")
+    tensors = _effective_finite_mpo_tensors(mpo)
+    contraction = tensors[0][0]
+    for tensor in tensors[1:]:
+        contraction = np.tensordot(contraction, tensor, axes=(0, 0))
+        contraction = np.moveaxis(contraction, -3, 0)
+    contraction = contraction[0]
+    output_axes = tuple(range(0, 2 * n_qubits, 2))
+    input_axes = tuple(range(1, 2 * n_qubits, 2))
+    return contraction.transpose(output_axes + input_axes).reshape(
+        2**n_qubits, 2**n_qubits
+    )
+
+
+def _require_tenpy() -> tuple[Any, Any, Any, Any, Any]:
+    try:
+        from tenpy.linalg import np_conserved as npc
+        from tenpy.networks.mpo import MPO, MPOGraph
+        from tenpy.networks.site import SpinHalfSite
+        from tenpy.networks.terms import TermList
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "TeNPy is required for MPO operations; install the tensor-network optional dependency."
+        ) from error
+    return SpinHalfSite, TermList, MPOGraph, MPO, npc
+
+
+def _effective_finite_mpo_tensors(mpo: Any) -> list[np.ndarray]:
+    tensors: list[np.ndarray] = []
+    for site in range(mpo.L):
+        tensor = mpo.get_W(site)
+        labels = tensor.get_leg_labels()
+        axes = [labels.index(label) for label in ("wL", "wR", "p", "p*")]
+        tensors.append(np.transpose(tensor.to_ndarray(), axes).copy())
+
+    left_boundary = mpo.get_IdL(0)
+    right_boundary = mpo.get_IdR(mpo.L - 1)
+    if left_boundary is None:
+        if tensors[0].shape[0] != 1:
+            raise ValueError("Finite MPO has no unambiguous left boundary index.")
+        left_boundary = 0
+    if right_boundary is None:
+        if tensors[-1].shape[1] != 1:
+            raise ValueError("Finite MPO has no unambiguous right boundary index.")
+        right_boundary = 0
+    if not 0 <= int(left_boundary) < tensors[0].shape[0]:
+        raise ValueError("Finite MPO left boundary index is outside its bond dimension.")
+    if not 0 <= int(right_boundary) < tensors[-1].shape[1]:
+        raise ValueError("Finite MPO right boundary index is outside its bond dimension.")
+    tensors[0] = tensors[0][int(left_boundary) : int(left_boundary) + 1]
+    tensors[-1] = tensors[-1][:, int(right_boundary) : int(right_boundary) + 1]
+
+    for site, tensor in enumerate(tensors):
+        if tensor.ndim != 4 or tensor.shape[2:] != (2, 2):
+            raise ValueError("MPO tensors must have two-dimensional input and output physical legs.")
+        if site and tensors[site - 1].shape[1] != tensor.shape[0]:
+            raise ValueError("Adjacent MPO bond dimensions are inconsistent.")
+    return tensors
+
+
+def _mpo_from_effective_tensors(
+    MPO: Any,
+    npc: Any,
+    *,
+    sites: Sequence[Any],
+    tensors: Sequence[np.ndarray],
+) -> Any:
+    arrays = []
+    for site, tensor in zip(sites, tensors):
+        left_leg = npc.LegCharge.from_trivial(
+            tensor.shape[0], chargeinfo=site.leg.chinfo, qconj=1
+        )
+        right_leg = npc.LegCharge.from_trivial(
+            tensor.shape[1], chargeinfo=site.leg.chinfo, qconj=-1
+        )
+        arrays.append(
+            npc.Array.from_ndarray(
+                tensor,
+                [left_leg, right_leg, site.leg, site.leg.conj()],
+                labels=["wL", "wR", "p", "p*"],
+                qtotal=site.leg.chinfo.make_valid(),
+            )
+        )
+    length = len(arrays)
+    return MPO(
+        list(sites),
+        arrays,
+        bc="finite",
+        IdL=[0] + [None] * length,
+        IdR=[None] * length + [0],
+        mps_unit_cell_width=length,
+    )
+
+
+def _right_canonicalize_mpo_tensors(tensors: list[np.ndarray]) -> None:
+    for site in range(len(tensors) - 1, 0, -1):
+        tensor = tensors[site]
+        left_dim, right_dim, physical_out, physical_in = tensor.shape
+        matrix = tensor.transpose(0, 2, 3, 1).reshape(
+            left_dim, physical_out * physical_in * right_dim
+        )
+        right_vectors, transfer = np.linalg.qr(matrix.T, mode="reduced")
+        canonical_left_dim = right_vectors.shape[1]
+        tensors[site] = right_vectors.T.reshape(
+            canonical_left_dim, physical_out, physical_in, right_dim
+        ).transpose(0, 3, 1, 2)
+        previous = np.tensordot(tensors[site - 1], transfer.T, axes=(1, 0))
+        tensors[site - 1] = previous.transpose(0, 3, 1, 2)
+
+
+def _svd_retained_rank(
+    singular_values: np.ndarray,
+    *,
+    max_bond: int,
+    cutoff: float,
+) -> tuple[int, float]:
+    if singular_values.size == 0:
+        raise ValueError("SVD returned no singular values for a nonempty MPO tensor.")
+    scale = float(np.max(np.abs(singular_values)))
+    if scale == 0.0:
+        return 1, 0.0
+    relative_squared = np.square(singular_values / scale)
+    total = float(np.sum(relative_squared))
+    retained_for_cutoff = singular_values.size
+    for rank in range(1, singular_values.size + 1):
+        discarded = float(np.sum(relative_squared[rank:]) / total)
+        if discarded <= cutoff:
+            retained_for_cutoff = rank
+            break
+    retained_rank = min(retained_for_cutoff, max_bond)
+    retained_rank = max(1, retained_rank)
+    discarded_weight = float(np.sum(relative_squared[retained_rank:]) / total)
+    return retained_rank, discarded_weight
+
+
+def _apply_mpo_action(mpo: Any, state: Any, npc: Any) -> Any:
+    result = state.copy()
+    if mpo.L > 1:
+        mpo.apply_naively(result)
+        return result
+
+    local_matrix = _effective_finite_mpo_tensors(mpo)[0][0, 0]
+    site = mpo.sites[0]
+    local_operator = npc.Array.from_ndarray(
+        local_matrix,
+        [site.leg, site.leg.conj()],
+        labels=["p", "p*"],
+        qtotal=site.leg.chinfo.make_valid(),
+    )
+    updated_tensor = npc.tensordot(
+        local_operator,
+        result.get_B(0, form=None),
+        axes=(["p*"], ["p"]),
+    )
+    result.set_B(0, updated_tensor, result.form[0])
+    return result
+
+
+def _real_overlap(left: Any, right: Any) -> float:
+    overlap = left.overlap(right, ignore_form=True)
+    result = float(np.real(overlap))
+    scale = max(float(abs(overlap)), 1.0)
+    if result < 0.0 and abs(result) <= 256.0 * np.finfo(np.float64).eps * scale:
+        return 0.0
+    if result < 0.0:
+        raise ValueError("MPS norm contraction produced a negative value.")
+    return result
+
+
+def _validate_dense_helper_size(n_qubits: int) -> None:
+    if n_qubits < 1 or n_qubits > 4:
+        raise ValueError("Dense MPO test helpers are restricted to q <= 4.")
+
+
+def _finite_complex(coefficient: complex) -> complex:
+    try:
+        value = complex(coefficient)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("Term coefficients must be finite complex scalars.") from error
+    if not np.isfinite(value.real) or not np.isfinite(value.imag):
+        raise ValueError("Term coefficients must be finite.")
+    return value
+
+
+def _stable_complex_sum(values: Sequence[complex]) -> complex:
+    try:
+        result = complex(
+            math.fsum(value.real for value in values),
+            math.fsum(value.imag for value in values),
+        )
+    except (OverflowError, ValueError) as error:
+        raise ValueError("Combined term coefficients must remain finite.") from error
+    if not np.isfinite(result.real) or not np.isfinite(result.imag):
+        raise ValueError("Combined term coefficients must remain finite.")
+    return result
 
 
 def _finite_real_array(values: np.ndarray, *, name: str, ndim: int) -> np.ndarray:
