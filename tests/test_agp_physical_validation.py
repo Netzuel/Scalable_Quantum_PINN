@@ -289,6 +289,23 @@ class AGPPhysicalValidationTests(unittest.TestCase):
         self.assertAlmostEqual(rows[2]["energy_error"], 1.5)
         self.assertAlmostEqual(rows[3]["energy_error"], 0.2)
 
+    def test_physical_comparison_rows_accept_canonical_nested_l1_key(self):
+        rows = physical_comparison_rows(
+            {
+                "ground_energy": -2.0,
+                "results": {
+                    "nested_l1": {
+                        "final_energy": -1.5,
+                        "ground_state_fidelity": 0.75,
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(rows[2]["method"], "Nested commutator l=1")
+        self.assertEqual(rows[2]["final_energy"], -1.5)
+        self.assertEqual(rows[2]["ground_state_fidelity"], 0.75)
+
     def test_unconverged_mps_table_is_labeled_as_diagnostic(self):
         note = physical_validation_note(
             {

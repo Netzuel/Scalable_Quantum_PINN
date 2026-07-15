@@ -87,6 +87,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         expected_framework = {
             "agp_mps_validation.py",
             "agp_physical_validation.py",
+            "agp_validation_identity.py",
             "agp_qubit_grid_benchmark.py",
             "build_driver_problem_hamiltonian.py",
             "agp_regenerate_hcd_summaries.py",
@@ -116,6 +117,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "tests/test_spin_hubo_benchmark.py",
             "tests/sparse_agp_curriculum/scripts/agp_physical_validation.py",
             "tests/sparse_agp_curriculum/scripts/agp_mps_validation.py",
+            "tests/sparse_agp_curriculum/scripts/agp_validation_identity.py",
             "tests/sparse_agp_curriculum/scripts/agp_qubit_grid_benchmark.py",
             "tests/sparse_agp_curriculum/scripts/agp_regenerate_hcd_summaries.py",
             "tests/sparse_agp_curriculum/scripts/build_driver_problem_hamiltonian.py",

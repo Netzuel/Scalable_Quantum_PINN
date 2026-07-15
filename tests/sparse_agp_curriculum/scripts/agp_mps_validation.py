@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import functools
-import hashlib
 import json
 import sys
 import time
@@ -28,6 +27,16 @@ from agp_physical_validation import (  # noqa: E402
     schedule_sin2,
     subset_learned_terms,
     variational_l1_agp,
+)
+from agp_validation_identity import (  # noqa: E402
+    VALIDATION_IDENTITY_KEYS,
+    canonical_hash as _shared_canonical_hash,
+    checkpoint_identity as _shared_checkpoint_identity,
+    ground_reference_identity as _shared_ground_reference_identity,
+    hamiltonian_identity as _shared_hamiltonian_identity,
+    schedule_identity as _shared_schedule_identity,
+    schedule_parameters_identity,
+    validation_identity_from_settings,
 )
 from scripts.agp_plot_annotations import plot_physical_comparison_table  # noqa: E402
 
@@ -64,11 +73,7 @@ _ELIGIBLE_MPO_IDENTITY_KEYS = (
     "total_time",
     "initial_state",
 )
-_STATEVECTOR_REFERENCE_IDENTITY_KEYS = (
-    *_ELIGIBLE_MPO_IDENTITY_KEYS[2:],
-    "steps",
-    "integrator",
-)
+_STATEVECTOR_REFERENCE_IDENTITY_KEYS = VALIDATION_IDENTITY_KEYS
 
 
 def resolve_validation_backend(validation: Mapping[str, object]) -> dict[str, object]:
@@ -129,67 +134,30 @@ def require_full_learned_support(*, selected_terms: int, available_terms: int, a
 
 
 def _checkpoint_identity(path: Path) -> dict[str, object]:
-    stat = path.stat()
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return {
-        "path": str(path.resolve()),
-        "size": int(stat.st_size),
-        "mtime_ns": int(stat.st_mtime_ns),
-        "sha256": digest.hexdigest(),
-    }
+    return _shared_checkpoint_identity(path)
 
 
 def _canonical_hash(value: object) -> str:
-    def normalize(item: object) -> object:
-        if isinstance(item, Mapping):
-            return {str(key): normalize(value) for key, value in sorted(item.items(), key=lambda pair: str(pair[0]))}
-        if isinstance(item, (list, tuple)):
-            return [normalize(value) for value in item]
-        if isinstance(item, np.ndarray):
-            return {"shape": list(item.shape), "dtype": str(item.dtype), "sha256": hashlib.sha256(item.tobytes()).hexdigest()}
-        if isinstance(item, complex):
-            return [item.real, item.imag]
-        if isinstance(item, np.generic):
-            return item.item()
-        return item
-
-    return hashlib.sha256(json.dumps(normalize(value), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return _shared_canonical_hash(value)
 
 
 def _hamiltonian_identity(h0: SparsePauliOperator, h1: SparsePauliOperator) -> str:
-    return _canonical_hash(
-        {
-            "h0": sorted((label, complex(value)) for label, value in h0.terms.items()),
-            "h1": sorted((label, complex(value)) for label, value in h1.terms.items()),
-        }
-    )
+    return _shared_hamiltonian_identity(h0, h1)
 
 
 def _ground_reference_identity(
     validation: Mapping[str, object], *, ground_energy: float, ground_bitstring: str
 ) -> str:
     reference_path = validation.get("exact_final_ground_reference")
-    source: dict[str, object] = {"ground_energy": ground_energy, "ground_bitstring": ground_bitstring}
-    if reference_path:
-        path = _resolve_path(reference_path, base=ROOT)
-        source["reference_path"] = str(path.resolve())
-        source["reference_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return _canonical_hash(source)
+    return _shared_ground_reference_identity(
+        ground_energy=ground_energy,
+        ground_bitstring=ground_bitstring,
+        reference_path=_resolve_path(reference_path, base=ROOT) if reference_path else None,
+    )
 
 
 def _learned_schedule_identity(learned: Mapping[str, object], *, learned_scale: float) -> str:
-    return _canonical_hash(
-        {
-            "schedule_source": learned.get("schedule_source"),
-            "tau": np.asarray(learned["tau"], dtype=np.float64),
-            "lambda": None if learned.get("lambda") is None else np.asarray(learned["lambda"], dtype=np.float64),
-            "d_lambda_dt": None if learned.get("d_lambda_dt") is None else np.asarray(learned["d_lambda_dt"], dtype=np.float64),
-            "learned_scale": float(learned_scale),
-        }
-    )
+    return _shared_schedule_identity(learned, learned_scale=learned_scale)
 
 
 def _kron_paulis(label: str) -> np.ndarray:
@@ -808,6 +776,35 @@ def eligible_mpo_resolution_ladder(
     return [case for case, identity in candidates if identity == reference_identity]
 
 
+def final_eligible_mpo_resolution(
+    resolutions: Sequence[Mapping[str, object]],
+) -> Mapping[str, object] | None:
+    ladder = eligible_mpo_resolution_ladder(resolutions)
+    return ladder[-1] if ladder else None
+
+
+def publish_final_eligible_mpo_results(
+    payload: dict[str, object],
+    resolutions: Sequence[Mapping[str, object]],
+) -> Mapping[str, object] | None:
+    """Publish top-level certified metrics only from the final eligible MPO row."""
+
+    resolution = final_eligible_mpo_resolution(resolutions)
+    if resolution is None:
+        return None
+    settings = resolution.get("settings", {})
+    results = resolution.get("results", {})
+    if not isinstance(settings, Mapping) or not isinstance(results, Mapping):
+        return None
+    payload["results"] = dict(results)
+    payload["full_learned_terms"] = settings["full_learned_terms"]
+    payload["certification_resolution"] = {
+        "name": resolution.get("name"),
+        "validation_identity": _statevector_reference_identity(settings),
+    }
+    return resolution
+
+
 def _completed_comparable_mpo_resolution_count(
     resolutions: Sequence[Mapping[str, object]],
 ) -> int:
@@ -1160,17 +1157,21 @@ def statevector_results_for_learned_terms(
     required_identity: Mapping[str, object] | None = None,
 ) -> dict[str, Mapping[str, object]]:
     if required_identity is not None:
-        reference_identity = payload.get("validation_identity", {})
-        if (
-            not isinstance(reference_identity, Mapping)
-            or any(key not in required_identity for key in _STATEVECTOR_REFERENCE_IDENTITY_KEYS)
-            or any(key not in reference_identity for key in _STATEVECTOR_REFERENCE_IDENTITY_KEYS)
-            or any(
-                _canonical_cache_value(reference_identity[key])
-                != _canonical_cache_value(required_identity[key])
+        identities = [payload.get("validation_identity", {})]
+        variant_identities = payload.get("learned_variant_validation_identities", {})
+        if isinstance(variant_identities, Mapping):
+            identities.extend(value for value in variant_identities.values() if isinstance(value, Mapping))
+        matches_identity = any(
+            isinstance(identity, Mapping)
+            and all(key in required_identity and key in identity for key in _STATEVECTOR_REFERENCE_IDENTITY_KEYS)
+            and all(
+                _canonical_cache_value(identity[key])
+                == _canonical_cache_value(required_identity[key])
                 for key in _STATEVECTOR_REFERENCE_IDENTITY_KEYS
             )
-        ):
+            for identity in identities
+        )
+        if not matches_identity:
             return {}
     raw_results = payload.get("results", {})
     if not isinstance(raw_results, dict):
@@ -1201,7 +1202,7 @@ def statevector_results_for_learned_terms(
 
 
 def _statevector_reference_identity(settings: Mapping[str, object]) -> dict[str, object]:
-    return {key: settings[key] for key in _STATEVECTOR_REFERENCE_IDENTITY_KEYS}
+    return validation_identity_from_settings(settings)
 
 
 def validation_certification(
@@ -1542,6 +1543,8 @@ def main() -> None:
                 "schedule_identity": _learned_schedule_identity(
                     learned, learned_scale=float(validation.get("learned_scale", 1.0))
                 ),
+                "schedule_parameters_identity": schedule_parameters_identity(learned),
+                "statevector_integrator": "rk4_renormalized",
             },
             "results": {},
         }
@@ -1600,7 +1603,6 @@ def main() -> None:
         _save_progress(summary_path, payload)
 
     final_results = resolution_results[-1]["results"]
-    payload["results"] = final_results
     convergence: dict[str, object] = {"status": "not_tested", "reason": "Only one resolution was run."}
     timestep_convergence: dict[str, object] = {
         "status": "not_tested",
@@ -1632,7 +1634,11 @@ def main() -> None:
     payload["timestep_convergence"] = timestep_convergence
 
     compression: dict[str, object] = {"status": "not_tested", "reason": "Legacy product-formula backend."}
-    gate_resolution = eligible_ladder[-1] if eligible_ladder else None
+    gate_resolution = publish_final_eligible_mpo_results(payload, resolution_results)
+    if backend["name"] == "tenpy_tdvp_mpo" and gate_resolution is not None:
+        final_results = gate_resolution["results"]  # type: ignore[index]
+    else:
+        payload["results"] = final_results
     gate_results = (
         _canonical_mpo_results(gate_resolution["results"])  # type: ignore[arg-type]
         if gate_resolution is not None

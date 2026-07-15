@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from utils import SparsePauliOperator, _commutator_pauli_labels_unchecked, load_pauli_hamiltonian_pair  # noqa: E402
 from scripts.agp_plot_annotations import plot_physical_comparison_table  # noqa: E402
+from agp_validation_identity import build_validation_identity  # noqa: E402
 
 
 RUN_DIR = Path.cwd()
@@ -87,6 +88,69 @@ def load_json(path: Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise TypeError(f"{path} must contain a JSON object.")
     return payload
+
+
+def build_statevector_validation_identity(
+    *,
+    h0: SparsePauliOperator,
+    h1: SparsePauliOperator,
+    learned: Mapping[str, object],
+    coefficient_path: Path,
+    ground_energy: float,
+    ground_bitstring: str,
+    total_time: float,
+    steps: int,
+    learned_scale: float,
+    mps_integrator: str,
+    ground_reference_path: Path | None = None,
+) -> dict[str, object]:
+    """Build the statevector provenance contract consumed by MPO calibration."""
+
+    return build_validation_identity(
+        h0=h0,
+        h1=h1,
+        learned=learned,
+        coefficient_path=coefficient_path,
+        ground_energy=ground_energy,
+        ground_bitstring=ground_bitstring,
+        total_time=total_time,
+        steps=steps,
+        learned_scale=learned_scale,
+        mps_integrator=mps_integrator,
+        ground_reference_path=ground_reference_path,
+    )
+
+
+def _ground_reference_for_identity(
+    config: Mapping[str, object],
+    *,
+    n_qubits: int,
+    ground_energy: float,
+    fallback_bitstring: str,
+) -> tuple[float, str, Path | None]:
+    tensor_validation = config.get("tensor_network_validation", {})
+    tensor_validation = tensor_validation if isinstance(tensor_validation, Mapping) else {}
+    raw_path = tensor_validation.get("exact_final_ground_reference")
+    if not raw_path:
+        return ground_energy, fallback_bitstring, None
+    reference_path = Path(str(raw_path))
+    if not reference_path.is_absolute():
+        reference_path = ROOT / reference_path
+    payload = load_json(reference_path)
+    solutions = payload.get("solutions", [])
+    if isinstance(solutions, list):
+        for row in solutions:
+            if not isinstance(row, Mapping) or int(row.get("q", -1)) != n_qubits:
+                continue
+            bitstrings = row.get("ground_bitstrings", row.get("ground_bitstring"))
+            if isinstance(bitstrings, list) and bitstrings:
+                bitstring = str(bitstrings[0])
+            elif bitstrings is not None:
+                bitstring = str(bitstrings)
+            else:
+                bitstring = fallback_bitstring
+            return float(row.get("ground_energy", ground_energy)), bitstring, reference_path
+    return ground_energy, fallback_bitstring, reference_path
 
 
 def schedule_sin2(t: float, total_time: float) -> tuple[float, float]:
@@ -793,6 +857,18 @@ def main() -> None:
     ground_probs[ground_indices] = 1.0 / len(ground_indices)
     target_z = z_expectations(ground_probs, n_qubits)
     target_zz = zz_expectations(ground_probs, n_qubits)
+    fallback_ground_bitstring = format(int(ground_indices[0]), f"0{n_qubits}b")
+    identity_ground_energy, ground_bitstring, ground_reference_path = _ground_reference_for_identity(
+        config,
+        n_qubits=n_qubits,
+        ground_energy=ground_energy,
+        fallback_bitstring=fallback_ground_bitstring,
+    )
+    tensor_validation = config.get("tensor_network_validation", {})
+    tensor_validation = tensor_validation if isinstance(tensor_validation, Mapping) else {}
+    mpo_backend = tensor_validation.get("mpo_backend", {})
+    mpo_backend = mpo_backend if isinstance(mpo_backend, Mapping) else {}
+    mps_integrator = str(mpo_backend.get("integrator", "tdvp"))
 
     coefficient_path = trained_run / "Models_Data" / "final_agp_coefficients.pt"
     if not coefficient_path.is_file():
@@ -828,6 +904,7 @@ def main() -> None:
         )
 
     learned_variant_results: dict[str, dict[str, float]] = {}
+    learned_variant_inputs: dict[str, dict[str, object]] = {}
     default_learned: dict[str, object] | None = None
     for spec in variant_specs:
         learned = subset_learned_terms(learned_full, spec.max_terms)
@@ -858,6 +935,7 @@ def main() -> None:
         row["learned_scale"] = float(spec.scale)
         row["retained_rms_norm_fraction"] = float(learned["retained_rms_norm_fraction"])
         learned_variant_results[spec.name] = row
+        learned_variant_inputs[spec.name] = learned
         if spec.is_default:
             default_learned = learned
             results["learned_sparse_agp"] = dict(row)
@@ -865,6 +943,7 @@ def main() -> None:
     if "learned_sparse_agp" not in results:
         default_spec = variant_specs[0]
         default_learned = subset_learned_terms(learned_full, default_spec.max_terms)
+        learned_variant_inputs[default_spec.name] = default_learned
         results["learned_sparse_agp"] = dict(learned_variant_results[default_spec.name])
 
     best_learned_variant = select_best_learned_variant(learned_variant_results, metric=selection_metric)
@@ -874,6 +953,27 @@ def main() -> None:
     add_quotients_vs_no_cd(learned_variant_results, results["no_cd"])
 
     assert default_learned is not None
+    learned_variant_validation_identities = {
+        spec.name: build_statevector_validation_identity(
+            h0=h0,
+            h1=h1,
+            learned=learned_variant_inputs[spec.name],
+            coefficient_path=coefficient_path,
+            ground_energy=identity_ground_energy,
+            ground_bitstring=ground_bitstring,
+            total_time=total_time,
+            steps=steps,
+            learned_scale=spec.scale,
+            mps_integrator=mps_integrator,
+            ground_reference_path=ground_reference_path,
+        )
+        for spec in variant_specs
+    }
+    default_identity = next(
+        learned_variant_validation_identities[spec.name]
+        for spec in variant_specs
+        if spec.is_default
+    )
 
     payload = {
         "description": (
@@ -891,6 +991,7 @@ def main() -> None:
         "total_time": total_time,
         "steps": steps,
         "ground_energy": ground_energy,
+        "ground_bitstring": ground_bitstring,
         "ground_state_degeneracy": int(len(ground_indices)),
         "learned_agp_truncation": {
             "selected_terms": default_learned["selected_terms"],
@@ -907,6 +1008,8 @@ def main() -> None:
         },
         "learned_variant_specs": [asdict(spec) for spec in variant_specs],
         "learned_variant_results": learned_variant_results,
+        "validation_identity": default_identity,
+        "learned_variant_validation_identities": learned_variant_validation_identities,
         "best_learned_variant": best_learned_variant,
         "results": results,
     }

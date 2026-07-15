@@ -20,6 +20,15 @@ PHYSICAL_TABLE_METHODS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _physical_method_result(results: Mapping[str, object], method: str) -> Mapping[str, object]:
+    candidates = ("kipu_dqfm_l1", "nested_l1") if method == "kipu_dqfm_l1" else (method,)
+    for candidate in candidates:
+        row = results.get(candidate)
+        if isinstance(row, Mapping):
+            return row
+    return {}
+
+
 def _finite_float(value: object) -> float | None:
     try:
         parsed = float(value)  # type: ignore[arg-type]
@@ -229,8 +238,7 @@ def physical_comparison_rows(payload: Mapping[str, object]) -> list[dict[str, ob
         }
     ]
     for key, label in PHYSICAL_TABLE_METHODS:
-        source = results.get(key)
-        source = source if isinstance(source, Mapping) else {}
+        source = _physical_method_result(results, key)
         diagnostics = source.get("mps_diagnostics", {})
         diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
         completed_steps = diagnostics.get("completed_steps")
@@ -445,8 +453,8 @@ def physical_footer_lines(payload: Mapping[str, object]) -> list[str]:
 
     metric_parts: list[str] = []
     for method, label in PHYSICAL_METHODS:
-        row = results.get(method)
-        if not isinstance(row, Mapping):
+        row = _physical_method_result(results, method)
+        if not row:
             continue
         energy = _format_number(row.get("final_energy"))
         fidelity = _format_number(row.get("ground_state_fidelity"))
@@ -522,8 +530,7 @@ def hcd_context_lines_for_images_dir(images_dir: Path) -> list[str]:
     )
 
     def method_text(key: str, label: str) -> str:
-        row = results.get(key, {})
-        row = row if isinstance(row, Mapping) else {}
+        row = _physical_method_result(results, key)
         energy = _format_number(row.get("final_energy"))
         fidelity = _format_number(row.get("ground_state_fidelity"))
         energy_text = energy if energy is not None else "not computed"

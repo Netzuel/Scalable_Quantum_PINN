@@ -261,6 +261,7 @@ class AGPMPSValidationTests(unittest.TestCase):
                     "ground_reference_identity": "ground",
                     "ground_bitstring": "00",
                     "schedule_identity": "schedule",
+                    "schedule_parameters_identity": "schedule-parameters",
                     "checkpoint_identity": "checkpoint",
                     "coefficient_identity": "coefficient",
                     "total_time": 1.0,
@@ -282,6 +283,53 @@ class AGPMPSValidationTests(unittest.TestCase):
 
         self.assertEqual([row["name"] for row in eligible], ["coarse", "fine"])
         self.assertEqual(agp_mps_validation._completed_comparable_mpo_resolution_count(eligible), 2)
+
+    def test_final_eligible_resolution_owns_top_level_metrics_after_trailing_ablation(self):
+        import agp_mps_validation
+
+        def resolution(name, *, ablation=False, final_energy=-1.0):
+            return {
+                "name": name,
+                "ablation": ablation,
+                "learned_support": "ablation" if ablation else "full_support",
+                "settings": {
+                    "backend": "tenpy_tdvp_mpo",
+                    "integrator": "tdvp",
+                    "n_qubits": 2,
+                    "learned_terms": 4 if ablation else 8,
+                    "full_learned_terms": 8,
+                    "learned_scale": 1.0,
+                    "hamiltonian_identity": "hamiltonian",
+                    "ground_reference_identity": "ground",
+                    "ground_bitstring": "00",
+                    "schedule_identity": "schedule",
+                    "schedule_parameters_identity": "schedule-parameters",
+                    "checkpoint_identity": "checkpoint",
+                    "coefficient_identity": "coefficient",
+                    "total_time": 1.0,
+                    "initial_state": "++",
+                    "steps": 8,
+                    "statevector_integrator": "rk4_renormalized",
+                },
+                "results": {
+                    protocol: {
+                        "final_energy": final_energy,
+                        "ground_state_fidelity": 1.0,
+                        "mps_diagnostics": {"status": "ok", "completed_steps": 8, "steps": 8},
+                    }
+                    for protocol in ("no_cd", "kipu_dqfm_l1", "learned_sparse_agp")
+                },
+            }
+
+        payload = {"results": {"learned_sparse_agp": {"final_energy": -0.5}}}
+        selected = agp_mps_validation.publish_final_eligible_mpo_results(
+            payload,
+            [resolution("coarse", final_energy=-1.1), resolution("fine", final_energy=-1.0), resolution("ablation", ablation=True, final_energy=-0.5)]
+        )
+
+        self.assertEqual(selected["name"], "fine")
+        self.assertEqual(payload["results"]["learned_sparse_agp"]["final_energy"], -1.0)
+        self.assertEqual(payload["certification_resolution"]["name"], "fine")
 
     def test_mpo_compression_uses_measured_upper_bound_and_unresolved_statuses(self):
         base_diagnostics = {
@@ -476,6 +524,61 @@ class AGPMPSValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(selected, {})
+
+    def test_statevector_cli_identity_matches_and_rejects_mpo_identity_mismatch(self):
+        import agp_physical_validation
+
+        h0 = SparsePauliOperator({"XI": -1.0}, n_qubits=2)
+        h1 = SparsePauliOperator({"ZZ": -1.0}, n_qubits=2)
+        learned = {
+            "tau": np.array([0.0, 1.0]),
+            "lambda": np.array([0.0, 1.0]),
+            "d_lambda_dt": np.array([0.0, 0.0]),
+            "schedule_source": "exported",
+            "selected_terms": 1,
+            "available_terms": 1,
+        }
+        with __import__("tempfile").TemporaryDirectory() as tmp:
+            coefficient_path = Path(tmp) / "final_agp_coefficients.pt"
+            coefficient_path.write_bytes(b"identity")
+            identity = agp_physical_validation.build_statevector_validation_identity(
+                h0=h0,
+                h1=h1,
+                learned=learned,
+                coefficient_path=coefficient_path,
+                ground_energy=-1.0,
+                ground_bitstring="00",
+                total_time=1.0,
+                steps=16,
+                learned_scale=1.0,
+                mps_integrator="tdvp",
+            )
+
+        payload = {
+            "validation_identity": identity,
+            "results": {
+                "no_cd": {"final_energy": -0.5},
+                "kipu_dqfm_l1": {"final_energy": -0.75},
+                "learned_sparse_agp": {"final_energy": -1.0, "learned_terms": 1},
+            },
+        }
+        matched = statevector_results_for_learned_terms(
+            payload,
+            learned_terms=1,
+            learned_scale=1.0,
+            require_matching_learned_terms=True,
+            required_identity=identity,
+        )
+        mismatched = statevector_results_for_learned_terms(
+            payload,
+            learned_terms=1,
+            learned_scale=1.0,
+            require_matching_learned_terms=True,
+            required_identity={**identity, "total_time": 2.0},
+        )
+
+        self.assertEqual(set(matched), {"no_cd", "kipu_dqfm_l1", "learned_sparse_agp"})
+        self.assertEqual(mismatched, {})
 
     def test_mpo_backend_exception_preserves_complete_result_schema(self):
         h0 = SparsePauliOperator({"X": -1.0}, n_qubits=1)

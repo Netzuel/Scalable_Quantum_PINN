@@ -61,6 +61,17 @@ configs or generated validation artifacts.
   ladder-convergence status.
 - Backend-exception rows use the same full metric schema as completed MPO rows,
   with unavailable metrics and explicit observable/final-time statuses.
+- Top-level MPO `results`, `full_learned_terms`, and
+  `certification_resolution` now publish from the same final eligible
+  full-support row. A trailing ablation stays in `resolution_results` but
+  cannot replace certified top-level metrics.
+- Added `agp_validation_identity.py`, shared by the statevector and MPO CLIs.
+  The statevector payload now emits a default and per-learned-variant
+  `validation_identity` with canonical H0/H1, schedule parameters, timing,
+  checkpoint/coefficient, support/scale, initial state, ground reference, and
+  both statevector RK4 and calibrated-MPO integrator semantics.
+- Plot/table normalization accepts canonical `nested_l1` as well as legacy
+  `kipu_dqfm_l1`, mapping both to the nested-commutator row.
 
 ## TDD Evidence
 
@@ -73,6 +84,10 @@ legacy quimb rendering, retains certified-ladder note status, and verifies the
 backend-exception result schema. The real resolution test executes the MPO
 backend rather than only mocking its summary helpers.
 
+Final coverage adds a trailing-ablation payload-publication test, a
+statevector-identity producer/consumer match-and-mismatch test, canonical
+nested-l1 rendering, and the framework-script layout allowlist update.
+
 ## Verification
 
 ```text
@@ -81,7 +96,8 @@ conda run -n torch-mps python -m unittest \
   tests.test_agp_physical_validation -v
 ```
 
-Result: 106 tests passed.
+Result: 128 tests passed, including the MPO, MPS, physical-validation, and
+layout suites.
 
 ```text
 conda run -n torch-mps python -m py_compile \
