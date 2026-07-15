@@ -11,5 +11,7 @@ outputs/
 results/
 runs/
 wandb/
-tests/sparse_agp_curriculum/q*/sweep_test/Images/*
-tests/sparse_agp_curriculum/q*/sweep_test/Models_Data/*
+/graphify-out/
+/tmp/
+tests/sparse_agp_curriculum/*/q*/sweep_test/Images/*
+tests/sparse_agp_curriculum/*/q*/sweep_test/Models_Data/*

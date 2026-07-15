@@ -353,6 +353,29 @@ or known small-q dense/full-basis comparisons.
 For large `q`, these checks may be approximate. If they are unavailable, report
 that the result is residual-certified only, not physically validated.
 
+When an MPS or other tensor-network approximation is used, physical validation
+passes only if all of the following are reported and checked:
+
+```text
+small-q agreement with an exact statevector at matching full learned support,
+time-step convergence,
+bond-dimension and cutoff convergence,
+full learned-support size and active coefficient count,
+state norm and peak bond,
+and final observable differences across the numerical ladder.
+```
+
+The canonical MPS validation must use every term in the retained learned AGP
+checkpoint. A top-term or pruned deployment is an ablation and cannot satisfy
+this physical-validation gate on behalf of the full trained model. If the full
+learned support cannot be evolved under a convergence ladder, mark this gate
+`not tested`.
+
+Do not call an MPS result exact. A converged full-learned-support MPS evolution
+certifies the trained sparse protocol under the tested numerical ladder; it
+does not certify Pauli strings absent from the learned support or the full
+`4**q` basis.
+
 ## Claim Levels
 
 Use precise language when reporting results.
@@ -425,22 +448,31 @@ Every large-`q` run must report:
 
 ## Current q20 Interpretation
 
-The latest coupled q20 run is not certified. Its final accepted state reached:
+The latest q20 transverse-Ising run completed all 20 feedback rounds with the
+requested fixed support and residual budget:
 
 ```text
-K = 3104
-training_relative_residual = 8.088558e-03
-holdout_relative_residual  = 4.194579e-02
-unseen_relative_residual   = 3.825164e+00
-probe_gate_residual        = 6.086406e-01
-probe_watch_residual       = not tested in this run
-probe_test_residual        = 3.502167e+02
+q                              = 20
+4**q                           = 1099511627776
+K                              = 32768
+K / 4**q                       = 2.980232238770e-08
+Q_requested = Q_effective      = 81920
+rounds                         = 20
+round_20_training_residual     = 1.085813e-03
+round_20_holdout_residual      = 5.519648e-02
+round_20_unseen_residual       = 3.638261e-06 absolute
+round_20_unseen_relative       = not tested (zero reference)
+adaptive_training_residual     = 2.029059e-03
+adaptive_holdout_residual      = 5.687243e-02
 ```
 
-The training, holdout, and probe-gate metrics are encouraging, but unseen and
-probe-test fail, and probe-watch was not part of that run. Therefore the result
-should be described as a projected sparse AGP with useful residual-feedback
-behavior, not as a certified AGP support.
+The training and holdout gates pass their configured `0.1` thresholds. The
+relative unseen gate cannot be evaluated because its reference residual is
+zero; the absolute value above is reported instead. Fixed probe gates, K/Q
+plateaus, cross-seed support stability, pruning, coefficient regularity, and
+physical validation were not tested. Support swaps were still active in round
+20, so proposal exhaustion was not established. Therefore this run is a
+completed projected sparse AGP experiment, not a certified AGP support.
 
 ## Operational Rule For Future Work
 

@@ -6,7 +6,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-Q20_DIR = ROOT / "tests" / "sparse_agp_curriculum" / "q20" / "sweep_test"
+Q20_DIR = (
+    ROOT
+    / "tests"
+    / "sparse_agp_curriculum"
+    / "transverse_field_diagonal_ising"
+    / "q20"
+    / "sweep_test"
+)
 SCRIPTS_DIR = ROOT / "scripts"
 DIAGNOSTICS_DIR = SCRIPTS_DIR / "diagnostics"
 TESTS_DIR = ROOT / "tests"
@@ -95,17 +102,19 @@ class AGPGuardedCurriculumTests(unittest.TestCase):
             4**8,
         )
 
-    def test_q20_config_uses_fixed_budget_support_refinement(self):
+    def test_q20_config_uses_q15_parity_fixed_k_support_swaps(self):
         payload = json.loads((Q20_DIR / "config.json").read_text(encoding="utf-8"))
-        coupled = payload["coupled_curriculum"]
-        refinement = coupled["support_refinement"]
+        feedback = payload["holdout_feedback"]
+        support_swap = feedback["support_swap"]
 
-        self.assertEqual(coupled["base_agp_terms"], "auto")
-        self.assertEqual(coupled["max_agp_terms"], 4**7)
-        self.assertEqual(refinement["mode"], "fixed_budget_swap")
-        self.assertEqual(refinement["active_cap_qubits"], 7)
-        self.assertEqual(refinement["active_agp_terms"], "auto")
-        self.assertEqual(refinement["exploratory_cap_qubits"], 8)
+        self.assertNotIn("coupled_curriculum", payload)
+        self.assertEqual(feedback["base_agp_terms"], 32768)
+        self.assertEqual(feedback["holdout_residual_top_k"], 81920)
+        self.assertEqual(feedback["iterations"], 20)
+        self.assertEqual(feedback["add_residual_terms_per_iteration"], 3072)
+        self.assertTrue(support_swap["enabled"])
+        self.assertEqual(support_swap["terms_per_iteration"], 256)
+        self.assertEqual(support_swap["start_round"], 2)
 
     def test_fixed_budget_swap_keeps_k_and_removes_low_importance_terms(self):
         result = fixed_budget_swap_labels(

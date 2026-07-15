@@ -18,7 +18,13 @@ for path in (SCRIPTS_DIR, FRAMEWORK_SCRIPTS_DIR, TESTS_DIR, ROOT):
 from agp_support import KrylovSupportConfig, select_krylov_agp_labels
 from agp_holdout_feedback import fit_residual_budget_to_available
 from agp_holdout_study import relative_metric_with_reference_status
-from agp_plot_annotations import find_physical_summary_for_images_dir
+from agp_plot_annotations import (
+    find_physical_summary_for_images_dir,
+    hcd_context_lines_for_images_dir,
+    physical_comparison_payload_for_images_dir,
+    physical_comparison_rows,
+    plot_physical_comparison_table,
+)
 from agp_physical_validation import (
     apply_pauli_sum,
     build_action_cache,
@@ -27,11 +33,299 @@ from agp_physical_validation import (
     select_best_learned_variant,
     variational_l1_agp,
 )
+from agp_regenerate_hcd_summaries import find_coefficient_export
 import agp_physical_validation
 from utils import SparsePauliOperator, transverse_field_ising_problem
 
 
 class AGPPhysicalValidationTests(unittest.TestCase):
+    def test_hcd_context_lines_include_hamiltonians_and_energies(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            q15_study = root / "q15" / "sweep_test"
+            q15_images = q15_study / "runs" / "retained" / "Images"
+            q15_data = q15_images.parent / "Models_Data"
+            q15_images.mkdir(parents=True)
+            q15_data.mkdir(parents=True)
+            (q15_study / "config.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "physical": {
+                            "parameters": {
+                                "system": "TransverseIsingDriverProblem",
+                                "num_qubits": 15,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (q15_data / "physical_validation_summary.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "ground_energy": -19.25,
+                        "results": {
+                            "no_cd": {
+                                "final_energy": -8.0,
+                                "ground_state_fidelity": 0.01,
+                            },
+                            "kipu_dqfm_l1": {
+                                "final_energy": -14.5,
+                                "ground_state_fidelity": 0.25,
+                            },
+                            "learned_sparse_agp": {
+                                "final_energy": -19.062659369221652,
+                                "ground_state_fidelity": 0.95,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            q20_study = root / "q20" / "sweep_test"
+            q20_images = q20_study / "runs" / "retained" / "Images"
+            q20_images.mkdir(parents=True)
+            (q20_study / "config.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "physical": {
+                            "parameters": {
+                                "system": "Hidrogen",
+                                "num_qubits": 20,
+                            }
+                        },
+                        "scalable_validation": {
+                            "ground_energy": -1.1400734808760409,
+                            "pinn_final_energy_status": "not_tested",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            q15_lines = hcd_context_lines_for_images_dir(q15_images)
+            q20_lines = hcd_context_lines_for_images_dir(q20_images)
+
+            self.assertEqual(len(q15_lines), 5)
+            self.assertIn(r"H_{\mathrm{initial}}=-\sum", q15_lines[0])
+            self.assertIn(r"H_{\mathrm{final}}=-\sum", q15_lines[1])
+            self.assertIn("-19.25", q15_lines[2])
+            self.assertIn("no CD", q15_lines[3])
+            self.assertIn("-8", q15_lines[3])
+            self.assertIn("nested", q15_lines[3])
+            self.assertIn("0.25", q15_lines[3])
+            self.assertIn("PINN", q15_lines[4])
+            self.assertIn("-19.0627", q15_lines[4])
+            self.assertIn("0.95", q15_lines[4])
+
+            self.assertEqual(len(q20_lines), 5)
+            self.assertIn(r"\Pi_{\{I,Z\}}", q20_lines[0])
+            self.assertIn(r"\mathcal{S}_{H_2}", q20_lines[1])
+            self.assertIn("-1.14007", q20_lines[2])
+            self.assertIn("not computed", q20_lines[3])
+            self.assertIn("not computed", q20_lines[4])
+
+    def test_plot_payload_uses_tracked_scalable_pinn_energy_fallback(self):
+        with TemporaryDirectory() as tmp:
+            study_dir = Path(tmp) / "q20" / "sweep_test"
+            images_dir = study_dir / "runs" / "retained" / "Images"
+            images_dir.mkdir(parents=True)
+            (study_dir / "config.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "physical": {
+                            "parameters": {
+                                "system": "Hidrogen",
+                                "num_qubits": 20,
+                            }
+                        },
+                        "scalable_validation": {
+                            "ground_energy": -1.1400734808760409,
+                            "pinn_final_energy_status": "performed",
+                            "pinn_final_energy": -1.12,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = physical_comparison_payload_for_images_dir(images_dir)
+
+            self.assertEqual(
+                payload["results"]["learned_sparse_agp"]["final_energy"],
+                -1.12,
+            )
+
+    def test_aggregate_hcd_uses_checkpoint_named_by_mps_summary(self):
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            round_dir = run_dir / "rounds" / "round_20"
+            round_coefficients = round_dir / "Models_Data" / "final_agp_coefficients.pt"
+            adaptive_coefficients = run_dir / "adaptive_temporal_refinement" / "Models_Data" / "final_agp_coefficients.pt"
+            summary_path = round_dir / "mps_validation" / "Models_Data" / "mps_physical_validation_summary.json"
+            for path in (round_coefficients, adaptive_coefficients):
+                path.parent.mkdir(parents=True)
+                path.write_bytes(b"checkpoint")
+            summary_path.parent.mkdir(parents=True)
+            summary_path.write_text(
+                __import__("json").dumps({"trained_run": str(round_dir.resolve())}),
+                encoding="utf-8",
+            )
+
+            selected = find_coefficient_export(run_dir)
+
+            self.assertEqual(selected.resolve(), round_coefficients.resolve())
+
+    def test_plot_payload_discovers_nested_mps_physical_summary(self):
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            images_dir = run_dir / "Images"
+            summary_path = run_dir / "mps_validation" / "Models_Data" / "mps_physical_validation_summary.json"
+            images_dir.mkdir(parents=True)
+            summary_path.parent.mkdir(parents=True)
+            summary_path.write_text(
+                __import__("json").dumps(
+                    {
+                        "n_qubits": 156,
+                        "ground_energy": -209.6,
+                        "results": {
+                            "learned_sparse_agp": {
+                                "final_energy": -188.15,
+                                "ground_state_fidelity": 0.0207,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = physical_comparison_payload_for_images_dir(images_dir)
+
+            self.assertEqual(payload["results"]["learned_sparse_agp"]["final_energy"], -188.15)
+
+    def test_plot_payload_discovers_hydrogen_physical_summary(self):
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            images_dir = run_dir / "Images"
+            summary_path = run_dir / "Models_Data" / "hydrogen_physical_validation_summary.json"
+            images_dir.mkdir(parents=True)
+            summary_path.parent.mkdir(parents=True)
+            summary_path.write_text(
+                __import__("json").dumps(
+                    {
+                        "n_qubits": 20,
+                        "ground_energy": -1.1400734808760409,
+                        "results": {
+                            "learned_sparse_agp": {
+                                "final_energy": -1.12,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = physical_comparison_payload_for_images_dir(images_dir)
+
+            self.assertEqual(payload["results"]["learned_sparse_agp"]["final_energy"], -1.12)
+
+    def test_checkpoint_local_plot_rejects_sibling_mps_summary(self):
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            trained_run = run_dir / "rounds" / "round_20"
+            images_dir = run_dir / "adaptive_temporal_refinement" / "Images"
+            summary_path = trained_run / "mps_validation" / "Models_Data" / "mps_physical_validation_summary.json"
+            images_dir.mkdir(parents=True)
+            summary_path.parent.mkdir(parents=True)
+            summary_path.write_text(
+                __import__("json").dumps(
+                    {
+                        "trained_run": str(trained_run.resolve()),
+                        "ground_energy": -209.6,
+                        "results": {"learned_sparse_agp": {"final_energy": -188.15}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = physical_comparison_payload_for_images_dir(images_dir)
+
+            self.assertEqual(payload["results"], {})
+
+
+    def test_physical_comparison_rows_include_exact_nested_and_pinn(self):
+        payload = {
+            "n_qubits": 15,
+            "ground_energy": -20.0,
+            "results": {
+                "no_cd": {
+                    "final_energy": -10.0,
+                    "ground_state_fidelity": 0.05,
+                },
+                "kipu_dqfm_l1": {
+                    "final_energy": -18.5,
+                    "ground_state_fidelity": 0.75,
+                },
+                "learned_sparse_agp": {
+                    "final_energy": -19.8,
+                    "ground_state_fidelity": 0.95,
+                },
+            },
+        }
+
+        rows = physical_comparison_rows(payload)
+
+        self.assertEqual(
+            [row["method"] for row in rows],
+            ["Exact ground state", "No counterdiabatic term", "Nested commutator l=1", "PINN sparse AGP"],
+        )
+        self.assertEqual(rows[0]["final_energy"], -20.0)
+        self.assertEqual(rows[0]["energy_error"], 0.0)
+        self.assertEqual(rows[0]["ground_state_fidelity"], 1.0)
+        self.assertAlmostEqual(rows[1]["energy_error"], 10.0)
+        self.assertAlmostEqual(rows[2]["energy_error"], 1.5)
+        self.assertAlmostEqual(rows[3]["energy_error"], 0.2)
+
+    def test_q156_comparison_table_marks_dynamical_metrics_unavailable(self):
+        with TemporaryDirectory() as tmp:
+            study_dir = Path(tmp) / "sweep_test"
+            run_dir = study_dir / "runs" / "feedback" / "agp_32768"
+            images_dir = run_dir / "Images"
+            data_dir = run_dir / "Models_Data"
+            images_dir.mkdir(parents=True)
+            data_dir.mkdir(parents=True)
+            config = {
+                "physical": {"parameters": {"system": "TransverseIsingDriverProblem", "num_qubits": 156}},
+                "scalable_validation": {
+                    "ground_energy": -209.6,
+                    "statevector_validation": "not_tested",
+                    "reason": "A full 2**156 statevector cannot be represented.",
+                },
+            }
+            (study_dir / "config.json").write_text(__import__("json").dumps(config), encoding="utf-8")
+            derived_config = {
+                "physical": {
+                    "system": "TransverseIsingDriverProblem",
+                    "n_qubits": 156,
+                }
+            }
+            (data_dir / "config.json").write_text(
+                __import__("json").dumps(derived_config),
+                encoding="utf-8",
+            )
+
+            payload = physical_comparison_payload_for_images_dir(images_dir)
+            output = plot_physical_comparison_table(images_dir)
+            rows = physical_comparison_rows(payload)
+
+            self.assertEqual(payload["ground_energy"], -209.6)
+            self.assertIsNone(rows[1]["final_energy"])
+            self.assertIsNone(rows[2]["ground_state_fidelity"])
+            self.assertTrue(output.is_file())
+            self.assertGreater(output.stat().st_size, 1000)
+
     def test_physical_summary_search_tolerates_vanished_directories(self):
         calls = 0
 

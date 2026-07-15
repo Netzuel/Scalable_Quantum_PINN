@@ -1,24 +1,26 @@
 # Sparse AGP Curriculum Benchmarks
 
-This framework retains the fixed-support sparse-AGP curriculum studies for
-`q=15` and `q=20`. Both use
+This framework retains sparse-AGP curriculum benchmarks grouped first by
+physical scenario and then by qubit count. The current retained scenario uses
 
 ```text
 H_AD(lambda) = (1 - lambda) H_initial + lambda H_final.
 ```
 
-They do not use the same physical Hamiltonian. The `q15` study is the
-transverse-field-to-diagonal-Ising playground with exact final-state physical
-diagnostics. The retained `q20` study uses the sparse hydrogen Hamiltonian and
-is currently limited to projected sparse-AGP diagnostics. This distinction
-prevents physical claims from being transferred between the studies.
+For `q=15`, `q=20`, and `q=156`, the driver is a transverse-field Hamiltonian
+and the target is a diagonal open-chain Ising Hamiltonian. The Hamiltonian
+family is shared, while the dynamical validation backend depends on system
+size: exact statevector validation is retained through `q=15`, and converged
+tensor-network validation is required above that threshold.
 
 ## Layout
 
 ```text
 sparse_agp_curriculum/
-  q15/sweep_test/   retained q=15 configuration and local runs
-  q20/sweep_test/   retained q=20 configuration and local runs
+  transverse_field_diagonal_ising/
+    q15/sweep_test/    retained q=15 configuration and local runs
+    q20/sweep_test/    retained q=20 configuration and local runs
+    q156/sweep_test/   retained q=156 configuration and local runs
   ground_truth/     curated exact validation data
   scripts/          Python entrypoints specific to this benchmark family
 ```
@@ -29,7 +31,7 @@ copies of reusable training code.
 
 ## Framework Scripts
 
-- `build_driver_problem_hamiltonian.py`: generate the analytic Ising Hamiltonian pair used by `q15` and optional grid studies.
+- `build_driver_problem_hamiltonian.py`: generate the analytic Ising Hamiltonian pair used by the retained studies and optional grid studies.
 - `agp_physical_validation.py`: compare no CD, nested-commutator `l=1`, and the learned AGP where statevector validation is configured.
 - `agp_qubit_grid_benchmark.py`: prepare and orchestrate optional multi-q Ising studies.
 - `agp_regenerate_hcd_summaries.py`: regenerate HCD connection-summary figures.

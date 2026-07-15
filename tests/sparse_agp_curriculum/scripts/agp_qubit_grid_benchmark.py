@@ -12,7 +12,9 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[3]
 FRAMEWORK_SCRIPTS_DIR = Path("tests/sparse_agp_curriculum/scripts")
-DEFAULT_GRID_ROOT = Path("tests/sparse_agp_curriculum/grid")
+DEFAULT_GRID_ROOT = Path(
+    "tests/sparse_agp_curriculum/transverse_field_diagonal_ising/grid"
+)
 DEFAULT_QUBITS = list(range(2, 21))
 METHODS = ("no_cd", "kipu_dqfm_l1", "learned_sparse_agp")
 METHOD_LABELS = {

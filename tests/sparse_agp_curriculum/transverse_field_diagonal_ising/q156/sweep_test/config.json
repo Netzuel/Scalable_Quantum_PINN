@@ -1,0 +1,192 @@
+{
+  "physical": {
+    "parameters": {
+      "system": "TransverseIsingDriverProblem",
+      "num_qubits": 156,
+      "distance": "1_0",
+      "hamiltonian_source": "Hamiltonians_to_use/pauli_decompositions/index.json",
+      "t_initial": 0.0,
+      "T": 1.0,
+      "tau_range": [0.0, 1.0],
+      "schedule": "trainable_bounded_envelope_sin2"
+    }
+  },
+  "neural": {
+    "model": "ProjectedSparseAGPPINN",
+    "general": {
+      "n_inputs": 1,
+      "n_outputs": "agp_top_k",
+      "n_hidden": 4,
+      "n_neurons": 96,
+      "activation": "pau",
+      "layer_type": "quadratic"
+    }
+  },
+  "default_pipeline": {
+    "name": "q156_fixed_k_holdout_feedback_scalable_validation",
+    "entrypoint": "scripts/agp_holdout_feedback.py",
+    "agp_terms": 32768,
+    "description": "Fixed K=32768 AGP support selected from a bounded nested-commutator Krylov pool; twenty feedback iterations add hard residual equations from a requested Q_max=81920 generated holdout pool without growing AGP outputs. The effective Q is capped by the number of distinct generated residual strings. Full statevector validation is intentionally unavailable at q=156."
+  },
+  "support_sweep": {
+    "agp_terms": [32768],
+    "output_root": "runs/baselines",
+    "intermediate_top_k": 32768,
+    "residual_top_k": 4096,
+    "residual_projection": "largest_generated_commutator_terms",
+    "agp_support_selection": {
+      "strategy": "nested_commutator_krylov_pool",
+      "max_depth": 8,
+      "max_frontier": 65536
+    },
+    "adaptive": {
+      "enabled": false,
+      "stages": 1,
+      "growth_terms_per_stage": 0
+    }
+  },
+  "holdout_feedback": {
+    "base_agp_terms": 32768,
+    "holdout_residual_top_k": 81920,
+    "iterations": 20,
+    "add_residual_terms_per_iteration": 3072,
+    "unseen_residual_batches_after_final_iteration": 1,
+    "epochs_per_iteration": 1000,
+    "lr": 1e-5,
+    "device": "auto",
+    "min_rms": 0.0,
+    "holdout_threshold": 0.10,
+    "unseen_threshold": 1.0,
+    "baseline_root": "runs/baselines",
+    "baseline_neural": {
+      "n_hidden": 4,
+      "n_neurons": 96,
+      "activation": "silu",
+      "layer_type": "quadratic",
+      "description": "Train or reuse a width-96 SiLU baseline checkpoint, then warm-start the PAU feedback model from that checkpoint."
+    },
+    "support_swap": {
+      "enabled": true,
+      "terms_per_iteration": 256,
+      "start_round": 2,
+      "candidate_pool_multiplier": 16,
+      "protect_top_fraction": 0.02,
+      "new_gate_logit": 2.0,
+      "description": "Fixed-K support-swap curriculum: replace weak low-importance AGP strings with hard residual-derived candidates while keeping K unchanged."
+    },
+    "temporal_refinement": {
+      "enabled": true,
+      "epochs": 2500,
+      "num_points": 64,
+      "lr": 3e-6,
+      "optimizer": "AdamW",
+      "run_dir": "temporal_refinement",
+      "description": "Post-curriculum continuation on the fixed round-20 AGP support and residual basis with a denser time grid."
+    },
+    "adaptive_temporal_refinement": {
+      "enabled": true,
+      "epochs": 1500,
+      "dense_points": 257,
+      "num_points": 64,
+      "lr": 1.5e-6,
+      "optimizer": "AdamW",
+      "run_dir": "adaptive_temporal_refinement",
+      "weight_power": 0.5,
+      "min_weight": 0.25,
+      "max_weight": 4.0,
+      "difficulty": "residual_x_cd_norm",
+      "description": "Self-supervised continuation that concentrates collocation points near difficult times while keeping the final support fixed."
+    },
+    "keep_round_images": false,
+    "output_root": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1"
+  },
+  "agp_calibration": {
+    "enabled": true,
+    "gamma_lr": 0.01,
+    "gate_lr": 0.01,
+    "initial_gamma": 1.0,
+    "target_active_terms": 2048,
+    "gate_temperature": 1.0,
+    "active_logit": 4.0,
+    "inactive_logit": -8.0,
+    "budget_weight": 1.0,
+    "binary_weight": 0.001,
+    "scale_l2_weight": 0.0001,
+    "description": "Joint self-supervised training of a global AGP scale and soft Pauli gates against the projected Euler-Lagrange residual."
+  },
+  "training": {
+    "device": "auto",
+    "optimizer": "AdamW",
+    "parameters": {
+      "epochs": 5000,
+      "num_points": 16,
+      "lr": 0.0001,
+      "random_seed": 11
+    },
+    "loss": {
+      "residual": 1.0,
+      "agp_l2": 1e-8,
+      "schedule_monotonic": 10.0,
+      "schedule_correction_l2": 0.0001
+    },
+    "export": {
+      "path_images": "Images/",
+      "path_data": "Models_Data/",
+      "top_coefficients": 32,
+      "plot_quantity": "d_lambda_dt_times_C_P",
+      "format": "pdf"
+    }
+  },
+  "schedule_optimization": {
+    "enabled": true,
+    "base": "sinusoidal_sin2",
+    "correction_amplitude": 2.4,
+    "hidden_width": 32,
+    "hidden_layers": 2,
+    "activation": "tanh",
+    "lr": 0.001,
+    "description": "Trainable bounded schedule with endpoint values and endpoint derivatives enforced by construction."
+  },
+  "scalable_validation": {
+    "exact_final_ground_reference": "tests/sparse_agp_curriculum/ground_truth/diagonal_ising/ground_states_q2_q156.json",
+    "ground_energy": -209.6,
+    "ground_bitstring": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "statevector_validation": "not_tested",
+    "tensor_network_dynamical_validation": "not_tested_full_support",
+    "tensor_network_support_diagnostic": "pass",
+    "reason": "A full 2**156 statevector cannot be represented. The 2048- and 8192-term deployment ablations pass MPS numerical convergence, and a fixed-checkpoint sweep reaches all 32768 learned terms at one coarse resolution. The canonical full-support PINN evaluation remains not tested until all 32768 terms pass a successive-resolution MPS ladder. No result validates the full 4**156 basis."
+  },
+  "tensor_network_validation": {
+    "enabled": true,
+    "entrypoint": "tests/sparse_agp_curriculum/scripts/agp_mps_validation.py",
+    "trained_run": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/agp_32768_residual_69855_add_3072_rounds_20/rounds/round_20",
+    "output_dir": "mps_validation",
+    "protocols": ["no_cd", "kipu_dqfm_l1", "learned_sparse_agp"],
+    "exact_final_ground_reference": "tests/sparse_agp_curriculum/ground_truth/diagonal_ising/ground_states_q2_q156.json",
+    "resolutions": [
+      {"name": "coarse", "steps": 24, "max_bond": 32, "learned_terms": 2048, "cutoff": 1e-9},
+      {"name": "fine", "steps": 48, "max_bond": 64, "learned_terms": 2048, "cutoff": 1e-10}
+    ],
+    "coefficient_threshold": 1e-9,
+    "convergence_energy_atol": 0.1,
+    "convergence_fidelity_atol": 0.01,
+    "progress": true,
+    "description": "Historical reduced-support MPS deployment ablation. The canonical full-model evaluation must use all 32768 learned terms at successive time-step, bond-dimension, and cutoff resolutions."
+  },
+  "tensor_network_support_diagnostic": {
+    "status": "pass",
+    "trained_support_terms": 32768,
+    "coarse_learned_terms": [2048, 4096, 8192, 16384, 32768],
+    "fine_validated_terms": 8192,
+    "smallest_plateau_terms": 8192,
+    "plateau_relative_threshold": 0.05,
+    "summary": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/agp_32768_residual_69855_add_3072_rounds_20/rounds/round_20/mps_support_sweep/Models_Data/support_sweep_summary.json",
+    "scope": "Reduced-support ablation inside the trained 32768-term PINN output. It does not replace canonical full learned-support physical validation; omitted Pauli strings outside that output also remain untested."
+  },
+  "summary": {
+    "top_k_overlap": 32,
+    "path_images": "runs/support_sweep_summary/Images/",
+    "path_data": "runs/support_sweep_summary/Models_Data/",
+    "runs_dir": "runs/"
+  }
+}

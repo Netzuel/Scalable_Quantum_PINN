@@ -35,8 +35,8 @@
 
 ```python
 def test_q20_matches_q15_ising_lineage_for_twenty_rounds(self):
-    q15 = json.loads((ROOT / "tests/sparse_agp_curriculum/q15/sweep_test/config.json").read_text())
-    q20 = json.loads((ROOT / "tests/sparse_agp_curriculum/q20/sweep_test/config.json").read_text())
+    q15 = json.loads((ROOT / "tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json").read_text())
+    q20 = json.loads((ROOT / "tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json").read_text())
 
     self.assertEqual(q20["physical"]["parameters"]["system"], "TransverseIsingDriverProblem")
     self.assertEqual(q20["physical"]["parameters"]["num_qubits"], 20)
@@ -82,8 +82,8 @@ Run the same command and confirm it still fails for the intended configuration m
 ### Task 2: Replace q20 configuration and documentation with the approved Ising design
 
 **Files:**
-- Modify: `tests/sparse_agp_curriculum/q20/sweep_test/config.json`
-- Modify: `tests/sparse_agp_curriculum/q20/sweep_test/README.md`
+- Modify: `tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json`
+- Modify: `tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/README.md`
 - Test: `tests/test_agp_benchmark_layout.py`
 
 **Interfaces:**
@@ -123,7 +123,7 @@ Document K=32,768, requested Q=81,920, effective-Q capping, twenty rounds, expec
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json
 ```
 
 - [ ] **Step 3: Run the parity test and verify it passes**
@@ -133,7 +133,7 @@ Run the Task 1 command. Expected: one test passes.
 - [ ] **Step 4: Validate JSON and configuration loading**
 
 ```bash
-conda run -n torch-mps python -c 'import json; from pathlib import Path; p=Path("tests/sparse_agp_curriculum/q20/sweep_test/config.json"); c=json.loads(p.read_text()); assert c["physical"]["parameters"]["num_qubits"] == 20; assert c["holdout_feedback"]["iterations"] == 20'
+conda run -n torch-mps python -c 'import json; from pathlib import Path; p=Path("tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json"); c=json.loads(p.read_text()); assert c["physical"]["parameters"]["num_qubits"] == 20; assert c["holdout_feedback"]["iterations"] == 20'
 ```
 
 Expected: exit 0.
@@ -165,7 +165,7 @@ Delete `tests/sparse_agp_curriculum/scripts/agp_hydrogen_energy_validation.py` w
 - [ ] **Step 4: Prove q20 contains no obsolete references while general hydrogen support remains**
 
 ```bash
-! rg -n 'Hidrogen|hydrogen_energy|pinn_final_energy|scalable_validation' tests/sparse_agp_curriculum/q20/sweep_test
+! rg -n 'Hidrogen|hydrogen_energy|pinn_final_energy|scalable_validation' tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test
 rg -n 'Hidrogen' tests/test_full_pauli_pinn.py Hamiltonians_to_use/pauli_decompositions/index.json
 ```
 
@@ -182,7 +182,7 @@ Expected: all affected tests pass.
 ### Task 4: Clean old q20 runs and verify training preparation
 
 **Files:**
-- Remove generated contents: `tests/sparse_agp_curriculum/q20/sweep_test/runs/`
+- Remove generated contents: `tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/runs/`
 - Verify: `Hamiltonians_to_use/pauli_decompositions/TransverseIsingDriverProblem/20_qubits/distance_1_0.json`
 - Verify: `Hamiltonians_to_use/pauli_decompositions/index.json`
 
@@ -200,7 +200,7 @@ Expected: no active q20 training process. Do not stop the unrelated q156 validat
 
 - [ ] **Step 2: Remove only obsolete generated q20 runs**
 
-Remove `tests/sparse_agp_curriculum/q20/sweep_test/runs/`, recreate the empty directory only if the training entrypoint requires it, and confirm q15/q156 run trees are unchanged.
+Remove `tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/runs/`, recreate the empty directory only if the training entrypoint requires it, and confirm q15/q156 run trees are unchanged.
 
 - [ ] **Step 3: Load the q20 Hamiltonian and assert sparse structure**
 
@@ -222,8 +222,8 @@ Expected: all tests pass before training starts.
 ### Task 5: Complete twenty feedback rounds and both refinement stages
 
 **Files:**
-- Generate (ignored): `tests/sparse_agp_curriculum/q20/sweep_test/runs/baselines/agp_32768/`
-- Generate (ignored): `tests/sparse_agp_curriculum/q20/sweep_test/runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/`
+- Generate (ignored): `tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/runs/baselines/agp_32768/`
+- Generate (ignored): `tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/`
 
 **Interfaces:**
 - Consumes: Task 4 prepared q20 configuration.
@@ -233,7 +233,7 @@ Expected: all tests pass before training starts.
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json
 ```
 
 - [ ] **Step 2: Monitor every milestone and revalidate quiet periods**
@@ -243,7 +243,7 @@ For each round, require a `Models_Data/final_agp_coefficients.pt` checkpoint and
 - [ ] **Step 3: Verify twenty rounds rather than trusting process exit alone**
 
 ```bash
-find tests/sparse_agp_curriculum/q20/sweep_test/runs -type f -path '*/rounds/round_*/Models_Data/final_agp_coefficients.pt' | sort
+find tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/runs -type f -path '*/rounds/round_*/Models_Data/final_agp_coefficients.pt' | sort
 ```
 
 Expected: twenty distinct round checkpoints ending in `round_20`.
@@ -262,7 +262,7 @@ adaptive_temporal_refinement/Models_Data/final_agp_coefficients.pt
 **Files:**
 - Inspect generated final summary under q20 `Models_Data/`.
 - Regenerate generated HCD summaries under q20 `Images/` if necessary.
-- Modify: `tests/sparse_agp_curriculum/q20/sweep_test/README.md` only if final effective-Q or status fields need recording.
+- Modify: `tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/README.md` only if final effective-Q or status fields need recording.
 
 **Interfaces:**
 - Consumes: completed Task 5 outputs.
@@ -290,7 +290,7 @@ Record training, holdout, unseen, fixed probes, K/Q plateau, support stability, 
 
 ```bash
 conda run -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_regenerate_hcd_summaries.py \
-  --root tests/sparse_agp_curriculum/q20/sweep_test --require-all
+  --root tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test --require-all
 ```
 
 Expected: zero failures and Ising Hamiltonian annotations.

@@ -2,6 +2,7 @@ import unittest
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 import sys
 
 import torch
@@ -173,7 +174,19 @@ class SparsePauliTests(unittest.TestCase):
             data_dir = root / "Models_Data"
             images_dir.mkdir()
             data_dir.mkdir()
-            export_results(model, tau, tau, images_dir, data_dir, metadata, history, top_k=4)
+            context_lines = ["H0", "H1", "E0", "EPINN"]
+            with (
+                patch(
+                    "projected_sparse_training_common.hcd_context_lines_for_images_dir",
+                    return_value=context_lines,
+                ) as context_mock,
+                patch("projected_sparse_training_common.draw_physical_footer") as draw_mock,
+            ):
+                export_results(model, tau, tau, images_dir, data_dir, metadata, history, top_k=4)
+
+            context_mock.assert_called_once_with(images_dir)
+            draw_mock.assert_called_once()
+            self.assertEqual(draw_mock.call_args.args[1], context_lines)
 
             self.assertTrue((images_dir / "hcd_coefficient_support_map.pdf").is_file())
             self.assertTrue((images_dir / "hcd_least_important_coefficient_support_map.pdf").is_file())

@@ -11,6 +11,20 @@ The final MLST manuscript PDF from the original work is retained under
 `docs/` for context. Do not copy old result folders, checkpoints, or
 scratch runs into this repository.
 
+## Mandatory Project Rulebook
+
+Before changing training, running physical validation, or interpreting a
+result, read `Rules.md`, `AGP_CERTIFICATION_CRITERIA.md`, and
+`docs/CURRENT_SPARSE_AGP_METHODOLOGY.md`.
+
+The canonical physical evaluation must seek an exact `H_final` ground-energy
+and ground-state reference using the Hamiltonian structure. Use exact
+statevector dynamics for `q <= 15` and convergence-gated tensor-network
+dynamics for `q > 15`. A canonical tensor-network evaluation must deploy every
+AGP term learned in the retained checkpoint.
+Top-term truncations are ablations only and cannot replace full-model physical
+validation. If full-support evaluation is infeasible, mark it `not tested`.
+
 ## Core Rule
 
 Keep the main reusable Python surface in:
@@ -48,6 +62,7 @@ projected/local exactness statement, not a generic exact AGP guarantee.
 - Track both `agp_terms` and residual `basis_size` in every experiment.
 - Never silently expand to the full `4**N` basis for large `N`.
 - For every large-`N` sparse AGP task, re-read
+  `Rules.md` and
   `AGP_CERTIFICATION_CRITERIA.md` before accepting a result or making a
   sufficiency claim. Mark every certification gate as `pass`, `fail`, or
   `not tested`.

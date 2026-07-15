@@ -22,6 +22,9 @@ chemistry = [
   "qiskit-nature>=0.8",
   "pyscf"
 ]
+tensor-network = [
+  "quimb==1.11.2"
+]
 
 [tool.setuptools]
 py-modules = [

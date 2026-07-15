@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from utils import SparsePauliOperator, _commutator_pauli_labels_unchecked, load_pauli_hamiltonian_pair  # noqa: E402
+from scripts.agp_plot_annotations import plot_physical_comparison_table  # noqa: E402
 
 
 RUN_DIR = Path.cwd()
@@ -913,6 +914,7 @@ def main() -> None:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
     save_plot(results, images_dir)
+    plot_physical_comparison_table(images_dir, payload)
     refresh_hcd_connection_summary(trained_run, output_dir)
     print(json.dumps(payload, indent=2))
 

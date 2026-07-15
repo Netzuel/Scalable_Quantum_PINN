@@ -10,8 +10,9 @@ configurations when they are not reusable outside that benchmark family.
 
 The retained fixed-support sparse-AGP curriculum studies are grouped under:
 
-- `sparse_agp_curriculum/q15/sweep_test/`
-- `sparse_agp_curriculum/q20/sweep_test/`
+- `sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/`
+- `sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/`
+- `sparse_agp_curriculum/transverse_field_diagonal_ising/q156/sweep_test/`
 - `sparse_agp_curriculum/scripts/`
 
 Generated artifacts may exist locally under each study's ignored `runs/`

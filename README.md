@@ -103,8 +103,9 @@ the model or loss. No endpoint loss is added for the fixed schedule:
 - `AGP_CERTIFICATION_CRITERIA.md`: required gate checklist for deciding whether
   a sparse large-`q` AGP is certified, promising, or only a projected sparse
   experiment.
-- `Rules.md`: criteria for declaring an AGP support large enough, including
-  holdout residuals, top-term stability, pruning, and reporting requirements.
+- `Rules.md`: canonical project contract covering training, exact-versus-tensor-
+  network physical evaluation, mandatory full learned-support deployment,
+  support certification, provenance, and reporting requirements.
 - `AGENTS.md`: working instructions for future agents.
 
 No old result folders, checkpoints, or historical scratch runs are copied from
@@ -134,8 +135,9 @@ The retained AGP benchmark studies and their physical-scenario entrypoints are
 grouped together:
 
 ```text
-tests/sparse_agp_curriculum/q15/sweep_test/
-tests/sparse_agp_curriculum/q20/sweep_test/
+tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/
+tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/
+tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q156/sweep_test/
 ```
 
 Each study contains `config.json`, a README, and ignored local `runs/` artifacts.
@@ -147,28 +149,28 @@ Default fixed-`K` curriculum:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json
 ```
 
 Baseline only:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_baseline_train.py \
-  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json
 ```
 
 Clean generated artifacts for one configured study:
 
 ```bash
 conda run -n torch-mps python scripts/agp_restart.py \
-  --config tests/sparse_agp_curriculum/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json
 ```
 
 The q15 study adds a statevector physical-validation diagnostic:
 
 ```bash
 conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_physical_validation.py \
-  --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
 ```
 
 The diagonal-Ising final Hamiltonian also has a scalable exact ground-state
@@ -257,9 +259,9 @@ conda run -n torch-mps python tools/generate_qiskit_pauli_hamiltonian.py transve
   --update-index
 ```
 
-For large generated Hamiltonians such as `q=156`, create a new
-`tests/sparse_agp_curriculum/q156/sweep_test/config.json` and reuse the
-same shared and framework-specific entrypoints.
+The retained large-system configuration is stored at
+`tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q156/sweep_test/config.json`
+and reuses the same shared and framework-specific entrypoints.
 Do not add a new script fork for each qubit count.
 
 ## Quick Validation

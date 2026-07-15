@@ -9,13 +9,21 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "scripts"
 FRAMEWORK_SCRIPTS_DIR = ROOT / "tests" / "sparse_agp_curriculum" / "scripts"
+ISING_SCENARIO_DIR = (
+    ROOT / "tests" / "sparse_agp_curriculum" / "transverse_field_diagonal_ising"
+)
 for path in (SCRIPTS_DIR, FRAMEWORK_SCRIPTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 from agp_holdout_feedback import payload_with_feedback_baseline_neural
 from agp_baseline_train import settings_for_support
-from agp_qubit_grid_benchmark import grid_config, run_command, validate_physical_summary_contract
+from agp_qubit_grid_benchmark import (
+    DEFAULT_GRID_ROOT,
+    grid_config,
+    run_command,
+    validate_physical_summary_contract,
+)
 from models import PadeActivation
 
 
@@ -54,6 +62,12 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         environment = mocked_run.call_args.kwargs["env"]
         self.assertEqual(environment["PYTHONHASHSEED"], "0")
 
+    def test_grid_defaults_inside_ising_scenario(self):
+        self.assertEqual(
+            DEFAULT_GRID_ROOT,
+            Path("tests/sparse_agp_curriculum/transverse_field_diagonal_ising/grid"),
+        )
+
     def test_common_scripts_exist(self):
         expected_common = {
             "agp_baseline_train.py",
@@ -68,6 +82,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "agp_plot_annotations.py",
         }
         expected_framework = {
+            "agp_mps_validation.py",
             "agp_physical_validation.py",
             "agp_qubit_grid_benchmark.py",
             "build_driver_problem_hamiltonian.py",
@@ -87,11 +102,13 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "tests/test_agp_physical_validation.py",
             "tests/test_full_pauli_pinn.py",
             "tests/test_ising_ground_state_solver.py",
+            "tests/test_agp_mps_validation.py",
             "tests/test_agp_joint_calibration.py",
             "tests/test_agp_support_swap.py",
             "tests/test_qiskit_hamiltonian_generator.py",
             "tests/test_sparse_pauli.py",
             "tests/sparse_agp_curriculum/scripts/agp_physical_validation.py",
+            "tests/sparse_agp_curriculum/scripts/agp_mps_validation.py",
             "tests/sparse_agp_curriculum/scripts/agp_qubit_grid_benchmark.py",
             "tests/sparse_agp_curriculum/scripts/agp_regenerate_hcd_summaries.py",
             "tests/sparse_agp_curriculum/scripts/build_driver_problem_hamiltonian.py",
@@ -116,17 +133,33 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
 
         self.assertTrue(obsolete.isdisjoint(present))
 
+    def test_retained_ising_studies_share_one_scenario_folder(self):
+        expected = {"q15", "q20", "q156"}
+        present = {
+            path.name
+            for path in ISING_SCENARIO_DIR.iterdir()
+            if path.is_dir() and path.name.startswith("q")
+        }
+
+        self.assertEqual(present, expected)
+        self.assertTrue((ISING_SCENARIO_DIR / "README.md").is_file())
+        for study in expected:
+            self.assertFalse(
+                (ROOT / "tests" / "sparse_agp_curriculum" / study).exists()
+            )
+
     def test_documentation_lives_under_docs(self):
         self.assertTrue((ROOT / "docs").is_dir())
         self.assertFalse((ROOT / "documentation").exists())
 
-    def test_q15_and_q20_configs_retain_distinct_physical_systems(self):
+    def test_retained_benchmark_configs_define_their_physical_systems(self):
         expected_systems = {
             "q15": "TransverseIsingDriverProblem",
-            "q20": "Hidrogen",
+            "q20": "TransverseIsingDriverProblem",
+            "q156": "TransverseIsingDriverProblem",
         }
         for study, expected_system in expected_systems.items():
-            config_path = ROOT / "tests" / "sparse_agp_curriculum" / study / "sweep_test" / "config.json"
+            config_path = ISING_SCENARIO_DIR / study / "sweep_test" / "config.json"
             self.assertTrue(config_path.is_file(), config_path)
             self.assertTrue(config_path.with_name("README.md").is_file())
             payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -146,8 +179,81 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             ]
             self.assertEqual(study_python, [])
 
+    def test_q20_matches_q15_ising_lineage_for_twenty_rounds(self):
+        q15_path = ISING_SCENARIO_DIR / "q15/sweep_test/config.json"
+        q20_path = ISING_SCENARIO_DIR / "q20/sweep_test/config.json"
+        q15 = json.loads(q15_path.read_text(encoding="utf-8"))
+        q20 = json.loads(q20_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(q20["physical"]["parameters"]["system"], "TransverseIsingDriverProblem")
+        self.assertEqual(q20["physical"]["parameters"]["num_qubits"], 20)
+        self.assertEqual(q20["default_pipeline"]["agp_terms"], 32768)
+        self.assertEqual(q20["holdout_feedback"]["base_agp_terms"], 32768)
+        self.assertEqual(q20["holdout_feedback"]["holdout_residual_top_k"], 81920)
+        self.assertEqual(q20["holdout_feedback"]["iterations"], 20)
+        self.assertEqual(q20["holdout_feedback"]["add_residual_terms_per_iteration"], 3072)
+        self.assertEqual(q20["holdout_feedback"]["unseen_residual_batches_after_final_iteration"], 1)
+
+        for key in (
+            "neural",
+            "support_sweep",
+            "agp_calibration",
+            "training",
+            "schedule_optimization",
+        ):
+            self.assertEqual(q20[key], q15[key])
+        for key in (
+            "baseline_neural",
+            "support_swap",
+            "temporal_refinement",
+            "adaptive_temporal_refinement",
+        ):
+            q15_section = {
+                name: value
+                for name, value in q15["holdout_feedback"][key].items()
+                if name != "description"
+            }
+            q20_section = {
+                name: value
+                for name, value in q20["holdout_feedback"][key].items()
+                if name != "description"
+            }
+            self.assertEqual(q20_section, q15_section)
+
+        validation = q20["physical_validation"]
+        self.assertEqual(validation["statevector_qubits"], 20)
+        self.assertEqual(validation["evolution_steps"], 96)
+        self.assertEqual(validation["learned_top_terms"], 2048)
+        self.assertLessEqual(validation["learned_action_cache_size"], 16)
+        tensor_validation = q20["tensor_network_validation"]
+        self.assertTrue(tensor_validation["enabled"])
+        self.assertEqual(tensor_validation["operator_grouping"], "support")
+        self.assertEqual(tensor_validation["coefficient_threshold"], 0.0)
+        self.assertEqual(
+            [case["learned_terms"] for case in tensor_validation["resolutions"]],
+            [32768, 32768],
+        )
+        self.assertNotIn("scalable_validation", q20)
+        self.assertNotIn("hydrogen_energy_validation", q20)
+
+    def test_q156_config_uses_scalable_twenty_round_curriculum(self):
+        config_path = ISING_SCENARIO_DIR / "q156/sweep_test/config.json"
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["physical"]["parameters"]["num_qubits"], 156)
+        self.assertEqual(payload["default_pipeline"]["agp_terms"], 32768)
+        self.assertEqual(payload["holdout_feedback"]["base_agp_terms"], 32768)
+        self.assertEqual(payload["holdout_feedback"]["holdout_residual_top_k"], 81920)
+        self.assertEqual(payload["holdout_feedback"]["iterations"], 20)
+        self.assertEqual(payload["holdout_feedback"]["add_residual_terms_per_iteration"], 3072)
+        self.assertEqual(payload["holdout_feedback"]["unseen_residual_batches_after_final_iteration"], 1)
+        self.assertNotIn("physical_validation", payload)
+        exact_reference = ROOT / payload["scalable_validation"]["exact_final_ground_reference"]
+        self.assertTrue(exact_reference.is_file(), exact_reference)
+        self.assertEqual(len(payload["scalable_validation"]["ground_bitstring"]), 156)
+
     def test_q15_support_selection_is_configured_not_script_specific(self):
-        config_path = ROOT / "tests/sparse_agp_curriculum/q15/sweep_test/config.json"
+        config_path = ISING_SCENARIO_DIR / "q15/sweep_test/config.json"
         payload = json.loads(config_path.read_text(encoding="utf-8"))
 
         self.assertEqual(

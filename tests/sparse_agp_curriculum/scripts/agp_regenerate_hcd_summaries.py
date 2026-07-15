@@ -50,6 +50,31 @@ def find_coefficient_export(run_dir: Path) -> Path | None:
     direct = run_dir / "Models_Data" / "final_agp_coefficients.pt"
     if direct.is_file():
         return direct
+    summaries = sorted(
+        [
+            *run_dir.glob("**/Models_Data/physical_validation_summary.json"),
+            *run_dir.glob("**/Models_Data/mps_physical_validation_summary.json"),
+        ],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for summary_path in summaries:
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(summary, dict) or not summary.get("trained_run"):
+            continue
+        trained_run = Path(str(summary["trained_run"]))
+        if not trained_run.is_absolute():
+            trained_run = summary_path.parents[2] / trained_run
+        try:
+            trained_run.resolve().relative_to(run_dir.resolve())
+        except ValueError:
+            continue
+        selected = trained_run / "Models_Data" / "final_agp_coefficients.pt"
+        if selected.is_file():
+            return selected
     descendants = sorted(
         run_dir.glob("**/Models_Data/final_agp_coefficients.pt"),
         key=coefficient_priority,

@@ -77,7 +77,7 @@ conda run -n torch-mps python tests/sparse_agp_curriculum/scripts/build_driver_p
 Clean generated artifacts and recreate only the run root:
 
 ```bash
-conda run -n torch-mps python scripts/agp_restart.py --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
+conda run -n torch-mps python scripts/agp_restart.py --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
 ```
 
 ## Train
@@ -88,14 +88,14 @@ and then executes the fifteen holdout-feedback rounds:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
 ```
 
 Train only the baseline `K=32768` AGP model:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_baseline_train.py \
-  --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
 ```
 
 ## Physical Validation
@@ -110,7 +110,7 @@ After training, run the q15 statevector diagnostic:
 
 ```bash
 conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_physical_validation.py \
-  --config tests/sparse_agp_curriculum/q15/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
 ```
 
 This compares final observables for:
@@ -136,3 +136,21 @@ Kipu/DQFM l=1 rows use the fixed reference `sin^2(pi t / 2T)` schedule.
 
 The statevector code is intentionally kept as a script-level diagnostic because
 it is not a scalable library path.
+
+## MPS Calibration
+
+The tensor-network backend is calibrated against the retained q15 statevector
+before it is used at larger q:
+
+```bash
+conda run --no-capture-output -n torch-mps python -u \
+  tests/sparse_agp_curriculum/scripts/agp_mps_validation.py \
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
+```
+
+The calibration uses the matching retained 1024-term deployment variant,
+96 time steps, bond cap 128, and cutoff `1e-12`. The MPS result agrees with the
+statevector to `1.41e-4` in final energy and `2.66e-5` in ground fidelity for
+the learned protocol. The no-CD and nested-l1 differences are also below the
+configured tolerances. This validates the MPS propagator at q15; it does not
+replace the 2048-term statevector row used for the primary q15 benchmark.

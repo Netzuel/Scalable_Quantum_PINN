@@ -35,13 +35,15 @@ try:  # noqa: E402
     from agp_plot_annotations import (  # type: ignore[import-not-found]
         draw_physical_footer,
         footer_bottom_margin,
-        physical_footer_lines_for_images_dir,
+        hcd_context_lines_for_images_dir,
+        plot_physical_comparison_table,
     )
 except ModuleNotFoundError:  # pragma: no cover - package-style imports in tests
     from scripts.agp_plot_annotations import (  # type: ignore[import-not-found]
         draw_physical_footer,
         footer_bottom_margin,
-        physical_footer_lines_for_images_dir,
+        hcd_context_lines_for_images_dir,
+        plot_physical_comparison_table,
     )
 
 
@@ -1541,11 +1543,11 @@ def plot_connection_summary(
     set_paper_style(plt)
     pair_matrix, order_totals = summarize_connections(ranked_terms, n_qubits)
     tick_positions, tick_labels = qubit_ticks(n_qubits)
-    footer_lines = physical_footer_lines_for_images_dir(images_dir)
+    footer_lines = hcd_context_lines_for_images_dir(images_dir)
     fig, (ax_heat, ax_order) = plt.subplots(
         1,
         2,
-        figsize=(min(max(8.0, 0.12 * n_qubits + 5.8), 24.0), 3.5),
+        figsize=(min(max(8.0, 0.12 * n_qubits + 5.8), 24.0), 4.3),
         gridspec_kw={"width_ratios": [1.18, 1.0], "wspace": 0.58},
     )
     cmap = mpl.colormaps["viridis"]
@@ -1609,6 +1611,7 @@ def plot_connection_summary(
     draw_physical_footer(fig, footer_lines)
     save_pdf(fig, images_dir, "hcd_connection_summary")
     plt.close(fig)
+    plot_physical_comparison_table(images_dir)
 
 
 def plot_support_summary(metadata: dict[str, object], images_dir: Path) -> None:

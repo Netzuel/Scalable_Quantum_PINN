@@ -2,7 +2,7 @@
   "physical": {
     "parameters": {
       "system": "TransverseIsingDriverProblem",
-      "num_qubits": 15,
+      "num_qubits": 20,
       "distance": "1_0",
       "hamiltonian_source": "Hamiltonians_to_use/pauli_decompositions/index.json",
       "t_initial": 0.0,
@@ -23,10 +23,10 @@
     }
   },
   "default_pipeline": {
-    "name": "q15_fixed_k_holdout_feedback_physical_validation",
+    "name": "q20_fixed_k_holdout_feedback_physical_validation",
     "entrypoint": "scripts/agp_holdout_feedback.py",
     "agp_terms": 32768,
-    "description": "Fixed K=32768 AGP support selected from a bounded nested-commutator Krylov pool; fifteen feedback iterations add hard residual equations from a larger Q=65536 residual holdout pool without growing AGP outputs. The candidate experiment adds a final high-time-resolution continuation stage after the support-swap curriculum."
+    "description": "Fixed K=32768 AGP support selected from a bounded nested-commutator Krylov pool; twenty feedback iterations add hard residual equations from a requested Q=81920 residual holdout pool without growing AGP outputs. Uniform and adaptive temporal refinement continue the final round-20 state."
   },
   "support_sweep": {
     "agp_terms": [32768],
@@ -47,8 +47,8 @@
   },
   "holdout_feedback": {
     "base_agp_terms": 32768,
-    "holdout_residual_top_k": 65536,
-    "iterations": 15,
+    "holdout_residual_top_k": 81920,
+    "iterations": 20,
     "add_residual_terms_per_iteration": 3072,
     "unseen_residual_batches_after_final_iteration": 1,
     "epochs_per_iteration": 1000,
@@ -63,7 +63,7 @@
       "n_neurons": 96,
       "activation": "silu",
       "layer_type": "quadratic",
-      "description": "Train or reuse the retained SiLU baseline checkpoint, then warm-start the PAU feedback model from that checkpoint. This makes the PAU benchmark reproducible even from a cleaned q15 folder."
+      "description": "Train or reuse the retained SiLU baseline checkpoint, then warm-start the PAU feedback model from that checkpoint. This makes the PAU benchmark reproducible from a cleaned q20 folder."
     },
     "support_swap": {
       "enabled": true,
@@ -81,7 +81,7 @@
       "lr": 3e-6,
       "optimizer": "AdamW",
       "run_dir": "temporal_refinement",
-      "description": "Final post-curriculum continuation on the fixed round-15 AGP support and residual basis. It increases the time collocation grid while keeping PAU weights, learned schedule, gamma, and gates trainable; no final ground-state energy, fidelity, or observable targets are used."
+      "description": "Final post-curriculum continuation on the fixed round-20 AGP support and residual basis. It increases the time collocation grid while keeping PAU weights, learned schedule, gamma, and gates trainable; no final ground-state energy, fidelity, or observable targets are used."
     },
     "adaptive_temporal_refinement": {
       "enabled": true,
@@ -148,17 +148,37 @@
     "description": "Trainable scheduling function lambda(t)=lambda_0(t)+tau^2(1-tau)^2*A_sched*tanh(u_NN(t)), with lambda_0 equal to the current sin^2 schedule and A_sched=2.4 chosen to keep lambda within [0,1] for this base schedule. Endpoint values and endpoint derivatives are enforced by construction."
   },
   "physical_validation": {
+    "enabled": false,
     "entrypoint": "tests/sparse_agp_curriculum/scripts/agp_physical_validation.py",
     "protocols": ["no_cd", "kipu_dqfm_l1", "learned_sparse_agp"],
     "schedule": "sinusoidal_sin2",
-    "statevector_qubits": 15,
+    "statevector_qubits": 20,
     "evolution_steps": 96,
     "prefer_residual_calibrated": false,
     "learned_top_terms": 2048,
     "learned_top_terms_sweep": [1024, 2048],
     "learned_scale_sweep": [1.0],
+    "learned_action_cache_size": 8,
     "selection_metric": "energy_error",
-    "description": "Post-training q15 statevector diagnostic comparing final observables under no counterdiabatic drive, the Kipu/DQFM-style l=1 nested-commutator CD approximator, and the jointly calibrated learned sparse AGP."
+    "description": "Legacy reduced-support statevector diagnostic retained for provenance. The project validation policy uses tensor networks for q>15, so this is disabled for canonical q20 evaluation."
+  },
+  "tensor_network_validation": {
+    "enabled": true,
+    "entrypoint": "tests/sparse_agp_curriculum/scripts/agp_mps_validation.py",
+    "trained_run": "runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/agp_32768_residual_81920_add_3072_rounds_20/adaptive_temporal_refinement",
+    "output_dir": "mps_validation",
+    "protocols": ["no_cd", "kipu_dqfm_l1", "learned_sparse_agp"],
+    "exact_final_ground_reference": "tests/sparse_agp_curriculum/ground_truth/diagonal_ising/ground_states_q2_q156.json",
+    "resolutions": [
+      {"name": "coarse", "steps": 24, "max_bond": 32, "learned_terms": 32768, "cutoff": 1e-9},
+      {"name": "fine", "steps": 48, "max_bond": 64, "learned_terms": 32768, "cutoff": 1e-10}
+    ],
+    "operator_grouping": "support",
+    "coefficient_threshold": 0.0,
+    "convergence_energy_atol": 0.05,
+    "convergence_fidelity_atol": 0.01,
+    "progress": true,
+    "description": "Canonical q20 full-learned-support MPS validation targeting the completed Q=81920 adaptive-temporal checkpoint. Every one of the 32768 learned AGP terms is retained at both numerical resolutions and combined only within identical occupied-qubit supports before local exponentiation."
   },
   "summary": {
     "top_k_overlap": 32,

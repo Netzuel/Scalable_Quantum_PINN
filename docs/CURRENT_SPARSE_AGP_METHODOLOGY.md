@@ -296,9 +296,9 @@ optional cleanup entrypoint = scripts/agp_restart.py
 The current retained q15 benchmark instance is:
 
 ```text
-config = tests/sparse_agp_curriculum/q15/sweep_test/config.json
+config = tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
 current run root =
-  tests/sparse_agp_curriculum/q15/sweep_test/runs/
+  tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/runs/
   fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/
   agp_32768_residual_65536_add_3072_rounds_15/
 ```
@@ -341,6 +341,16 @@ conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.p
 conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_physical_validation.py \
   --config tests/<case>/sweep_test/config.json
 ```
+
+The common plotting pipeline exports
+`Images/physical_method_comparison_table.pdf`. Its rows compare the exact
+final ground state, the nested-commutator `l=1` protocol, and the learned
+sparse AGP; its columns report final energy, absolute energy error, and
+ground-state fidelity. Values are populated from
+`physical_validation_summary.json` when statevector validation is feasible.
+At larger `q`, the table preserves an available exact final-Hamiltonian
+ground-energy reference and marks unavailable dynamical energies/fidelities as
+`not computed` rather than estimating them.
 
 5. Accept or reject the candidate using the strongest available diagnostics for
    the configured `q`. When a physical table is available, the deciding retained
@@ -385,6 +395,18 @@ It should not be described as a certified globally sufficient support for the
 full Pauli basis.
 
 ## Physical Validation
+
+The retained backend policy is:
+
+```text
+q <= 15: exact statevector evolution
+q > 15:  tensor-network evolution
+```
+
+This dynamical threshold does not limit exact final-Hamiltonian ground solvers.
+At any `q`, use an exact ground energy and ground-state manifold whenever the
+operator structure permits it. Canonical tensor-network validation must keep
+the complete learned AGP support fixed across its numerical convergence ladder.
 
 After training, the q15 statevector diagnostic compares:
 
@@ -492,6 +514,90 @@ maps to a better final physical state.
 
 The next methodological improvements should therefore add physical robustness
 or attribution controls without using benchmark-only ground-truth targets.
+
+## Scalable MPS Dynamical Validation
+
+Large-q final-state metrics are evaluated with the optional quimb MPS backend
+instead of a dense `2**q` statevector. This validation layer does not alter AGP
+training. It deploys the exported learned schedule and counterdiabatic
+coefficients after training and compares:
+
+```text
+no_cd
+kipu_dqfm_l1
+learned_sparse_agp
+```
+
+The canonical PINN row must use all terms exported by the retained learned AGP
+checkpoint. Coefficient-ranked top-term deployments are support ablations only;
+they may diagnose cost or sensitivity but cannot replace the full learned-
+support physical evaluation. If all learned terms cannot be evolved at two or
+more converged MPS resolutions, the full-model physical-validation gate is
+`not tested`.
+
+Time evolution starts from `|+>**q` and uses a symmetric second-order product
+formula. The scalable full-support path groups Pauli strings only when they
+share the same occupied-qubit support, sums their complete coefficients into a
+local Hermitian Hamiltonian, exponentiates that group, and applies the resulting
+gate as an MPO followed by bounded-bond MPS compression. This changes the
+Trotter partition but does not prune any learned term; timestep convergence
+controls the resulting splitting error. The legacy per-Pauli path remains
+available for small-system cross-checks. For a diagonal final Ising
+Hamiltonian, final energy is computed from local `Z_i` and `Z_i Z_{i+1}`
+contractions. Ground fidelity is the squared MPS amplitude of the exact product
+ground bitstring.
+
+Every reported large-q result records the time steps, cutoff, maximum and peak
+bond, deployed learned-term count, retained coefficient RMS norm, gate count,
+Pauli-term application count, grouping policy, runtime, state norm, and final
+observables. A large-q dynamical claim requires successive-resolution
+agreement; merely finishing one MPS run is not a pass.
+
+The backend is calibrated at q15 against the matching retained 1024-term
+statevector variant. At 96 steps, bond 128, and cutoff `1e-12`, learned-protocol
+differences are:
+
+```text
+final-energy difference = 1.401e-4
+ground-fidelity difference = 2.658e-5
+```
+
+The retained q20 validation deploys all 32,768 learned terms from the completed
+`Q=81,920` adaptive-temporal checkpoint. These map to 1,828 occupied-qubit
+support groups, with no coefficient threshold. Its 24-step/bond-32/cutoff-
+`1e-9` and 48-step/bond-64/cutoff-`1e-10` results pass the configured
+successive-resolution gate. The fine comparison is:
+
+| Method | Final energy | Energy error | Ground fidelity |
+|---|---:|---:|---:|
+| no CD | -3.2390823 | 22.7609177 | 1.95723e-05 |
+| Kipu/DQFM l=1 | -12.2268621 | 13.7731379 | 0.00806762 |
+| learned sparse AGP | -25.6453873 | 0.3546127 | 0.93648534 |
+
+The q20 exact target is `E0=-26` with unique ground bitstring `00...0`. For the
+PINN protocol, the coarse-to-fine energy and fidelity changes are `0.00678613`
+and `0.00212781`, and the fine evolution reaches peak bond 57 below the cap 64.
+This passes the q20 full-support physical-validation gate, but it does not by
+itself certify global support sufficiency in the full `4**20` basis.
+
+The q156 retained deployment uses the top 2048 terms, which retain `0.9555395`
+of the trained coefficient RMS norm. Its 24-step/bond-32/cutoff-`1e-9` and
+48-step/bond-64/cutoff-`1e-10` results agree for all three protocols. The final
+fine-resolution comparison is:
+
+| Method | Final energy | Energy error | Ground fidelity |
+|---|---:|---:|---:|
+| no CD | -26.2569071 | 183.343093 | 3.85877e-37 |
+| Kipu/DQFM l=1 | -97.7452309 | 111.854769 | 1.42713e-16 |
+| learned sparse AGP | -188.153516 | 21.4464841 | 0.0207493 |
+
+This certifies numerical convergence of the historical 2048-term deployment
+ablation under the configured ladder. Under the current full learned-support
+rule, it does not pass physical validation for the trained `K=32768` PINN
+operator. The full support has been evaluated at one coarse MPS resolution, but
+has not yet passed a successive-resolution ladder; canonical q156 full-model
+physical validation is therefore `not tested`. Dense-statevector validation
+also remains unavailable at q156.
 
 ## Non-Retained Probe-Loss Variant
 

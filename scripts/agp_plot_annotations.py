@@ -13,6 +13,12 @@ PHYSICAL_METHODS: tuple[tuple[str, str], ...] = (
     ("no_cd", "no CD"),
 )
 
+PHYSICAL_TABLE_METHODS: tuple[tuple[str, str], ...] = (
+    ("no_cd", "No counterdiabatic term"),
+    ("kipu_dqfm_l1", "Nested commutator l=1"),
+    ("learned_sparse_agp", "PINN sparse AGP"),
+)
+
 
 def _finite_float(value: object) -> float | None:
     try:
@@ -47,12 +53,23 @@ def find_physical_summary_for_images_dir(images_dir: Path) -> Path | None:
 
     seen: set[Path] = set()
     for root in search_roots:
+        found_at_root = False
         for pattern in (
             "Models_Data/physical_validation_summary.json",
+            "Models_Data/hydrogen_physical_validation_summary.json",
+            "Models_Data/mps_physical_validation_summary.json",
             "*/Models_Data/physical_validation_summary.json",
+            "*/Models_Data/hydrogen_physical_validation_summary.json",
+            "*/Models_Data/mps_physical_validation_summary.json",
             "*/*/Models_Data/physical_validation_summary.json",
+            "*/*/Models_Data/hydrogen_physical_validation_summary.json",
+            "*/*/Models_Data/mps_physical_validation_summary.json",
             "*/*/*/Models_Data/physical_validation_summary.json",
+            "*/*/*/Models_Data/hydrogen_physical_validation_summary.json",
+            "*/*/*/Models_Data/mps_physical_validation_summary.json",
             "*/*/*/*/Models_Data/physical_validation_summary.json",
+            "*/*/*/*/Models_Data/hydrogen_physical_validation_summary.json",
+            "*/*/*/*/Models_Data/mps_physical_validation_summary.json",
         ):
             try:
                 for candidate in root.glob(pattern):
@@ -61,21 +78,260 @@ def find_physical_summary_for_images_dir(images_dir: Path) -> Path | None:
                         if candidate.is_file() and resolved not in seen:
                             candidates.append(candidate)
                             seen.add(resolved)
+                            found_at_root = True
                     except OSError:
                         continue
             except OSError:
                 continue
+        if found_at_root:
+            break
     if not candidates:
         return None
-    existing: list[tuple[float, Path]] = []
+    existing: list[tuple[int, float, Path]] = []
     for candidate in candidates:
         try:
-            existing.append((candidate.stat().st_mtime, candidate))
+            summary_priority = {
+                "mps_physical_validation_summary.json": 1,
+                "hydrogen_physical_validation_summary.json": 2,
+                "physical_validation_summary.json": 3,
+            }.get(candidate.name, 0)
+            existing.append((summary_priority, candidate.stat().st_mtime, candidate))
         except OSError:
             continue
     if not existing:
         return None
-    return max(existing, key=lambda item: item[0])[1]
+    return max(existing, key=lambda item: (item[0], item[1]))[2]
+
+
+def _load_mapping(path: Path) -> dict[str, object] | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _summary_applies_to_images_dir(
+    payload: Mapping[str, object],
+    *,
+    summary_path: Path,
+    images_dir: Path,
+) -> bool:
+    trained_raw = payload.get("trained_run")
+    if not trained_raw:
+        return True
+    trained_run = Path(str(trained_raw))
+    if not trained_run.is_absolute():
+        resolved = None
+        for parent in summary_path.parents:
+            candidate = parent / trained_run
+            if candidate.is_dir():
+                resolved = candidate
+                break
+        if resolved is None:
+            return True
+        trained_run = resolved
+    run_dir = Path(images_dir).parent.resolve()
+    trained_run = trained_run.resolve()
+    return run_dir == trained_run or run_dir in trained_run.parents
+
+
+def _config_for_images_dir(images_dir: Path) -> dict[str, object] | None:
+    run_dir = Path(images_dir).parent
+    candidates = [
+        run_dir / "Models_Data" / "config.json",
+        *run_dir.glob("*/Models_Data/config.json"),
+        *run_dir.glob("*/*/Models_Data/config.json"),
+    ]
+    cursor = run_dir
+    for _ in range(8):
+        candidates.append(cursor / "config.json")
+        if cursor == cursor.parent:
+            break
+        cursor = cursor.parent
+    fallback = None
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not candidate.is_file():
+            continue
+        seen.add(resolved)
+        payload = _load_mapping(candidate)
+        if payload is None:
+            continue
+        fallback = payload if fallback is None else fallback
+        if isinstance(payload.get("scalable_validation"), Mapping):
+            return payload
+    return fallback
+
+
+def physical_comparison_payload_for_images_dir(images_dir: Path) -> dict[str, object]:
+    """Load physical results, or a scalable exact-reference-only fallback."""
+
+    summary_path = find_physical_summary_for_images_dir(images_dir)
+    if summary_path is not None:
+        payload = _load_mapping(summary_path)
+        if payload is not None and _summary_applies_to_images_dir(
+            payload,
+            summary_path=summary_path,
+            images_dir=images_dir,
+        ):
+            return payload
+
+    config = _config_for_images_dir(images_dir) or {}
+    physical = config.get("physical", {})
+    physical = physical if isinstance(physical, Mapping) else {}
+    parameters = physical.get("parameters", {})
+    parameters = parameters if isinstance(parameters, Mapping) else {}
+    scalable = config.get("scalable_validation", {})
+    scalable = scalable if isinstance(scalable, Mapping) else {}
+    pinn_final_energy = _finite_float(scalable.get("pinn_final_energy"))
+    results = (
+        {"learned_sparse_agp": {"final_energy": pinn_final_energy}}
+        if pinn_final_energy is not None
+        else {}
+    )
+    return {
+        "n_qubits": parameters.get("num_qubits", physical.get("n_qubits")),
+        "system": parameters.get("system", physical.get("system")),
+        "ground_energy": scalable.get("ground_energy"),
+        "results": results,
+        "availability_note": scalable.get(
+            "reason",
+            "Final-time dynamical energies and fidelities were not computed for this run.",
+        ),
+    }
+
+
+def physical_comparison_rows(payload: Mapping[str, object]) -> list[dict[str, object]]:
+    """Normalize exact, nested-l1, and learned-AGP metrics for table export."""
+
+    results = payload.get("results", {})
+    results = results if isinstance(results, Mapping) else {}
+    ground_energy = _finite_float(payload.get("ground_energy"))
+    if ground_energy is None:
+        for row in results.values():
+            if isinstance(row, Mapping):
+                ground_energy = _finite_float(row.get("ground_energy"))
+                if ground_energy is not None:
+                    break
+
+    rows: list[dict[str, object]] = [
+        {
+            "method": "Exact ground state",
+            "final_energy": ground_energy,
+            "energy_error": 0.0 if ground_energy is not None else None,
+            "ground_state_fidelity": 1.0 if ground_energy is not None else None,
+        }
+    ]
+    for key, label in PHYSICAL_TABLE_METHODS:
+        source = results.get(key)
+        source = source if isinstance(source, Mapping) else {}
+        final_energy = _finite_float(source.get("final_energy"))
+        energy_error = _finite_float(source.get("energy_error"))
+        if energy_error is None and final_energy is not None and ground_energy is not None:
+            energy_error = abs(final_energy - ground_energy)
+        rows.append(
+            {
+                "method": label,
+                "final_energy": final_energy,
+                "energy_error": energy_error,
+                "ground_state_fidelity": _finite_float(source.get("ground_state_fidelity")),
+            }
+        )
+    return rows
+
+
+def _table_number(value: object) -> str:
+    parsed = _finite_float(value)
+    return "not computed" if parsed is None else f"{parsed:.7g}"
+
+
+def plot_physical_comparison_table(
+    images_dir: Path,
+    payload: Mapping[str, object] | None = None,
+) -> Path:
+    """Export an availability-aware exact/nested/PINN comparison table."""
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    images_dir = Path(images_dir)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    normalized = dict(payload) if payload is not None else physical_comparison_payload_for_images_dir(images_dir)
+    rows = physical_comparison_rows(normalized)
+    n_qubits = normalized.get("n_qubits")
+    q_text = f"q={n_qubits} " if n_qubits is not None else ""
+    availability_note = str(normalized.get("availability_note", "")).strip()
+    if not availability_note and any(row["final_energy"] is None for row in rows[1:]):
+        availability_note = "Final-time dynamical energies and fidelities were not computed for this run."
+
+    plt.rcParams.update(
+        {
+            "font.family": "STIXGeneral",
+            "mathtext.fontset": "stix",
+            "mathtext.rm": "stix",
+            "mathtext.it": "stix:italic",
+            "mathtext.bf": "stix:bold",
+            "axes.linewidth": 0.8,
+        }
+    )
+    fig, ax = plt.subplots(figsize=(8.6, 2.8))
+    ax.axis("off")
+    column_labels = ["Method", r"$E(T)$", r"$|E(T)-E_0|$", r"$F_0(T)$"]
+    cell_text = [
+        [
+            str(row["method"]),
+            _table_number(row["final_energy"]),
+            _table_number(row["energy_error"]),
+            _table_number(row["ground_state_fidelity"]),
+        ]
+        for row in rows
+    ]
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=column_labels,
+        cellLoc="center",
+        colLoc="center",
+        colWidths=[0.35, 0.20, 0.22, 0.20],
+        bbox=[0.015, 0.24, 0.97, 0.58],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    for column in range(len(column_labels)):
+        header = table[(0, column)]
+        header.set_facecolor("#E8E8E8")
+        header.set_text_props(weight="bold", color="0.12")
+        header.set_edgecolor("0.65")
+    method_colors = ("#777777", "#009E73", "#D55E00", "#0072B2")
+    for row_index, color in enumerate(method_colors, start=1):
+        for column in range(len(column_labels)):
+            cell = table[(row_index, column)]
+            cell.set_edgecolor("0.78")
+            cell.set_facecolor("#F7F7F7" if column else color)
+        table[(row_index, 0)].set_text_props(color="white", weight="bold")
+
+    ax.set_title(
+        f"{q_text}final-time ground-state comparison",
+        fontsize=14,
+        pad=10,
+    )
+    note = availability_note or (
+        r"$E_0$ is the exact final-Hamiltonian ground energy; "
+        r"$F_0(T)$ is final-state ground-space fidelity."
+    )
+    fig.text(0.5, 0.075, note, ha="center", va="center", fontsize=8.5, color="0.25", wrap=True)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.88, bottom=0.02)
+    output = images_dir / "physical_method_comparison_table.pdf"
+    fig.savefig(output, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return output
 
 
 def physical_footer_lines_from_summary(summary_path: Path) -> list[str]:
@@ -123,6 +379,83 @@ def physical_footer_lines(payload: Mapping[str, object]) -> list[str]:
         else "Final-time physical check"
     )
     return [header, " | ".join(metric_parts)]
+
+
+def _hamiltonian_context_lines(system: str | None, n_qubits: int | None) -> list[str]:
+    q = int(n_qubits) if n_qubits is not None else None
+    if system == "TransverseIsingDriverProblem":
+        upper = str(q) if q is not None else "q"
+        edge_upper = str(q - 1) if q is not None else "q-1"
+        return [
+            rf"$H_{{\mathrm{{initial}}}}=-\sum_{{i=1}}^{{{upper}}}X_i$",
+            (
+                rf"$H_{{\mathrm{{final}}}}=-\sum_{{i=1}}^{{{upper}}}h_iZ_i"
+                rf"-\sum_{{i=1}}^{{{edge_upper}}}J_iZ_iZ_{{i+1}}$"
+            ),
+        ]
+    if system == "Hidrogen":
+        return [
+            (
+                r"$H_{\mathrm{initial}}=\Pi_{\{I,Z\}}(H_{\mathrm{final}})"
+                r"=\sum_{P\in\mathcal{S}_{IZ}}c_P P$"
+            ),
+            r"$H_{\mathrm{final}}=\sum_{P\in\mathcal{S}_{H_2}}c_P P$",
+        ]
+    return [
+        r"$H_{\mathrm{initial}}=\sum_P c_P^{(0)}P$",
+        r"$H_{\mathrm{final}}=\sum_P c_P^{(1)}P$",
+    ]
+
+
+def hcd_context_lines_for_images_dir(images_dir: Path) -> list[str]:
+    """Return Hamiltonian and energy lines for an HCD connection summary."""
+
+    config = _config_for_images_dir(images_dir) or {}
+    physical = config.get("physical", {})
+    physical = physical if isinstance(physical, Mapping) else {}
+    parameters = physical.get("parameters", {})
+    parameters = parameters if isinstance(parameters, Mapping) else {}
+    system_raw = parameters.get("system", physical.get("system"))
+    n_qubits_raw = parameters.get("num_qubits", physical.get("n_qubits"))
+    try:
+        n_qubits = int(n_qubits_raw) if n_qubits_raw is not None else None
+    except (TypeError, ValueError):
+        n_qubits = None
+    system = str(system_raw) if system_raw is not None else None
+
+    payload = physical_comparison_payload_for_images_dir(images_dir)
+    ground_energy = _format_number(payload.get("ground_energy"))
+    results = payload.get("results", {})
+    results = results if isinstance(results, Mapping) else {}
+    ground_line = (
+        rf"$E_0(H_{{\mathrm{{final}}}})={ground_energy}$"
+        if ground_energy is not None
+        else r"$E_0(H_{\mathrm{final}})=$ not computed"
+    )
+
+    def method_text(key: str, label: str) -> str:
+        row = results.get(key, {})
+        row = row if isinstance(row, Mapping) else {}
+        energy = _format_number(row.get("final_energy"))
+        fidelity = _format_number(row.get("ground_state_fidelity"))
+        energy_text = energy if energy is not None else "not computed"
+        fidelity_text = fidelity if fidelity is not None else "not computed"
+        return rf"{label}: $E(T)={energy_text}$, $F_0(T)={fidelity_text}$"
+
+    baseline_line = " | ".join(
+        (
+            method_text("no_cd", "no CD"),
+            method_text("kipu_dqfm_l1", r"nested $l=1$"),
+        )
+    )
+    pinn_line = method_text("learned_sparse_agp", "PINN AGP")
+
+    return [
+        *_hamiltonian_context_lines(system, n_qubits),
+        ground_line,
+        baseline_line,
+        pinn_line,
+    ]
 
 
 def _run_metadata_for_images_dir(images_dir: Path) -> tuple[str | None, int | None]:
@@ -185,7 +518,7 @@ def draw_physical_footer(fig, footer_lines: Sequence[str], *, fontsize: float = 
     if not footer_lines:
         return
     base_y = 0.035
-    line_gap = 0.035
+    line_gap = 0.052
     for offset, line in enumerate(reversed(list(footer_lines))):
         fig.text(
             0.5,
