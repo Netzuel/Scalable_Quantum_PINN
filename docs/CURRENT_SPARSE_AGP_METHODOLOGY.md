@@ -207,6 +207,45 @@ final train residual equations = 50176
 final generated holdout pool = 65536
 ```
 
+## Stable Unseen Diagnostics
+
+The retained sweep configurations enable an immutable active/null probe
+partition for future runs:
+
+```text
+active_terms = 4096
+null_terms = 4096
+reference_rms_threshold = 1e-12
+seed = 11
+candidate_multiplier = 8
+```
+
+The helper requests a bounded candidate tail after reserving the moving
+holdout/feedback universe, excludes training and certification-probe labels,
+and persists the selected labels and reference RMS values before round 1. The
+same labels are evaluated against every later checkpoint. For a small full-basis
+case, the requested counts are capped by the available disjoint labels and the
+manifest records `insufficient_candidates` with the realized counts; it does
+not silently reuse an overlapping basis. The optional parser-level candidate
+cap remains available for resource-constrained runs, but is not required in the
+general retained configuration block.
+
+These diagnostics have distinct meanings:
+
+- The **moving unseen quotient** is a curriculum diagnostic. Its denominator
+  can be zero, so the quotient may be undefined and must carry an explicit
+  status rather than an epsilon-clamped value.
+- The **fixed active quotient** is the stable relative unseen gate. It is
+  evaluated only on fixed probes with finite nonzero reference RMS.
+- **Fixed null leakage** is the absolute AGP-induced residual in zero-reference
+  directions. It is reported per term (and, when defined, in its configured
+  scaled form); it is not treated as a relative quotient.
+
+The four configuration blocks define defaults for future runs only. They do not
+retroactively add probe manifests to completed runs or certify historical
+artifacts. A historical summary without the persisted fixed-probe manifest must
+continue to report the fixed-probe gates as `not tested`.
+
 ## Post-Curriculum Temporal Refinement
 
 After the fixed-K support-swap curriculum finishes, the retained methodology can

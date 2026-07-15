@@ -52,15 +52,18 @@ The Euler-Lagrange residual is
 R(A) = [i dH_AD/dlambda - [A_lambda, H_AD], H_AD].
 ```
 
-The normalized residual on any residual basis `B` is
+When the no-AGP reference is finite and nonzero, the normalized residual on a
+residual basis `B` is
 
 ```text
-relative_residual_B = ||R(A)||^2_B / (||R(A=0)||^2_B + eps).
+relative_residual_B = ||R(A)||^2_B / ||R(A=0)||^2_B.
 ```
 
 Values below one mean the learned AGP improves over the no-AGP baseline on that
 same projected basis. Values above one mean the learned AGP is worse than no AGP
-on that projected basis.
+on that projected basis. If the reference is zero or below the configured
+reference-RMS threshold, the relative quotient is undefined and must be
+reported with an explicit `not_tested` status and reason.
 
 ## Required Residual Bases
 
@@ -93,6 +96,36 @@ S_R_probe_test:
 The training residual can move with the curriculum. The probe bases must not be
 quietly regenerated after every support update, otherwise generalization is
 measured on a moving target.
+
+### Stable Active/Null Unseen Probes
+
+The general retained configurations also define one immutable unseen partition
+before round 1. Its labels remain disjoint from the training, feedback-
+candidate, and certification-probe labels and are evaluated at every later
+checkpoint. The partition is stratified using the no-AGP reference RMS:
+
+```text
+fixed active probes: reference RMS > reference_rms_threshold
+fixed null probes:   reference RMS <= reference_rms_threshold
+```
+
+Use the metrics with their intended claim boundaries:
+
+- The **moving unseen quotient** remains a curriculum diagnostic and may be
+  undefined when its no-AGP reference is zero. It cannot certify a support by
+  itself.
+- The **fixed active quotient** is the stable relative unseen gate. Apply the
+  configured unseen threshold only when the fixed active partition is complete
+  and its reference is finite.
+- **Fixed null leakage** is the absolute AGP-induced residual in zero-reference
+  directions. Report its finite absolute per-term value and any defined scaled
+  diagnostic; never invent a relative ratio with an epsilon denominator.
+
+For small full-basis cases, selection may realize fewer probes than requested.
+The persisted manifest must say `insufficient_candidates` and record the
+realized counts. The configuration is a future-run default: it does not
+retroactively certify completed artifacts. If a historical run has no fixed
+probe manifest, its fixed active and fixed null gates remain `not tested`.
 
 ## Gate 1: Enough Number Of Terms
 
@@ -137,7 +170,7 @@ large train-holdout gap means the AGP overfits the projected training equations.
 ### 1.3 Unseen Residual Pass
 
 The residual restricted to holdout strings absent from the training loss is the
-strictest diagnostic:
+moving unseen diagnostic:
 
 ```text
 unseen_relative_residual <= target_unseen.
@@ -150,7 +183,10 @@ target_unseen <= 1.0.
 ```
 
 This target is looser than the full holdout target because unseen terms can be
-hard, but it must not be orders of magnitude larger than one.
+hard, but it must not be orders of magnitude larger than one. If the moving
+unseen reference is zero, this quotient is `not tested`, not a failed or passed
+relative gate. When enabled and complete, use the fixed active quotient as the
+stable unseen gate instead.
 
 ### 1.4 Fixed Probe Pass
 
@@ -166,6 +202,18 @@ The `probe_gate` and `probe_watch` bases protect training decisions. The
 `probe_test` basis is a true external diagnostic. A candidate can be considered
 methodologically useful if it improves these values but remains above one;
 however, it is not certified.
+
+For the stable unseen partition, the fixed active quotient is the relative gate:
+
+```text
+fixed_unseen_active_relative <= target_unseen
+```
+
+only when its status is `finite_reference` and the requested active count was
+realized. Fixed null probes are not a relative gate. Their finite
+`null_absolute_per_term` value is the absolute leakage diagnostic and must be
+reported separately; an `insufficient_candidates` or unavailable manifest is
+`not tested`.
 
 ### 1.5 K-Sweep Plateau
 
@@ -280,10 +328,12 @@ The final accepted model must pass the residual metrics simultaneously:
 ```text
 training_relative_residual <= target_train
 holdout_relative_residual <= target_holdout
-unseen_relative_residual <= target_unseen
+moving_unseen_relative_residual <= target_unseen, when defined
+fixed_unseen_active_relative <= target_unseen, when enabled and complete
 probe_gate_relative_residual <= target_probe_gate
 probe_watch_relative_residual <= target_probe_watch
 probe_test_relative_residual <= target_probe_test
+fixed_unseen_null_absolute_per_term: finite and reported
 ```
 
 Initial practical targets:
@@ -297,7 +347,10 @@ target_probe_watch <= 1.0
 target_probe_test <= 1.0
 ```
 
-Passing only the training loss is not meaningful for certification.
+Passing only the training loss is not meaningful for certification. A moving
+unseen quotient with a zero reference is `not tested`; fixed active and fixed
+null results cannot be inferred for historical artifacts that lack the
+persisted probe manifest.
 
 ### 3.2 No Moving-Target Shortcut
 

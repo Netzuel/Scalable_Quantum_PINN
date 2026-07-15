@@ -108,6 +108,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "tests/test_full_pauli_pinn.py",
             "tests/test_ising_ground_state_solver.py",
             "tests/test_agp_mps_validation.py",
+            "tests/test_agp_mpo_backend.py",
             "tests/test_agp_joint_calibration.py",
             "tests/test_agp_support_swap.py",
             "tests/test_qiskit_hamiltonian_generator.py",
@@ -185,6 +186,26 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
                 if "__pycache__" not in path.parts
             ]
             self.assertEqual(study_python, [])
+
+    def test_retained_sweeps_configure_stable_unseen_probes(self):
+        config_paths = (
+            ISING_SCENARIO_DIR / "q15/sweep_test/config.json",
+            ISING_SCENARIO_DIR / "q20/sweep_test/config.json",
+            ISING_SCENARIO_DIR / "q156/sweep_test/config.json",
+            SPIN_HUBO_SCENARIO_DIR
+            / "run_002_hamiltonian_341/q24/sweep_test/config.json",
+        )
+
+        for config_path in config_paths:
+            with self.subTest(config=config_path):
+                payload = json.loads(config_path.read_text(encoding="utf-8"))
+                probes = payload["holdout_feedback"]["fixed_unseen_probes"]
+                self.assertTrue(probes["enabled"])
+                self.assertEqual(probes["active_terms"], 4096)
+                self.assertEqual(probes["null_terms"], 4096)
+                self.assertEqual(probes["reference_rms_threshold"], 1e-12)
+                self.assertEqual(probes["seed"], 11)
+                self.assertGreaterEqual(probes["candidate_multiplier"], 1)
 
     def test_q20_matches_q15_ising_lineage_for_twenty_rounds(self):
         q15_path = ISING_SCENARIO_DIR / "q15/sweep_test/config.json"

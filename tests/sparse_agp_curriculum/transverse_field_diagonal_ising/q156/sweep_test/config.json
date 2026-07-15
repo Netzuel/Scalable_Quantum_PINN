@@ -57,6 +57,14 @@
     "min_rms": 0.0,
     "holdout_threshold": 0.10,
     "unseen_threshold": 1.0,
+    "fixed_unseen_probes": {
+      "enabled": true,
+      "active_terms": 4096,
+      "null_terms": 4096,
+      "reference_rms_threshold": 1e-12,
+      "seed": 11,
+      "candidate_multiplier": 8
+    },
     "baseline_root": "runs/baselines",
     "baseline_neural": {
       "n_hidden": 4,
