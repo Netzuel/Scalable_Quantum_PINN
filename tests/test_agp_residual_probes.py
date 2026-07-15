@@ -79,6 +79,18 @@ class AGPResidualProbeTests(unittest.TestCase):
         self.assertTrue(np.isfinite(metrics["null_absolute_per_term"]))
         self.assertIsNone(metrics["null_scaled"])
 
+    def test_fixed_unseen_metrics_reports_zero_reference_for_nonempty_active_subset(self):
+        metrics = fixed_unseen_metrics(
+            residual=torch.ones((1, 2)),
+            reference=torch.zeros((1, 2)),
+            active_indices=[0, 1],
+            null_indices=[],
+            reference_floor=1.0e-12,
+        )
+
+        self.assertIsNone(metrics["active_relative"])
+        self.assertEqual(metrics["active_status"]["reason"], "zero_reference")
+
 
 if __name__ == "__main__":
     unittest.main()

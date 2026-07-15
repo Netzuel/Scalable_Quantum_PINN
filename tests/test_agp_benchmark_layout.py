@@ -102,6 +102,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         allowed_python = {
             "tests/__init__.py",
             "tests/test_agp_benchmark_layout.py",
+            "tests/test_agp_residual_probes.py",
             "tests/test_agp_guarded_curriculum.py",
             "tests/test_agp_physical_validation.py",
             "tests/test_full_pauli_pinn.py",
