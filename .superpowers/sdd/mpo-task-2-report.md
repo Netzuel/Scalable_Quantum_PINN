@@ -49,6 +49,10 @@ The final numerical review added three RED regressions:
   it formed an exact action of one instead of two and reported an interval near
   one although the dense relative error is `5e-9`. The same failure applies
   after uniform rescaling of every coefficient.
+- The cancellation-conditioned `I-Z` exact action on `|up>` reached the
+  interval path after its stable aggregate was exactly zero, yielding
+  `numerically_unresolved` and an invalid zero-denominator division instead of
+  the required non-comparable status.
 
 ## Implementation
 
@@ -118,7 +122,9 @@ The final numerical review added three RED regressions:
   evolution path.
 - Requested random bond dimension is capped at the finite-chain Schmidt bound
   and both values are reported. Exact zero action denominators remain
-  `not_tested`.
+  `not_tested`: every zero-norm branch now returns the explicit reason
+  `zero_action_denominator` and null relative-error fields before any interval
+  or relative-error division.
 - Dense Pauli and MPO helpers reject `q > 4`; no production path constructs a
   dense many-qubit operator.
 
@@ -132,7 +138,7 @@ conda run -n torch-mps python -m py_compile scripts/agp_mpo_backend.py tests/tes
 git diff --check
 ```
 
-Result: 43 focused tests passed, compilation passed, and the diff check was
+Result: 44 focused tests passed, compilation passed, and the diff check was
 clean. Coverage includes exact dense equivalence, duplicate combination and
 cancellation metadata, explicit arithmetic-zero tolerance, qubit-order
 equivalence, large-q construction with dense guards, compression error and
@@ -142,7 +148,8 @@ errors with a detectable small perturbation, scale-rescaled error probes,
 numerically-unresolved leakage bounds, single-site seeded random MPS probes,
 zero-denominator status, mutation-safe exact-identity evidence, adversarial
 dense product/random bound enclosure, the reviewer cancellation-conditioned
-product action at three global scales, and optional-import behavior.
+product action at three global scales, cancellation-conditioned zero-action
+denominators, and optional-import behavior.
 
 The adversarial q12/512 test uses labels scrambled across the full 12-site
 Pauli address space. With `max_bond=8` and an 8 MiB cap it reports

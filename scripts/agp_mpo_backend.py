@@ -848,17 +848,14 @@ def probe_mpo_compression(
         exact_action_norm_uncertainty = float(
             aggregation["absolute_uncertainty"] + _fsum_roundoff_bound(exact_action_norm)
         )
-        if exact_norm_squared == 0.0 and not aggregation["numerically_unresolved"]:
+        if exact_norm_squared == 0.0:
             probes.append(
-                {
-                    "name": f"product_{index}",
-                    "kind": "product",
-                    "status": "not_tested",
-                    "action_norm": 0.0,
-                    "relative_action_error": None,
-                    "estimated_exact_work": estimated_exact_work,
-                    "peak_workspace_bytes": estimated_sparse_bytes,
-                }
+                _zero_action_denominator_probe(
+                    f"product_{index}",
+                    kind="product",
+                    estimated_exact_work=estimated_exact_work,
+                    peak_workspace_bytes=estimated_sparse_bytes,
+                )
             )
             continue
         compressed_metrics = _compressed_product_action_metrics(
@@ -998,17 +995,12 @@ def probe_mpo_compression(
             exact_norm_squared = float(random_metrics["exact_norm_squared"])
             if exact_norm_squared == 0.0:
                 probes.append(
-                    {
-                        "name": f"random_{index}",
-                        "kind": "random_mps",
-                        "status": "not_tested",
-                        "action_norm": 0.0,
-                        "relative_action_error": None,
-                        "estimated_exact_work": estimated_random_work,
-                        "peak_workspace_bytes": int(
-                            random_metrics["peak_workspace_bytes"]
-                        ),
-                    }
+                    _zero_action_denominator_probe(
+                        f"random_{index}",
+                        kind="random_mps",
+                        estimated_exact_work=estimated_random_work,
+                        peak_workspace_bytes=int(random_metrics["peak_workspace_bytes"]),
+                    )
                 )
                 continue
             probes.append(
@@ -1537,6 +1529,29 @@ def _not_feasible_probe(
         "required_workspace_bytes": int(required_workspace_bytes),
         "peak_workspace_bytes": 0,
         "resource_reason": reason,
+    }
+
+
+def _zero_action_denominator_probe(
+    name: str,
+    *,
+    kind: str,
+    estimated_exact_work: int,
+    peak_workspace_bytes: int,
+) -> dict[str, object]:
+    """Return the explicit non-comparable status before relative-error division."""
+    return {
+        "name": name,
+        "kind": kind,
+        "status": "not_tested",
+        "reason": "zero_action_denominator",
+        "action_norm": 0.0,
+        "relative_action_error": None,
+        "relative_action_error_lower_bound": None,
+        "relative_action_error_upper_bound": None,
+        "relative_action_error_numerical_floor": None,
+        "estimated_exact_work": int(estimated_exact_work),
+        "peak_workspace_bytes": int(peak_workspace_bytes),
     }
 
 

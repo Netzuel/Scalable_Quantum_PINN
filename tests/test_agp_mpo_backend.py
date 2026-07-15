@@ -989,6 +989,25 @@ class MPOCompressionTests(unittest.TestCase):
         self.assertEqual(diagnostics["probes"][0]["status"], "not_tested")
         self.assertIsNone(diagnostics["probes"][0]["relative_action_error"])
 
+    def test_cancellation_conditioned_zero_product_action_is_not_tested(self) -> None:
+        exact, _ = build_exact_pauli_mpo(
+            [("I", 1.0), ("Z", -1.0)], n_qubits=1, order=(0,)
+        )
+
+        probe = probe_mpo_compression(
+            exact,
+            exact,
+            product_states=(("up",),),
+            random_state_count=0,
+        )["probes"][0]
+
+        self.assertEqual(probe["status"], "not_tested")
+        self.assertEqual(probe["reason"], "zero_action_denominator")
+        self.assertIsNone(probe["relative_action_error"])
+        self.assertIsNone(probe["relative_action_error_lower_bound"])
+        self.assertIsNone(probe["relative_action_error_upper_bound"])
+        self.assertIsNone(probe["relative_action_error_numerical_floor"])
+
     def test_compression_rejects_invalid_resource_limits(self) -> None:
         exact, _ = build_exact_pauli_mpo([("X", 1.0)], n_qubits=1, order=(0,))
 
