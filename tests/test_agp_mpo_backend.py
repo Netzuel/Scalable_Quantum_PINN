@@ -884,6 +884,50 @@ class MPOCompressionTests(unittest.TestCase):
         self.assertGreater(probe["roundoff_operation_estimate"], 0)
         self.assertGreater(probe["squared_difference_arithmetic_uncertainty"], 0.0)
 
+    def test_product_probe_stably_aggregates_conditioned_pauli_paths(self) -> None:
+        for scale in (1.0, 1.0e-10, 1.0e10):
+            exact_terms = [
+                ("II", 1.0e16 * scale),
+                ("IZ", scale),
+                ("ZI", -1.0e16 * scale),
+                ("ZZ", scale),
+            ]
+            candidate_terms = exact_terms + [("XI", 1.0e-8 * scale)]
+            exact, _ = build_exact_pauli_mpo(exact_terms, n_qubits=2, order=(0, 1))
+            candidate, _ = build_exact_pauli_mpo(
+                candidate_terms, n_qubits=2, order=(0, 1)
+            )
+            input_state = np.asarray([1.0, 0.0, 0.0, 0.0])
+            exact_dense = mpo_to_dense(exact)
+            dense_relative_error = np.linalg.norm(
+                (mpo_to_dense(candidate) - exact_dense) @ input_state
+            ) / np.linalg.norm(exact_dense @ input_state)
+            self.assertAlmostEqual(dense_relative_error, 5.0e-9, places=20)
+
+            probe = probe_mpo_compression(
+                exact,
+                candidate,
+                product_states=(("up", "up"),),
+                random_state_count=0,
+            )["probes"][0]
+
+            if probe["status"] == "tested":
+                self.assertAlmostEqual(
+                    probe["relative_action_error"], dense_relative_error, places=12
+                )
+            else:
+                self.assertEqual(probe["status"], "numerically_unresolved")
+                self.assertLessEqual(
+                    probe["relative_action_error_lower_bound"], dense_relative_error
+                )
+                self.assertGreaterEqual(
+                    probe["relative_action_error_upper_bound"], dense_relative_error
+                )
+                self.assertLess(probe["relative_action_error_upper_bound"], 1.0e-5)
+            self.assertEqual(probe["exact_action_aggregation_method"], "math.fsum_components")
+            self.assertGreater(probe["exact_action_aggregation_condition_number"], 1.0e15)
+            self.assertGreater(probe["exact_action_aggregation_absolute_uncertainty"], 0.0)
+
     def test_random_unresolved_bounds_cover_adversarial_dense_error(self) -> None:
         from tenpy.networks.mps import MPS
 

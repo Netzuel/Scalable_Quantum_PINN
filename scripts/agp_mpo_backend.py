@@ -842,9 +842,13 @@ def probe_mpo_compression(
             )
             continue
         input_bits = tuple(0 if state == "up" else 1 for state in product_state)
-        exact_action = _sparse_pauli_product_action(pauli_terms, input_bits)
-        exact_norm_squared = float(sum(abs(value) ** 2 for value in exact_action.values()))
-        if exact_norm_squared == 0.0:
+        exact_action, aggregation = _sparse_pauli_product_action(pauli_terms, input_bits)
+        exact_norm_squared = float(math.fsum(abs(value) ** 2 for value in exact_action.values()))
+        exact_action_norm = float(np.sqrt(exact_norm_squared))
+        exact_action_norm_uncertainty = float(
+            aggregation["absolute_uncertainty"] + _fsum_roundoff_bound(exact_action_norm)
+        )
+        if exact_norm_squared == 0.0 and not aggregation["numerically_unresolved"]:
             probes.append(
                 {
                     "name": f"product_{index}",
@@ -875,6 +879,19 @@ def probe_mpo_compression(
                 )
             )
             continue
+        difference_norm_squared = float(
+            compressed_metrics["direct_difference_norm_squared"]
+        ) + float(compressed_metrics["off_support_norm_squared"])
+        base_difference_uncertainty = float(
+            compressed_metrics["squared_difference_arithmetic_uncertainty"]
+        )
+        aggregation_difference_uncertainty = (
+            _exact_action_aggregation_squared_difference_uncertainty(
+                difference_norm_squared,
+                base_difference_uncertainty,
+                exact_action_norm_uncertainty,
+            )
+        )
         probes.append(
             _action_error_probe(
                 name=f"product_{index}",
@@ -882,18 +899,29 @@ def probe_mpo_compression(
                 exact_norm_squared=exact_norm_squared,
                 compressed_norm_squared=float(compressed_metrics["compressed_norm_squared"]),
                 cross_overlap=complex(compressed_metrics["cross_overlap"]),
-                difference_norm_squared=(
-                    float(compressed_metrics["direct_difference_norm_squared"])
-                    + float(compressed_metrics["off_support_norm_squared"])
-                ),
-                squared_difference_arithmetic_uncertainty=float(
-                    compressed_metrics["squared_difference_arithmetic_uncertainty"]
+                difference_norm_squared=difference_norm_squared,
+                squared_difference_arithmetic_uncertainty=(
+                    base_difference_uncertainty + aggregation_difference_uncertainty
                 ),
                 roundoff_operation_estimate=int(
                     compressed_metrics["roundoff_operation_estimate"]
-                ),
+                ) + int(aggregation["operation_estimate"]),
                 numerically_unresolved=bool(
                     compressed_metrics["off_support_numerically_unresolved"]
+                ),
+                exact_action_aggregation_condition_number=float(
+                    aggregation["condition_number"]
+                ),
+                exact_action_aggregation_method=str(aggregation["method"]),
+                exact_action_aggregation_absolute_uncertainty=exact_action_norm_uncertainty,
+                exact_action_aggregation_operation_estimate=int(
+                    aggregation["operation_estimate"]
+                ),
+                exact_action_aggregation_numerically_unresolved=bool(
+                    aggregation["numerically_unresolved"]
+                ),
+                exact_action_aggregation_squared_difference_uncertainty=(
+                    aggregation_difference_uncertainty
                 ),
                 exact_identity_established=exact_identity_established,
                 estimated_exact_work=estimated_exact_work,
@@ -1045,8 +1073,9 @@ def probe_mpo_compression(
 def _sparse_pauli_product_action(
     pauli_terms: Sequence[tuple[str, complex]],
     input_bits: Sequence[int],
-) -> dict[int, complex]:
-    amplitudes: dict[int, complex] = {}
+) -> tuple[dict[int, complex], dict[str, object]]:
+    """Apply Pauli terms to a product state with stable per-bitstring sums."""
+    buckets: dict[int, list[complex]] = {}
     for label, coefficient in pauli_terms:
         output = 0
         phase = 1.0 + 0.0j
@@ -1060,8 +1089,44 @@ def _sparse_pauli_product_action(
             elif symbol == "Z" and bit == 1:
                 phase *= -1.0
             output = (output << 1) | output_bit
-        amplitudes[output] = amplitudes.get(output, 0.0j) + coefficient * phase
-    return {state: amplitude for state, amplitude in amplitudes.items() if amplitude != 0.0j}
+        buckets.setdefault(output, []).append(coefficient * phase)
+
+    amplitudes: dict[int, complex] = {}
+    condition_number = 1.0
+    squared_absolute_uncertainty = 0.0
+    operation_estimate = 0
+    numerically_unresolved = False
+    for state, contributions in buckets.items():
+        real_values = [value.real for value in contributions]
+        imaginary_values = [value.imag for value in contributions]
+        real = math.fsum(real_values)
+        imaginary = math.fsum(imaginary_values)
+        amplitude = complex(real, imaginary)
+        contribution_scale = math.fsum(abs(value) for value in contributions)
+        if contribution_scale > 0.0:
+            if amplitude == 0.0j:
+                condition_number = math.inf
+            else:
+                condition_number = max(condition_number, contribution_scale / abs(amplitude))
+        component_uncertainty = math.hypot(
+            _fsum_roundoff_bound(real), _fsum_roundoff_bound(imaginary)
+        )
+        squared_absolute_uncertainty += component_uncertainty**2
+        operation_estimate += 2 * max(len(contributions), 1)
+        if amplitude != 0.0j:
+            amplitudes[state] = amplitude
+
+    absolute_uncertainty = float(np.sqrt(squared_absolute_uncertainty))
+    action_norm = float(np.sqrt(math.fsum(abs(value) ** 2 for value in amplitudes.values())))
+    if not np.isfinite(condition_number) and action_norm <= absolute_uncertainty:
+        numerically_unresolved = True
+    return amplitudes, {
+        "method": "math.fsum_components",
+        "condition_number": condition_number,
+        "absolute_uncertainty": absolute_uncertainty,
+        "operation_estimate": operation_estimate,
+        "numerically_unresolved": numerically_unresolved,
+    }
 
 
 def _compressed_product_action_metrics(
@@ -1331,6 +1396,12 @@ def _action_error_probe(
     squared_difference_arithmetic_uncertainty: float = 0.0,
     roundoff_operation_estimate: int = 0,
     numerically_unresolved: bool = False,
+    exact_action_aggregation_condition_number: float = 1.0,
+    exact_action_aggregation_method: str = "not_applicable",
+    exact_action_aggregation_absolute_uncertainty: float = 0.0,
+    exact_action_aggregation_operation_estimate: int = 0,
+    exact_action_aggregation_numerically_unresolved: bool = False,
+    exact_action_aggregation_squared_difference_uncertainty: float = 0.0,
     exact_identity_established: bool = False,
 ) -> dict[str, object]:
     if exact_identity_established:
@@ -1338,6 +1409,9 @@ def _action_error_probe(
         squared_difference_arithmetic_uncertainty = 0.0
         roundoff_operation_estimate = 0
         numerically_unresolved = False
+        exact_action_aggregation_absolute_uncertainty = 0.0
+        exact_action_aggregation_numerically_unresolved = False
+        exact_action_aggregation_squared_difference_uncertainty = 0.0
         error_method = "provenance_established_identity"
     elif difference_norm_squared is None:
         (
@@ -1356,6 +1430,13 @@ def _action_error_probe(
     lower_squared, upper_squared = _squared_difference_interval(
         difference_norm_squared, squared_difference_arithmetic_uncertainty
     )
+    action_norm = float(np.sqrt(exact_norm_squared))
+    action_norm_lower_bound = max(
+        0.0, action_norm - exact_action_aggregation_absolute_uncertainty
+    )
+    action_norm_upper_bound = (
+        action_norm + exact_action_aggregation_absolute_uncertainty
+    )
     diagnostics = {
         "squared_difference_estimate": float(difference_norm_squared),
         "squared_difference_arithmetic_uncertainty": float(
@@ -1366,26 +1447,57 @@ def _action_error_probe(
         "roundoff_operation_estimate": int(roundoff_operation_estimate),
         "roundoff_model": _GAMMA_N_MODEL,
         "roundoff_assumptions": _GAMMA_N_ASSUMPTIONS,
+        "exact_action_aggregation_condition_number": float(
+            exact_action_aggregation_condition_number
+        ),
+        "exact_action_aggregation_method": exact_action_aggregation_method,
+        "exact_action_aggregation_absolute_uncertainty": float(
+            exact_action_aggregation_absolute_uncertainty
+        ),
+        "exact_action_aggregation_operation_estimate": int(
+            exact_action_aggregation_operation_estimate
+        ),
+        "exact_action_aggregation_numerically_unresolved": bool(
+            exact_action_aggregation_numerically_unresolved
+        ),
+        "exact_action_aggregation_squared_difference_uncertainty": float(
+            exact_action_aggregation_squared_difference_uncertainty
+        ),
+        "exact_action_norm_lower_bound": action_norm_lower_bound,
+        "exact_action_norm_upper_bound": action_norm_upper_bound,
     }
-    if numerically_unresolved:
+    if (
+        numerically_unresolved
+        or exact_action_aggregation_numerically_unresolved
+        or action_norm_lower_bound == 0.0
+    ):
+        relative_upper_bound = (
+            math.inf
+            if action_norm_lower_bound == 0.0
+            else float(np.sqrt(upper_squared) / action_norm_lower_bound)
+        )
         return {
             "name": name,
             "kind": kind,
             "status": "numerically_unresolved",
-            "action_norm": float(np.sqrt(exact_norm_squared)),
+            "action_norm": action_norm,
             "relative_action_error": None,
             "relative_action_error_lower_bound": float(
-                np.sqrt(lower_squared / exact_norm_squared)
+                np.sqrt(lower_squared) / action_norm_upper_bound
             ),
-            "relative_action_error_upper_bound": float(
-                np.sqrt(upper_squared / exact_norm_squared)
-            ),
+            "relative_action_error_upper_bound": relative_upper_bound,
             "relative_action_error_numerical_floor": float(
-                np.sqrt(
-                    squared_difference_arithmetic_uncertainty / exact_norm_squared
-                )
+                math.inf
+                if action_norm_lower_bound == 0.0
+                else np.sqrt(squared_difference_arithmetic_uncertainty)
+                / action_norm_lower_bound
             ),
-            "action_error_method": "cancellation_limited_norm_difference",
+            "action_error_method": (
+                "condition_limited_exact_action"
+                if exact_action_aggregation_numerically_unresolved
+                or action_norm_lower_bound == 0.0
+                else "cancellation_limited_norm_difference"
+            ),
             "estimated_exact_work": int(estimated_exact_work),
             "peak_workspace_bytes": int(peak_workspace_bytes),
             **diagnostics,
@@ -1508,6 +1620,29 @@ def _gamma_n_bound(scale: float, operation_estimate: int) -> float:
     if product >= 1.0:
         return math.inf
     return float(abs(scale) * product / (1.0 - product))
+
+
+def _fsum_roundoff_bound(value: float) -> float:
+    """Bound final binary64 rounding after ``math.fsum`` component accumulation."""
+    if not np.isfinite(value):
+        return math.inf
+    return float(2.0 * math.ulp(float(value)))
+
+
+def _exact_action_aggregation_squared_difference_uncertainty(
+    difference_norm_squared: float,
+    base_uncertainty: float,
+    action_norm_uncertainty: float,
+) -> float:
+    """Bound squared-error drift from a stable exact-action amplitude uncertainty."""
+    base_upper_bound = max(0.0, float(difference_norm_squared)) + max(
+        0.0, float(base_uncertainty)
+    )
+    amplitude_uncertainty = max(0.0, float(action_norm_uncertainty))
+    return float(
+        2.0 * np.sqrt(base_upper_bound) * amplitude_uncertainty
+        + amplitude_uncertainty**2
+    )
 
 
 def _squared_difference_interval(

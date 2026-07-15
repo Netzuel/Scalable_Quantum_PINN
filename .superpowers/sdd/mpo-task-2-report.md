@@ -44,6 +44,11 @@ The final numerical review added three RED regressions:
 - Product and random tiny-q probes with a `1e-8` off-support perturbation had
   no operation-count diagnostics and could not demonstrate that their
   unresolved bounds enclosed the independently computed dense action error.
+- The reviewer reproduction `II=1e16`, `IZ=1`, `ZI=-1e16`, `ZZ=1`, with a
+  candidate `XI=1e-8` on `|up,up>` exposed left-to-right sparse aggregation:
+  it formed an exact action of one instead of two and reported an interval near
+  one although the dense relative error is `5e-9`. The same failure applies
+  after uniform rescaling of every coefficient.
 
 ## Implementation
 
@@ -71,9 +76,16 @@ The final numerical review added three RED regressions:
   buffer. The successful 33 MiB run uses `tracemalloc`, verifies every retained
   core owns its compact buffer, and requires both reported peak and required
   workspace to remain within the cap.
-- Product probes compute the exact action from every Pauli term by aggregating
-  output bitstrings and amplitudes. Compressed action norms and cross terms use
-  streamed local transfer contractions and batched amplitude queries.
+- Product probes bucket Pauli contributions by output bitstring and combine
+  their real and imaginary components with `math.fsum`; this keeps a retained
+  term-count-bounded workspace under the existing preflight. Diagnostics report
+  the aggregation method, operation estimate, condition number, and final
+  rounding uncertainty. That uncertainty is propagated into the squared-error
+  and exact-action-norm intervals; when the conditioned action denominator has
+  no positive lower bound, the result is `numerically_unresolved` with an
+  infinite conservative relative upper bound rather than a false finite claim.
+  Compressed action norms and cross terms use streamed local transfer
+  contractions and batched amplitude queries.
 - Seeded random MPS probes compute exact norms from Pauli-pair expectations and
   cross terms from individual fixed-bond Pauli actions against one bounded
   compressed action. Their construction and action workspace are estimated
@@ -120,7 +132,7 @@ conda run -n torch-mps python -m py_compile scripts/agp_mpo_backend.py tests/tes
 git diff --check
 ```
 
-Result: 42 focused tests passed, compilation passed, and the diff check was
+Result: 43 focused tests passed, compilation passed, and the diff check was
 clean. Coverage includes exact dense equivalence, duplicate combination and
 cancellation metadata, explicit arithmetic-zero tolerance, qubit-order
 equivalence, large-q construction with dense guards, compression error and
@@ -129,7 +141,8 @@ deterministic product/random MPS action errors, cancellation-safe zero action
 errors with a detectable small perturbation, scale-rescaled error probes,
 numerically-unresolved leakage bounds, single-site seeded random MPS probes,
 zero-denominator status, mutation-safe exact-identity evidence, adversarial
-dense product/random bound enclosure, and optional-import behavior.
+dense product/random bound enclosure, the reviewer cancellation-conditioned
+product action at three global scales, and optional-import behavior.
 
 The adversarial q12/512 test uses labels scrambled across the full 12-site
 Pauli address space. With `max_bond=8` and an 8 MiB cap it reports
