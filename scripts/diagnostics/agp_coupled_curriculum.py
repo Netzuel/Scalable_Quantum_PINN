@@ -503,6 +503,26 @@ def build_fixed_probe_residual_labels(
     return labels, metadata
 
 
+def load_existing_fixed_unseen_probe_labels(
+    roots: list[Path],
+) -> tuple[set[str], list[Path]]:
+    """Load immutable fixed-unseen labels that certification probes must avoid."""
+
+    labels: set[str] = set()
+    paths: list[Path] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("fixed_unseen_probe_labels.json")):
+            payload = load_json(path)
+            if not isinstance(payload, dict):
+                raise TypeError(f"{path} must contain a JSON object.")
+            labels.update(str(label) for label in payload.get("active_labels", []))
+            labels.update(str(label) for label in payload.get("null_labels", []))
+            paths.append(path)
+    return labels, paths
+
+
 def _final_output_modules(model: torch.nn.Module) -> list[torch.nn.Linear]:
     if hasattr(model.body, "layers"):
         final_layer = model.body.layers[-1]
@@ -1851,6 +1871,20 @@ def main() -> None:
             residual_top_k - int(residual_budget["minimum_budget_before_final_unseen_exhaustion"]),
             0,
         )
+    feedback_config = payload.get("holdout_feedback", {})
+    feedback_config = feedback_config if isinstance(feedback_config, dict) else {}
+    fixed_probe_root = Path(str(feedback_config.get("output_root", "runs/holdout_feedback")))
+    if not fixed_probe_root.is_absolute():
+        fixed_probe_root = RUN_DIR / fixed_probe_root
+    fixed_unseen_labels, fixed_unseen_manifest_paths = load_existing_fixed_unseen_probe_labels(
+        [fixed_probe_root]
+    )
+    fixed_training_overlap = fixed_unseen_labels & set(feedback_residual_labels)
+    if fixed_training_overlap:
+        raise ValueError(
+            "Existing fixed unseen probe labels intersect the coupled feedback residual universe: "
+            f"{sorted(fixed_training_overlap)[:8]}"
+        )
     probe_source_agp_terms = (
         int(probe_source_agp_raw)
         if probe_source_agp_raw is not None
@@ -1865,6 +1899,7 @@ def main() -> None:
         h0=h0,
         h1=h1,
         feedback_residual_labels=feedback_residual_labels,
+        extra_excluded_labels=sorted(fixed_unseen_labels),
         probe_agp_terms=selection_source_agp_terms,
         probe_residual_terms=selection_residual_terms,
         intermediate_top_k=intermediate_top_k,
@@ -1874,7 +1909,7 @@ def main() -> None:
         h0=h0,
         h1=h1,
         feedback_residual_labels=feedback_residual_labels,
-        extra_excluded_labels=selection_residual_labels,
+        extra_excluded_labels=sorted(fixed_unseen_labels | set(selection_residual_labels)),
         probe_agp_terms=probe_source_agp_terms,
         probe_residual_terms=probe_gate_residual_terms,
         intermediate_top_k=intermediate_top_k,
@@ -1884,7 +1919,9 @@ def main() -> None:
         h0=h0,
         h1=h1,
         feedback_residual_labels=feedback_residual_labels,
-        extra_excluded_labels=selection_residual_labels + probe_gate_residual_labels,
+        extra_excluded_labels=sorted(
+            fixed_unseen_labels | set(selection_residual_labels) | set(probe_gate_residual_labels)
+        ),
         probe_agp_terms=probe_source_agp_terms,
         probe_residual_terms=probe_watch_residual_terms,
         intermediate_top_k=intermediate_top_k,
@@ -1894,7 +1931,12 @@ def main() -> None:
         h0=h0,
         h1=h1,
         feedback_residual_labels=feedback_residual_labels,
-        extra_excluded_labels=selection_residual_labels + probe_gate_residual_labels + probe_watch_residual_labels,
+        extra_excluded_labels=sorted(
+            fixed_unseen_labels
+            | set(selection_residual_labels)
+            | set(probe_gate_residual_labels)
+            | set(probe_watch_residual_labels)
+        ),
         probe_agp_terms=probe_source_agp_terms,
         probe_residual_terms=probe_test_residual_terms,
         intermediate_top_k=intermediate_top_k,
@@ -2021,6 +2063,8 @@ def main() -> None:
         "probe_disjoint_from_feedback_and_selection": True,
         "probe_watch_disjoint_from_feedback_selection_and_gate": True,
         "probe_test_disjoint_from_feedback_selection_gate_and_watch": True,
+        "fixed_unseen_excluded_terms": len(fixed_unseen_labels),
+        "fixed_unseen_manifest_paths": [str(path) for path in fixed_unseen_manifest_paths],
         "selection_labels_export": str((data_dir / "selection_residual_labels.json").relative_to(output_dir)),
         "probe_gate_labels_export": str((data_dir / "probe_gate_residual_labels.json").relative_to(output_dir)),
         "probe_watch_labels_export": str((data_dir / "probe_watch_residual_labels.json").relative_to(output_dir)),

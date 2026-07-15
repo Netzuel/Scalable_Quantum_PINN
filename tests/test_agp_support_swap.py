@@ -2,7 +2,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
 import torch
 
 
@@ -17,12 +19,16 @@ from projected_sparse_training_common import (  # noqa: E402
 )
 from agp_holdout_feedback import (  # noqa: E402
     adaptive_temporal_refinement_settings_from_feedback,
+    build_expanding_fixed_unseen_probe,
     compact_support_swap_plan,
+    FIXED_UNSEEN_ROW_FIELDS,
     feedback_refinements_complete,
+    fixed_unseen_probe_manifest_identity,
     fixed_unseen_probe_settings_from_feedback,
     fixed_unseen_reference_rms,
     load_or_validate_fixed_unseen_probe,
     make_adaptive_tau_grid,
+    merge_fixed_unseen_probe_metrics,
     pau_transfer_stability_settings_from_feedback,
     save_fixed_unseen_probe,
     support_swap_settings_from_feedback,
@@ -32,6 +38,185 @@ from utils import SparsePauliOperator  # noqa: E402
 
 
 class AGPSupportSwapTests(unittest.TestCase):
+    def test_fixed_unseen_evaluator_returns_exact_prefixed_row_schema(self):
+        probe = {
+            "active_labels": ["XI"],
+            "null_labels": ["YI"],
+            "reference_rms_threshold": 1.0e-12,
+        }
+        rows = iter(
+            [
+                {"holdout_total_residual": 2.0, "holdout_reference_residual": 4.0},
+                {"holdout_total_residual": 3.0, "holdout_reference_residual": 0.0},
+            ]
+        )
+        with patch("agp_holdout_feedback.load_checkpoint_labels", return_value=([], ["ZI"])), patch(
+            "agp_holdout_feedback.evaluate_one_run",
+            side_effect=lambda **_: (next(rows), []),
+        ):
+            from agp_holdout_feedback import evaluate_fixed_unseen_probe
+
+            result = evaluate_fixed_unseen_probe(
+                run_dir=Path("unused"),
+                config_payload={},
+                probe_metadata=probe,
+                intermediate_top_k=2,
+                device=torch.device("cpu"),
+            )
+
+        self.assertEqual(set(result), set(FIXED_UNSEEN_ROW_FIELDS))
+        self.assertEqual(result["fixed_unseen_active_terms"], 1)
+        self.assertAlmostEqual(result["fixed_unseen_active_relative"], 0.5)
+        self.assertEqual(result["fixed_unseen_null_terms"], 1)
+        self.assertAlmostEqual(result["fixed_unseen_null_absolute_per_term"], 3.0)
+
+    def test_fixed_unseen_manifest_rejects_candidate_identity_mismatch(self):
+        settings = fixed_unseen_probe_settings_from_feedback(
+            {
+                "fixed_unseen_probes": {
+                    "enabled": True,
+                    "active_terms": 1,
+                    "null_terms": 1,
+                    "reference_rms_threshold": 1.0e-12,
+                    "seed": 7,
+                    "candidate_multiplier": 2,
+                }
+            }
+        )
+        identity = fixed_unseen_probe_manifest_identity(
+            settings=settings,
+            candidate_universe_labels=["XI", "YI", "ZI"],
+            excluded_labels={"II"},
+            requested_candidate_terms=3,
+        )
+        payload = {
+            **identity,
+            "active_labels": ["XI"],
+            "null_labels": ["YI"],
+            "active_reference_rms": [2.0],
+            "null_reference_rms": [0.0],
+            "reference_rms_metadata": {"selected_hash": "placeholder"},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "fixed_unseen_probe_labels.json"
+            save_fixed_unseen_probe(path, payload)
+            changed = fixed_unseen_probe_manifest_identity(
+                settings=settings,
+                candidate_universe_labels=["XI", "YI", "ZZ"],
+                excluded_labels={"II"},
+                requested_candidate_terms=3,
+            )
+            with self.assertRaisesRegex(ValueError, "candidate universe identity"):
+                load_or_validate_fixed_unseen_probe(
+                    path,
+                    expected_excluded_labels={"II"},
+                    expected_identity=changed,
+                )
+
+    def test_fixed_unseen_expansion_retries_until_both_partitions_fill(self):
+        settings = fixed_unseen_probe_settings_from_feedback(
+            {
+                "fixed_unseen_probes": {
+                    "enabled": True,
+                    "active_terms": 1,
+                    "null_terms": 1,
+                    "candidate_multiplier": 1,
+                }
+            }
+        )
+        requests: list[int] = []
+
+        def generate(request: int) -> list[str]:
+            requests.append(request)
+            return ["XI", "YI"] if request == 2 else ["XI", "YI", "ZI", "II"]
+
+        probe, universe = build_expanding_fixed_unseen_probe(
+            generate_candidates=generate,
+            reference_rms_for_labels=lambda labels: np.asarray(
+                [1.0 if label in {"XI", "ZI"} else 0.0 for label in labels]
+            ),
+            settings=settings,
+            moving_holdout_terms=1,
+            excluded_labels={"XI"},
+            initial_request=2,
+            resource_cap=4,
+        )
+
+        self.assertEqual(requests, [2, 4])
+        self.assertEqual(universe, ["XI", "YI", "ZI", "II"])
+        self.assertEqual(probe["status"], "complete")
+        self.assertEqual(probe["expansion_history"][-1]["realized_candidate_terms"], 4)
+        self.assertEqual(probe["active_labels"], ["ZI"])
+        self.assertEqual(probe["null_labels"], ["II"])
+
+    def test_fixed_unseen_expansion_records_generator_saturation(self):
+        settings = fixed_unseen_probe_settings_from_feedback(
+            {"fixed_unseen_probes": {"enabled": True, "active_terms": 2, "null_terms": 1}}
+        )
+        requests: list[int] = []
+
+        def generate(request: int) -> list[str]:
+            requests.append(request)
+            return ["XI", "YI"]
+
+        probe, _ = build_expanding_fixed_unseen_probe(
+            generate_candidates=generate,
+            reference_rms_for_labels=lambda labels: np.asarray([1.0 for _ in labels]),
+            settings=settings,
+            moving_holdout_terms=1,
+            excluded_labels=set(),
+            initial_request=2,
+            resource_cap=8,
+        )
+
+        self.assertEqual(requests, [2, 4])
+        self.assertEqual(probe["status"], "insufficient_candidates")
+        self.assertEqual(probe["insufficiency_reason"], "generator_saturated")
+        self.assertEqual(probe["realized_tail_terms"], 1)
+
+    def test_fixed_unseen_manifest_rejects_selected_label_and_reference_metadata_mismatch(self):
+        settings = fixed_unseen_probe_settings_from_feedback(
+            {"fixed_unseen_probes": {"enabled": True, "active_terms": 1, "null_terms": 1}}
+        )
+        probe, _ = build_expanding_fixed_unseen_probe(
+            generate_candidates=lambda _: ["XI", "YI", "ZI"],
+            reference_rms_for_labels=lambda labels: np.asarray(
+                [1.0 if label == "YI" else 0.0 for label in labels]
+            ),
+            settings=settings,
+            moving_holdout_terms=1,
+            excluded_labels=set(),
+            initial_request=3,
+            resource_cap=6,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "fixed_unseen_probe_labels.json"
+            save_fixed_unseen_probe(path, probe)
+            with self.assertRaisesRegex(ValueError, "selected active_labels"):
+                load_or_validate_fixed_unseen_probe(
+                    path,
+                    expected_excluded_labels={"XI"},
+                    expected_identity=probe,
+                    expected_reference_rms_metadata=probe["reference_rms_metadata"],
+                    expected_selected_labels={"active": ["ZI"], "null": probe["null_labels"]},
+                )
+            stale_metadata = dict(probe["reference_rms_metadata"])
+            stale_metadata["candidate_sha256"] = "stale"
+            with self.assertRaisesRegex(ValueError, "reference RMS metadata"):
+                load_or_validate_fixed_unseen_probe(
+                    path,
+                    expected_excluded_labels={"XI"},
+                    expected_identity=probe,
+                    expected_reference_rms_metadata=stale_metadata,
+                    expected_selected_labels={"active": probe["active_labels"], "null": probe["null_labels"]},
+                )
+
+    def test_stage_metric_merges_keep_the_exact_fixed_unseen_schema(self):
+        metrics = {key: index for index, key in enumerate(FIXED_UNSEEN_ROW_FIELDS)}
+        for stage in ("baseline", "curriculum", "temporal_refinement", "adaptive_temporal_refinement"):
+            row = merge_fixed_unseen_probe_metrics({"stage": stage}, metrics)
+            self.assertEqual({key for key in row if key.startswith("fixed_unseen_")}, set(FIXED_UNSEEN_ROW_FIELDS))
+
     def test_fixed_unseen_settings_are_read_from_feedback_config(self):
         settings = fixed_unseen_probe_settings_from_feedback(
             {

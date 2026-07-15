@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import shutil
 from collections.abc import Collection, Mapping
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal, getcontext
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -70,6 +72,16 @@ RUN_DIR = Path.cwd()
 DEFAULT_CONFIG = Path("config.json")
 ROUND_RUNS_DIRNAME = "rounds"
 LEGACY_ROUND_RUNS_DIRNAME = "runs"
+FIXED_UNSEEN_ROW_FIELDS = (
+    "fixed_unseen_active_terms",
+    "fixed_unseen_active_residual",
+    "fixed_unseen_active_reference_residual",
+    "fixed_unseen_active_relative",
+    "fixed_unseen_active_status",
+    "fixed_unseen_null_terms",
+    "fixed_unseen_null_absolute_per_term",
+    "fixed_unseen_null_scaled",
+)
 
 
 @dataclass(frozen=True)
@@ -137,10 +149,74 @@ def save_fixed_unseen_probe(path: Path, payload: Mapping[str, object]) -> None:
         handle.write("\n")
 
 
+def _stable_hash(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _label_identity(labels: Collection[str]) -> dict[str, object]:
+    ordered = [str(label) for label in labels]
+    return {
+        "labels": ordered,
+        "count": len(ordered),
+        "sha256": _stable_hash(ordered),
+    }
+
+
+def fixed_unseen_probe_manifest_identity(
+    *,
+    settings: FixedUnseenProbeConfig,
+    candidate_universe_labels: list[str],
+    excluded_labels: Collection[str],
+    requested_candidate_terms: int,
+) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "requested_active_terms": int(settings.active_terms),
+        "requested_null_terms": int(settings.null_terms),
+        "reference_rms_threshold": float(settings.reference_rms_threshold),
+        "seed": int(settings.seed),
+        "candidate_multiplier": int(settings.candidate_multiplier),
+        "requested_candidate_terms": int(requested_candidate_terms),
+        "candidate_universe": _label_identity(candidate_universe_labels),
+        "excluded_labels": _label_identity(sorted(str(label) for label in excluded_labels)),
+    }
+
+
+def _reference_rms_metadata(
+    *,
+    candidate_labels: list[str],
+    reference_rms: np.ndarray,
+    probe: Mapping[str, object],
+) -> dict[str, object]:
+    values = [float(value) for value in np.asarray(reference_rms, dtype=float)]
+    by_label = {label: value for label, value in zip(candidate_labels, values, strict=True)}
+    selected = {
+        "active": [
+            {"label": label, "reference_rms": float(by_label[label])}
+            for label in probe.get("active_labels", [])
+        ],
+        "null": [
+            {"label": label, "reference_rms": float(by_label[label])}
+            for label in probe.get("null_labels", [])
+        ],
+    }
+    return {
+        "candidate_sha256": _stable_hash(
+            [{"label": label, "reference_rms": value} for label, value in zip(candidate_labels, values, strict=True)]
+        ),
+        "selected": selected,
+        "selected_sha256": _stable_hash(selected),
+    }
+
+
 def load_or_validate_fixed_unseen_probe(
     path: Path,
     *,
     expected_excluded_labels: Collection[str],
+    expected_identity: Mapping[str, object] | None = None,
+    expected_reference_rms_metadata: Mapping[str, object] | None = None,
+    expected_selected_labels: Mapping[str, Collection[str]] | None = None,
 ) -> dict[str, object]:
     payload = load_json(path)
     if not isinstance(payload, dict):
@@ -155,6 +231,30 @@ def load_or_validate_fixed_unseen_probe(
             "immutable fixed unseen probe intersects the current excluded residual labels: "
             f"{sorted(overlap)[:8]}"
         )
+    if expected_identity is not None:
+        for key in (
+            "schema_version",
+            "requested_active_terms",
+            "requested_null_terms",
+            "reference_rms_threshold",
+            "seed",
+            "candidate_multiplier",
+            "requested_candidate_terms",
+            "excluded_labels",
+        ):
+            if payload.get(key) != expected_identity.get(key):
+                raise ValueError(f"immutable fixed unseen probe {key} identity does not match the current request")
+        if payload.get("candidate_universe") != expected_identity.get("candidate_universe"):
+            raise ValueError("immutable fixed unseen probe candidate universe identity does not match the current request")
+    if expected_selected_labels is not None:
+        for key, labels in (("active_labels", expected_selected_labels.get("active", [])), ("null_labels", expected_selected_labels.get("null", []))):
+            if payload.get(key, []) != [str(label) for label in labels]:
+                raise ValueError(f"immutable fixed unseen probe selected {key} do not match the current request")
+    metadata = payload.get("reference_rms_metadata")
+    if not isinstance(metadata, Mapping):
+        raise ValueError("immutable fixed unseen probe is missing reference RMS metadata")
+    if expected_reference_rms_metadata is not None and dict(metadata) != dict(expected_reference_rms_metadata):
+        raise ValueError("immutable fixed unseen probe reference RMS metadata does not match the current request")
     payload["active_labels"] = active_labels
     payload["null_labels"] = null_labels
     return payload
@@ -198,6 +298,95 @@ def build_fixed_unseen_probe(
     return probe
 
 
+def build_expanding_fixed_unseen_probe(
+    *,
+    generate_candidates: Callable[[int], list[str]],
+    reference_rms_for_labels: Callable[[list[str]], np.ndarray],
+    settings: FixedUnseenProbeConfig,
+    moving_holdout_terms: int,
+    excluded_labels: Collection[str],
+    initial_request: int,
+    resource_cap: int | None,
+) -> tuple[dict[str, object], list[str]]:
+    request = max(int(initial_request), int(moving_holdout_terms))
+    cap = max(request + 1, int(resource_cap)) if resource_cap is not None else max(request * 2, request + 1)
+    history: list[dict[str, object]] = []
+    previous_hash: str | None = None
+    final_probe: dict[str, object] | None = None
+    final_universe: list[str] = []
+    final_reference = np.empty(0, dtype=float)
+    final_excluded: set[str] = set()
+    insufficiency_reason: str | None = None
+
+    while True:
+        universe = [str(label) for label in generate_candidates(request)]
+        moving_labels = universe[: int(moving_holdout_terms)]
+        candidate_tail = universe[int(moving_holdout_terms) :]
+        effective_excluded = {str(label) for label in excluded_labels} | set(moving_labels)
+        reference_rms = reference_rms_for_labels(candidate_tail)
+        probe = build_fixed_unseen_probe(
+            candidate_labels=candidate_tail,
+            excluded_labels=effective_excluded,
+            reference_rms=reference_rms,
+            settings=settings,
+        )
+        history.append(
+            {
+                "requested_candidate_terms": request,
+                "realized_candidate_terms": len(universe),
+                "realized_tail_terms": len(candidate_tail),
+                "realized_active_terms": len(probe["active_labels"]),
+                "realized_null_terms": len(probe["null_labels"]),
+            }
+        )
+        final_probe = probe
+        final_universe = universe
+        final_reference = reference_rms
+        final_excluded = effective_excluded
+        universe_hash = _stable_hash(universe)
+        if not settings.enabled or probe.get("status") == "complete":
+            break
+        if previous_hash == universe_hash:
+            insufficiency_reason = "generator_saturated"
+            break
+        if request >= cap:
+            insufficiency_reason = "resource_cap_reached"
+            break
+        previous_hash = universe_hash
+        request = min(request * 2, cap)
+
+    if final_probe is None:
+        raise RuntimeError("fixed unseen probe expansion produced no candidate universe")
+    final_probe.update(
+        fixed_unseen_probe_manifest_identity(
+            settings=settings,
+            candidate_universe_labels=final_universe,
+            excluded_labels=final_excluded,
+            requested_candidate_terms=history[-1]["requested_candidate_terms"],
+        )
+    )
+    final_probe.update(
+        {
+            "moving_holdout_terms": int(moving_holdout_terms),
+            "requested_candidate_terms_initial": int(initial_request),
+            "requested_candidate_terms_final": int(history[-1]["requested_candidate_terms"]),
+            "resource_cap": cap,
+            "realized_candidate_terms": len(final_universe),
+            "realized_tail_terms": max(len(final_universe) - int(moving_holdout_terms), 0),
+            "expansion_history": history,
+            "insufficiency_reason": (
+                "disabled" if not settings.enabled else insufficiency_reason
+            ),
+            "reference_rms_metadata": _reference_rms_metadata(
+                candidate_labels=final_universe[int(moving_holdout_terms) :],
+                reference_rms=final_reference,
+                probe=final_probe,
+            ),
+        }
+    )
+    return final_probe, final_universe
+
+
 def _fixed_unseen_metrics_from_totals(
     *,
     active_terms: int,
@@ -223,6 +412,34 @@ def _fixed_unseen_metrics_from_totals(
         null_indices=list(range(active_terms, active_terms + null_terms)),
         reference_floor=reference_floor,
     )
+
+
+def fixed_unseen_probe_row_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "fixed_unseen_active_terms": metrics["active_terms"],
+        "fixed_unseen_active_residual": metrics["active_residual"],
+        "fixed_unseen_active_reference_residual": metrics["active_reference_residual"],
+        "fixed_unseen_active_relative": metrics["active_relative"],
+        "fixed_unseen_active_status": metrics["active_status"],
+        "fixed_unseen_null_terms": metrics["null_terms"],
+        "fixed_unseen_null_absolute_per_term": metrics["null_absolute_per_term"],
+        "fixed_unseen_null_scaled": metrics["null_scaled"],
+    }
+
+
+def merge_fixed_unseen_probe_metrics(
+    row: Mapping[str, object],
+    metrics: Mapping[str, object],
+) -> dict[str, object]:
+    merged = dict(row)
+    merged.update(
+        {
+            key: metrics[key]
+            for key in FIXED_UNSEEN_ROW_FIELDS
+            if key in metrics
+        }
+    )
+    return merged
 
 
 def evaluate_fixed_unseen_probe(
@@ -267,7 +484,7 @@ def evaluate_fixed_unseen_probe(
     active_row = evaluate_partition(active_labels, "active")
     null_row = evaluate_partition(null_labels, "null")
     reference_floor = float(probe_metadata.get("reference_rms_threshold", 1.0e-12)) ** 2
-    return _fixed_unseen_metrics_from_totals(
+    return fixed_unseen_probe_row_metrics(_fixed_unseen_metrics_from_totals(
         active_terms=len(active_labels),
         active_residual=float(active_row["holdout_total_residual"]),
         active_reference=float(active_row["holdout_reference_residual"]),
@@ -275,7 +492,7 @@ def evaluate_fixed_unseen_probe(
         null_residual=float(null_row["holdout_total_residual"]),
         null_reference=float(null_row["holdout_reference_residual"]),
         reference_floor=reference_floor,
-    )
+    ))
 
 
 def configured_certification_probe_labels(
@@ -317,7 +534,7 @@ def fixed_unseen_probe_candidate_cap(
     for key in ("max_candidate_terms", "candidate_request_cap", "generator_cap", "resource_cap"):
         if key in raw:
             return max(int(initial_request), int(raw[key]))
-    return int(initial_request)
+    return max(int(initial_request) * 2, int(initial_request) + 1)
 
 
 def fixed_unseen_reference_rms(
@@ -1512,49 +1729,49 @@ def main() -> None:
         distance=feedback_settings.model.distance,
     )
     certification_probe_labels = configured_certification_probe_labels(payload, feedback)
+    fixed_probe_base_excluded_labels = set(residual_labels) | certification_probe_labels
+
+    def generate_fixed_probe_candidates(request: int) -> list[str]:
+        labels, _ = build_common_holdout_residual_labels(
+            run_dirs=sweep_run_dirs,
+            config_payload=payload,
+            residual_top_k=request,
+            intermediate_top_k=intermediate_top_k,
+        )
+        return labels
+
+    expected_fixed_unseen_probe, candidate_residual_labels = build_expanding_fixed_unseen_probe(
+        generate_candidates=generate_fixed_probe_candidates,
+        reference_rms_for_labels=lambda labels: fixed_unseen_reference_rms(
+            h0=h0_swap,
+            h1=h1_swap,
+            settings=feedback_settings,
+            agp_labels=agp_labels,
+            candidate_labels=labels,
+        ),
+        settings=fixed_unseen_probe_settings,
+        moving_holdout_terms=residual_top_k,
+        excluded_labels=fixed_probe_base_excluded_labels,
+        initial_request=fixed_probe_request,
+        resource_cap=fixed_probe_candidate_cap,
+    )
+    common_residual_labels = candidate_residual_labels[:residual_top_k]
     fixed_probe_excluded_labels = set(residual_labels) | set(common_residual_labels) | certification_probe_labels
     fixed_probe_path = data_dir / "fixed_unseen_probe_labels.json"
     if fixed_probe_path.is_file():
         fixed_unseen_probe = load_or_validate_fixed_unseen_probe(
             fixed_probe_path,
             expected_excluded_labels=fixed_probe_excluded_labels,
+            expected_identity=expected_fixed_unseen_probe,
+            expected_reference_rms_metadata=expected_fixed_unseen_probe["reference_rms_metadata"],
+            expected_selected_labels={
+                "active": expected_fixed_unseen_probe["active_labels"],
+                "null": expected_fixed_unseen_probe["null_labels"],
+            },
         )
     else:
-        candidate_request = min(fixed_probe_request, fixed_probe_candidate_cap)
-        while True:
-            candidate_tail = candidate_residual_labels[residual_top_k:]
-            reference_rms = fixed_unseen_reference_rms(
-                h0=h0_swap,
-                h1=h1_swap,
-                settings=feedback_settings,
-                agp_labels=agp_labels,
-                candidate_labels=candidate_tail,
-            )
-            fixed_unseen_probe = build_fixed_unseen_probe(
-                candidate_labels=candidate_tail,
-                excluded_labels=fixed_probe_excluded_labels,
-                reference_rms=reference_rms,
-                settings=fixed_unseen_probe_settings,
-            )
-            fixed_unseen_probe["moving_holdout_terms"] = len(common_residual_labels)
-            fixed_unseen_probe["candidate_request"] = candidate_request
-            fixed_unseen_probe["candidate_request_cap"] = fixed_probe_candidate_cap
-            fixed_unseen_probe["certification_probe_excluded_terms"] = len(certification_probe_labels)
-            if (
-                not fixed_unseen_probe_settings.enabled
-                or fixed_unseen_probe.get("status") == "complete"
-                or candidate_request >= fixed_probe_candidate_cap
-            ):
-                break
-            candidate_request = min(candidate_request * 2, fixed_probe_candidate_cap)
-            candidate_residual_labels, holdout_basis_agp_terms = build_common_holdout_residual_labels(
-                run_dirs=sweep_run_dirs,
-                config_payload=payload,
-                residual_top_k=candidate_request,
-                intermediate_top_k=intermediate_top_k,
-            )
-            common_residual_labels = candidate_residual_labels[:residual_top_k]
-            fixed_probe_excluded_labels = set(residual_labels) | set(common_residual_labels) | certification_probe_labels
+        fixed_unseen_probe = expected_fixed_unseen_probe
+        fixed_unseen_probe["certification_probe_excluded_terms"] = len(certification_probe_labels)
         save_fixed_unseen_probe(fixed_probe_path, fixed_unseen_probe)
     existing_state = load_existing_feedback_state(
         output_dir=output_dir,
@@ -1589,14 +1806,15 @@ def main() -> None:
         )
         baseline_row["run_dir"] = str(base_run)
         baseline_row["feedback_round"] = 0
-        baseline_row.update(
+        baseline_row = merge_fixed_unseen_probe_metrics(
+            baseline_row,
             evaluate_fixed_unseen_probe(
                 run_dir=base_run,
                 config_payload=payload,
                 probe_metadata=fixed_unseen_probe,
                 intermediate_top_k=intermediate_top_k,
                 device=select_device("cpu"),
-            )
+            ),
         )
         rows.append(baseline_row)
         spectra[0] = baseline_spectrum
@@ -1611,15 +1829,16 @@ def main() -> None:
         for row in rows:
             feedback_round = int(row.get("feedback_round", 0))
             checkpoint_run = base_run if feedback_round == 0 else output_dir / str(row["run_dir"])
-            row.update(
+            row.update(merge_fixed_unseen_probe_metrics(
+                row,
                 evaluate_fixed_unseen_probe(
                     run_dir=checkpoint_run,
                     config_payload=payload,
                     probe_metadata=fixed_unseen_probe,
                     intermediate_top_k=intermediate_top_k,
                     device=select_device("cpu"),
-                )
-            )
+                ),
+            ))
         rows_by_round = {int(row.get("feedback_round", 0)): row for row in rows}
         for round_row in round_rows:
             source = rows_by_round.get(int(round_row.get("round", 0)))
@@ -1647,15 +1866,16 @@ def main() -> None:
                     if not isinstance(summary, dict) or not bool(summary.get("enabled", False)):
                         continue
                     refinement_run = output_dir / str(summary["run_dir"])
-                    summary.update(
+                    summary.update(merge_fixed_unseen_probe_metrics(
+                        summary,
                         evaluate_fixed_unseen_probe(
                             run_dir=refinement_run,
                             config_payload=payload,
                             probe_metadata=fixed_unseen_probe,
                             intermediate_top_k=intermediate_top_k,
                             device=select_device("cpu"),
-                        )
-                    )
+                        ),
+                    ))
                 write_feedback_summary(
                     output_dir=output_dir,
                     rows=rows,
@@ -1747,14 +1967,15 @@ def main() -> None:
         )
         row["run_dir"] = str(round_run.relative_to(output_dir))
         row["feedback_round"] = round_index
-        row.update(
+        row = merge_fixed_unseen_probe_metrics(
+            row,
             evaluate_fixed_unseen_probe(
                 run_dir=round_run,
                 config_payload=payload,
                 probe_metadata=fixed_unseen_probe,
                 intermediate_top_k=intermediate_top_k,
                 device=select_device("cpu"),
-            )
+            ),
         )
         rows.append(row)
         spectra[round_index] = spectrum
@@ -1868,14 +2089,15 @@ def main() -> None:
             holdout_basis_mode="union_agp",
             holdout_basis_agp_terms=holdout_basis_agp_terms,
         )
-        refined_row.update(
+        refined_row = merge_fixed_unseen_probe_metrics(
+            refined_row,
             evaluate_fixed_unseen_probe(
                 run_dir=refinement_run,
                 config_payload=payload,
                 probe_metadata=fixed_unseen_probe,
                 intermediate_top_k=intermediate_top_k,
                 device=select_device("cpu"),
-            )
+            ),
         )
         temporal_refinement_summary = {
             "enabled": True,
@@ -1991,14 +2213,15 @@ def main() -> None:
             holdout_basis_mode="union_agp",
             holdout_basis_agp_terms=holdout_basis_agp_terms,
         )
-        adaptive_row.update(
+        adaptive_row = merge_fixed_unseen_probe_metrics(
+            adaptive_row,
             evaluate_fixed_unseen_probe(
                 run_dir=adaptive_run,
                 config_payload=payload,
                 probe_metadata=fixed_unseen_probe,
                 intermediate_top_k=intermediate_top_k,
                 device=select_device("cpu"),
-            )
+            ),
         )
         adaptive_temporal_summary = {
             "enabled": True,

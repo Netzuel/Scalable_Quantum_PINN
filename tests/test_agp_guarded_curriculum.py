@@ -21,7 +21,12 @@ for path in (DIAGNOSTICS_DIR, SCRIPTS_DIR, TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from agp_coupled_curriculum import merge_agp_candidate_additions, step_gate_decision
+from agp_coupled_curriculum import (
+    build_fixed_probe_residual_labels,
+    load_existing_fixed_unseen_probe_labels,
+    merge_agp_candidate_additions,
+    step_gate_decision,
+)
 import agp_restart
 import agp_certify_coupled
 import agp_certify_support
@@ -31,9 +36,86 @@ from agp_support_refinement import (
     resolve_active_agp_budget,
     resolve_exploratory_agp_budget,
 )
+from utils import SparsePauliOperator
 
 
 class AGPGuardedCurriculumTests(unittest.TestCase):
+    def test_coupled_probe_builder_excludes_existing_fixed_unseen_manifest_labels(self):
+        h0 = SparsePauliOperator({"XI": -1.0, "IX": -1.0})
+        h1 = SparsePauliOperator({"ZI": 0.7, "IZ": -0.3, "ZZ": 1.1})
+        unrestricted, _ = build_fixed_probe_residual_labels(
+            h0=h0,
+            h1=h1,
+            feedback_residual_labels=[],
+            probe_agp_terms=4,
+            probe_residual_terms=1,
+            intermediate_top_k=8,
+            probe_name="probe_gate",
+        )
+        fixed_label = unrestricted[0]
+        labels, metadata = build_fixed_probe_residual_labels(
+            h0=h0,
+            h1=h1,
+            feedback_residual_labels=[],
+            extra_excluded_labels=[fixed_label],
+            probe_agp_terms=4,
+            probe_residual_terms=1,
+            intermediate_top_k=8,
+            probe_name="probe_gate",
+        )
+
+        self.assertNotIn(fixed_label, labels)
+        self.assertEqual(metadata["probe_name"], "probe_gate")
+
+    def test_coupled_loader_collects_existing_fixed_unseen_manifest_labels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "run" / "Models_Data" / "fixed_unseen_probe_labels.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                json.dumps({"active_labels": ["XI"], "null_labels": ["YI"]}) + "\n",
+                encoding="utf-8",
+            )
+
+            labels, paths = load_existing_fixed_unseen_probe_labels([root])
+
+        self.assertEqual(labels, {"XI", "YI"})
+        self.assertEqual(paths, [manifest])
+
+    def test_loaded_fixed_unseen_labels_exclude_a_coupled_certification_probe(self):
+        h0 = SparsePauliOperator({"XI": -1.0, "IX": -1.0})
+        h1 = SparsePauliOperator({"ZI": 0.7, "IZ": -0.3, "ZZ": 1.1})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            unrestricted, _ = build_fixed_probe_residual_labels(
+                h0=h0,
+                h1=h1,
+                feedback_residual_labels=[],
+                probe_agp_terms=4,
+                probe_residual_terms=1,
+                intermediate_top_k=8,
+                probe_name="probe_test",
+            )
+            manifest = root / "Models_Data" / "fixed_unseen_probe_labels.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                json.dumps({"active_labels": unrestricted, "null_labels": []}) + "\n",
+                encoding="utf-8",
+            )
+            fixed_labels, _ = load_existing_fixed_unseen_probe_labels([root])
+            labels, _ = build_fixed_probe_residual_labels(
+                h0=h0,
+                h1=h1,
+                feedback_residual_labels=[],
+                extra_excluded_labels=sorted(fixed_labels),
+                probe_agp_terms=4,
+                probe_residual_terms=1,
+                intermediate_top_k=8,
+                probe_name="probe_test",
+            )
+
+        self.assertTrue(fixed_labels.isdisjoint(labels))
+
     def test_q20_summary_paths_are_run_scoped(self):
         payload = json.loads((Q20_DIR / "config.json").read_text(encoding="utf-8"))
         summary = payload["summary"]
