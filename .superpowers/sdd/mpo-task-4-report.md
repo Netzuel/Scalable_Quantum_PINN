@@ -31,9 +31,22 @@ configs or generated validation artifacts.
   probability, and Z/nearest-neighbor ZZ availability/status fields. Baseline
   quotients tolerate unavailable observables.
 - MPO certification now requires two completed, comparable non-ablation
-  resolutions and convergence for every system size. An ablation or a single
-  resolution is `not_tested`; q <= 15 also requires full-support statevector
-  agreement.
+  resolutions and convergence for every system size. Every eligible resolution
+  must contain `no_cd`, canonical `nested_l1` (including the legacy
+  `kipu_dqfm_l1` alias), and `learned_sparse_agp`; an ablation, a reduced
+  support, a missing canonical protocol, or a single resolution is
+  `not_tested`.
+- One shared eligible-resolution identity controls MPO comparability,
+  compression, MPS convergence, and timestep convergence. It includes backend
+  and integrator, qubit count, full learned support/scale, H0/H1, schedule,
+  checkpoint/coefficient, initial state, total time, and ground-reference
+  provenance. Interleaved ablations and non-matching physical rows cannot
+  contribute to any of those gates.
+- q <= 15 statevector agreement now requires a `validation_identity` that
+  exactly matches the eligible MPO run's q, Hamiltonian hash, schedule,
+  duration, checkpoint/coefficient, support/scale, initial state, ground
+  reference/bitstring, steps, and integrator semantics. A missing or mismatched
+  identity is `not_tested`.
 - Final-time energy and fidelity are suppressed in physical-comparison tables
   when a backend status is not `ok` or completed steps are short. The note
   identifies partial/not-feasible rows and, for an ablation, deployed versus
@@ -42,15 +55,23 @@ configs or generated validation artifacts.
   reference before certification.
 - Kept the comparison-table schema unchanged. MPO tables state backend,
   learned-support count, convergence, and diagnostic-only status unless the
-  complete certification ladder passes. Legacy quimb table wording is retained.
+  complete certification ladder passes. Legacy quimb metrics still render when
+  old diagnostics lack `completed_steps`; MPO rows and explicit partial/error
+  rows suppress final-time metrics. Certified MPO notes retain the actual
+  ladder-convergence status.
+- Backend-exception rows use the same full metric schema as completed MPO rows,
+  with unavailable metrics and explicit observable/final-time statuses.
 
 ## TDD Evidence
 
 Added failing tests first for real TeNPy MPO resolution output, static/dynamic
 action-probe interval aggregation, cache-staleness identities, unavailable
 quotients, ablation/single-resolution certification branches, and partial
-table suppression. The real resolution test executes the MPO backend rather
-than only mocking its summary helpers.
+table suppression. Follow-up adversarial coverage rejects a no-CD-only ladder,
+skips interleaved ablations, rejects mismatched statevector physics, preserves
+legacy quimb rendering, retains certified-ladder note status, and verifies the
+backend-exception result schema. The real resolution test executes the MPO
+backend rather than only mocking its summary helpers.
 
 ## Verification
 
@@ -60,7 +81,7 @@ conda run -n torch-mps python -m unittest \
   tests.test_agp_physical_validation -v
 ```
 
-Result: 100 tests passed.
+Result: 106 tests passed.
 
 ```text
 conda run -n torch-mps python -m py_compile \

@@ -46,6 +46,29 @@ _PAULI = {
     "Y": np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype=np.complex128),
     "Z": np.array([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128),
 }
+_CANONICAL_MPO_PROTOCOLS = ("no_cd", "nested_l1", "learned_sparse_agp")
+_MPO_PROTOCOL_ALIASES = {"kipu_dqfm_l1": "nested_l1", "nested_l1": "nested_l1"}
+_ELIGIBLE_MPO_IDENTITY_KEYS = (
+    "backend",
+    "integrator",
+    "n_qubits",
+    "learned_terms",
+    "full_learned_terms",
+    "learned_scale",
+    "hamiltonian_identity",
+    "ground_reference_identity",
+    "ground_bitstring",
+    "schedule_identity",
+    "checkpoint_identity",
+    "coefficient_identity",
+    "total_time",
+    "initial_state",
+)
+_STATEVECTOR_REFERENCE_IDENTITY_KEYS = (
+    *_ELIGIBLE_MPO_IDENTITY_KEYS[2:],
+    "steps",
+    "integrator",
+)
 
 
 def resolve_validation_backend(validation: Mapping[str, object]) -> dict[str, object]:
@@ -727,47 +750,70 @@ def _completed_mpo_result(diagnostics: Mapping[str, object]) -> bool:
     )
 
 
+def _canonical_mpo_protocol(protocol: object) -> str:
+    name = str(protocol)
+    return _MPO_PROTOCOL_ALIASES.get(name, name)
+
+
+def _canonical_mpo_results(results: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
+    canonical: dict[str, Mapping[str, object]] = {}
+    for protocol, row in results.items():
+        name = _canonical_mpo_protocol(protocol)
+        if name in _CANONICAL_MPO_PROTOCOLS and isinstance(row, Mapping):
+            canonical[name] = row
+    return canonical
+
+
+def _eligible_mpo_resolution_identity(case: Mapping[str, object]) -> tuple[object, ...] | None:
+    """Return the shared physical identity for a completed canonical MPO resolution."""
+
+    if bool(case.get("ablation", False)) or str(case.get("learned_support", "")) != "full_support":
+        return None
+    settings = case.get("settings", {})
+    results = case.get("results", {})
+    if not isinstance(settings, Mapping) or not isinstance(results, Mapping):
+        return None
+    if str(settings.get("backend", "")) != "tenpy_tdvp_mpo":
+        return None
+    if int(settings.get("learned_terms", -1)) != int(settings.get("full_learned_terms", -2)):
+        return None
+    if any(key not in settings for key in _ELIGIBLE_MPO_IDENTITY_KEYS):
+        return None
+    canonical = _canonical_mpo_results(results)
+    if set(canonical) != set(_CANONICAL_MPO_PROTOCOLS):
+        return None
+    if not all(
+        isinstance(row.get("mps_diagnostics"), Mapping)
+        and _completed_mpo_result(row["mps_diagnostics"])
+        for row in canonical.values()
+    ):
+        return None
+    return tuple(_canonical_cache_value(settings[key]) for key in _ELIGIBLE_MPO_IDENTITY_KEYS)
+
+
+def eligible_mpo_resolution_ladder(
+    resolutions: Sequence[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    """Select only full-support canonical resolutions with one common physical identity."""
+
+    candidates = [
+        (case, _eligible_mpo_resolution_identity(case))
+        for case in resolutions
+        if isinstance(case, Mapping)
+    ]
+    candidates = [(case, identity) for case, identity in candidates if identity is not None]
+    if not candidates:
+        return []
+    reference_identity = candidates[-1][1]
+    return [case for case, identity in candidates if identity == reference_identity]
+
+
 def _completed_comparable_mpo_resolution_count(
     resolutions: Sequence[Mapping[str, object]],
 ) -> int:
-    """Count the completed MPO ladder only when checkpoint/support provenance agrees."""
+    """Count only the shared-identity canonical full-support MPO ladder."""
 
-    completed: list[Mapping[str, object]] = []
-    for case in resolutions:
-        if bool(case.get("ablation", False)):
-            continue
-        results = case.get("results", {})
-        if not isinstance(results, Mapping) or not results:
-            continue
-        if all(
-            isinstance(row, Mapping)
-            and isinstance(row.get("mps_diagnostics"), Mapping)
-            and _completed_mpo_result(row["mps_diagnostics"])
-            for row in results.values()
-        ):
-            completed.append(case)
-    if len(completed) < 2:
-        return len(completed)
-    comparable_axes = (
-        "backend",
-        "integrator",
-        "learned_terms",
-        "full_learned_terms",
-        "learned_scale",
-        "hamiltonian_identity",
-        "ground_reference_identity",
-        "ground_bitstring",
-        "schedule_identity",
-        "checkpoint_identity",
-    )
-    reference = completed[-1].get("settings", {})
-    if not isinstance(reference, Mapping):
-        return 0
-    for case in completed[-2:]:
-        settings = case.get("settings", {})
-        if not isinstance(settings, Mapping) or any(settings.get(key) != reference.get(key) for key in comparable_axes):
-            return 0
-    return len(completed)
+    return len(eligible_mpo_resolution_ladder(resolutions))
 
 
 def run_mpo_case(
@@ -906,10 +952,19 @@ def run_mpo_case(
                 "ground_energy": float(exact_ground_energy),
                 "ground_state_fidelity": None,
                 "energy_error": None,
+                "excitation_probability": None,
+                "z_rmse": None,
+                "z_observables_status": "not_tested",
+                "nearest_neighbor_zz_rmse": None,
+                "nearest_neighbor_zz_status": "not_tested",
                 "mps_diagnostics": {
                     "status": "unresolved_error",
                     "reason": str(exc),
                     "runtime_seconds": 0.0,
+                    "completed_steps": 0,
+                    "steps": int(settings["steps"]),
+                    "final_energy_status": "not_tested",
+                    "ground_fidelity_status": "not_tested",
                 },
             }
     return results
@@ -921,13 +976,15 @@ def assess_mps_convergence(
     *,
     energy_atol: float,
     fidelity_atol: float,
+    required_protocols: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Require successive-resolution agreement for every retained protocol."""
 
     protocols: dict[str, dict[str, float | bool]] = {}
     incomplete = False
-    for protocol in fine:
-        if protocol not in coarse:
+    compared_protocols = tuple(required_protocols) if required_protocols is not None else tuple(fine)
+    for protocol in compared_protocols:
+        if protocol not in coarse or protocol not in fine:
             incomplete = True
             continue
         try:
@@ -953,6 +1010,30 @@ def assess_mps_convergence(
     }
 
 
+def assess_timestep_convergence(
+    coarse: Mapping[str, object],
+    fine: Mapping[str, object],
+) -> dict[str, object]:
+    """Require a completed eligible ladder to actually refine its timestep."""
+
+    coarse_settings = coarse.get("settings", {})
+    fine_settings = fine.get("settings", {})
+    if not isinstance(coarse_settings, Mapping) or not isinstance(fine_settings, Mapping):
+        return {"status": "not_tested", "reason": "Resolution settings are unavailable."}
+    try:
+        coarse_timestep = float(coarse_settings["timestep"])
+        fine_timestep = float(fine_settings["timestep"])
+    except (KeyError, TypeError, ValueError):
+        return {"status": "not_tested", "reason": "Timestep metadata is unavailable."}
+    if not np.isfinite(coarse_timestep) or not np.isfinite(fine_timestep) or fine_timestep <= 0.0:
+        return {"status": "not_tested", "reason": "Timestep metadata is invalid."}
+    return {
+        "status": "pass" if fine_timestep < coarse_timestep else "not_tested",
+        "coarse_timestep": coarse_timestep,
+        "fine_timestep": fine_timestep,
+    }
+
+
 def assess_statevector_agreement(
     mps_results: Mapping[str, Mapping[str, object]],
     statevector_results: Mapping[str, Mapping[str, object]],
@@ -963,9 +1044,16 @@ def assess_statevector_agreement(
 ) -> dict[str, object]:
     protocols: dict[str, dict[str, float | bool]] = {}
     incomplete = False
-    for protocol, mps_row in mps_results.items():
+    compared_protocols = _CANONICAL_MPO_PROTOCOLS if require_all_protocols else tuple(mps_results)
+    if require_all_protocols and (
+        not set(_CANONICAL_MPO_PROTOCOLS).issubset(mps_results)
+        or not set(_CANONICAL_MPO_PROTOCOLS).issubset(statevector_results)
+    ):
+        incomplete = True
+    for protocol in compared_protocols:
+        mps_row = mps_results.get(protocol)
         reference = statevector_results.get(protocol)
-        if reference is None:
+        if mps_row is None or reference is None:
             incomplete = True
             continue
         try:
@@ -1069,7 +1157,21 @@ def statevector_results_for_learned_terms(
     learned_terms: int,
     learned_scale: float,
     require_matching_learned_terms: bool = False,
+    required_identity: Mapping[str, object] | None = None,
 ) -> dict[str, Mapping[str, object]]:
+    if required_identity is not None:
+        reference_identity = payload.get("validation_identity", {})
+        if (
+            not isinstance(reference_identity, Mapping)
+            or any(key not in required_identity for key in _STATEVECTOR_REFERENCE_IDENTITY_KEYS)
+            or any(key not in reference_identity for key in _STATEVECTOR_REFERENCE_IDENTITY_KEYS)
+            or any(
+                _canonical_cache_value(reference_identity[key])
+                != _canonical_cache_value(required_identity[key])
+                for key in _STATEVECTOR_REFERENCE_IDENTITY_KEYS
+            )
+        ):
+            return {}
     raw_results = payload.get("results", {})
     if not isinstance(raw_results, dict):
         raise TypeError("statevector reference results must be a JSON object.")
@@ -1098,6 +1200,10 @@ def statevector_results_for_learned_terms(
     return results
 
 
+def _statevector_reference_identity(settings: Mapping[str, object]) -> dict[str, object]:
+    return {key: settings[key] for key in _STATEVECTOR_REFERENCE_IDENTITY_KEYS}
+
+
 def validation_certification(
     *,
     convergence: Mapping[str, object],
@@ -1106,6 +1212,8 @@ def validation_certification(
     require_statevector: bool,
     compression: Mapping[str, object] | None = None,
     require_compression: bool = False,
+    timestep_convergence: Mapping[str, object] | None = None,
+    require_timestep: bool = False,
     ablation: bool = False,
     completed_comparable_resolutions: int | None = None,
 ) -> dict[str, object]:
@@ -1114,6 +1222,8 @@ def validation_certification(
         gates.append(("mps_convergence", convergence))
     if require_compression:
         gates.append(("mpo_compression", compression or {"status": "not_tested"}))
+    if require_timestep:
+        gates.append(("timestep_convergence", timestep_convergence or {"status": "not_tested"}))
     if require_statevector:
         gates.append(("statevector_agreement", statevector_agreement))
     if ablation:
@@ -1388,6 +1498,9 @@ def main() -> None:
             "settings": {
                 "backend": backend["name"],
                 "integrator": str(case.get("integrator", backend["integrator"])),
+                "n_qubits": n_qubits,
+                "total_time": total_time,
+                "initial_state": "+" * n_qubits,
                 "steps": steps,
                 "timestep": total_time / steps,
                 "max_bond": max_bond,
@@ -1489,7 +1602,26 @@ def main() -> None:
     final_results = resolution_results[-1]["results"]
     payload["results"] = final_results
     convergence: dict[str, object] = {"status": "not_tested", "reason": "Only one resolution was run."}
-    if len(resolution_results) >= 2:
+    timestep_convergence: dict[str, object] = {
+        "status": "not_tested",
+        "reason": "Only one eligible resolution was run.",
+    }
+    eligible_ladder: list[Mapping[str, object]] = []
+    if backend["name"] == "tenpy_tdvp_mpo":
+        eligible_ladder = eligible_mpo_resolution_ladder(resolution_results)
+        payload["eligible_resolution_count"] = len(eligible_ladder)
+    if backend["name"] == "tenpy_tdvp_mpo" and len(eligible_ladder) >= 2:
+        coarse_results = _canonical_mpo_results(eligible_ladder[-2]["results"])  # type: ignore[arg-type]
+        fine_results = _canonical_mpo_results(eligible_ladder[-1]["results"])  # type: ignore[arg-type]
+        convergence = assess_mps_convergence(
+            coarse_results,
+            fine_results,
+            energy_atol=float(validation.get("convergence_energy_atol", 0.05)),
+            fidelity_atol=float(validation.get("convergence_fidelity_atol", 0.01)),
+            required_protocols=_CANONICAL_MPO_PROTOCOLS,
+        )
+        timestep_convergence = assess_timestep_convergence(eligible_ladder[-2], eligible_ladder[-1])
+    elif backend["name"] != "tenpy_tdvp_mpo" and len(resolution_results) >= 2:
         convergence = assess_mps_convergence(
             resolution_results[-2]["results"],  # type: ignore[arg-type]
             final_results,  # type: ignore[arg-type]
@@ -1497,11 +1629,18 @@ def main() -> None:
             fidelity_atol=float(validation.get("convergence_fidelity_atol", 0.01)),
         )
     payload["convergence"] = convergence
+    payload["timestep_convergence"] = timestep_convergence
 
     compression: dict[str, object] = {"status": "not_tested", "reason": "Legacy product-formula backend."}
-    if backend["name"] == "tenpy_tdvp_mpo":
+    gate_resolution = eligible_ladder[-1] if eligible_ladder else None
+    gate_results = (
+        _canonical_mpo_results(gate_resolution["results"])  # type: ignore[arg-type]
+        if gate_resolution is not None
+        else {}
+    )
+    if backend["name"] == "tenpy_tdvp_mpo" and gate_resolution is not None:
         compression = assess_mpo_compression(
-            final_results,  # type: ignore[arg-type]
+            gate_results,
             action_error_max=float(backend["action_error_max"]),
         )
     payload["compression"] = compression
@@ -1513,16 +1652,29 @@ def main() -> None:
     statevector_reference = validation.get("statevector_reference")
     if statevector_reference:
         reference_payload = _load_json(_resolve_path(statevector_reference, base=run_root))
-        final_settings = resolution_results[-1]["settings"]
+        final_settings = (
+            gate_resolution["settings"]  # type: ignore[index]
+            if backend["name"] == "tenpy_tdvp_mpo" and gate_resolution is not None
+            else resolution_results[-1]["settings"]
+        )
         reference_results = statevector_results_for_learned_terms(
             reference_payload,
             learned_terms=int(final_settings["learned_terms"]),  # type: ignore[index]
             learned_scale=float(validation.get("learned_scale", 1.0)),
             require_matching_learned_terms=backend["name"] == "tenpy_tdvp_mpo",
+            required_identity=(
+                _statevector_reference_identity(final_settings)  # type: ignore[arg-type]
+                if backend["name"] == "tenpy_tdvp_mpo"
+                else None
+            ),
         )
         statevector_agreement = assess_statevector_agreement(
-            final_results,  # type: ignore[arg-type]
-            reference_results,  # type: ignore[arg-type]
+            gate_results if backend["name"] == "tenpy_tdvp_mpo" else final_results,  # type: ignore[arg-type]
+            (
+                _canonical_mpo_results(reference_results)
+                if backend["name"] == "tenpy_tdvp_mpo"
+                else reference_results
+            ),
             energy_atol=float(validation.get("statevector_energy_atol", 0.05)),
             fidelity_atol=float(validation.get("statevector_fidelity_atol", 0.01)),
             require_all_protocols=backend["name"] == "tenpy_tdvp_mpo",
@@ -1534,12 +1686,18 @@ def main() -> None:
         statevector_agreement=statevector_agreement,
         require_convergence=backend["name"] == "tenpy_tdvp_mpo" or len(resolution_results) >= 2,
         require_compression=backend["name"] == "tenpy_tdvp_mpo",
+        timestep_convergence=timestep_convergence,
+        require_timestep=backend["name"] == "tenpy_tdvp_mpo",
         require_statevector=(
-            n_qubits <= 15 and backend["name"] == "tenpy_tdvp_mpo" and not bool(resolution_results[-1]["ablation"])
+            n_qubits <= 15 and backend["name"] == "tenpy_tdvp_mpo" and gate_resolution is not None
         ) or bool(statevector_reference),
-        ablation=bool(resolution_results[-1]["ablation"]),
+        ablation=bool(
+            gate_resolution.get("ablation", False)
+            if gate_resolution is not None
+            else resolution_results[-1]["ablation"]
+        ),
         completed_comparable_resolutions=(
-            _completed_comparable_mpo_resolution_count(resolution_results)
+            _completed_comparable_mpo_resolution_count(eligible_ladder)
             if backend["name"] == "tenpy_tdvp_mpo"
             else None
         ),

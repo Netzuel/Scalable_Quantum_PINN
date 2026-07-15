@@ -344,6 +344,42 @@ class AGPPhysicalValidationTests(unittest.TestCase):
         self.assertIn("ablation", note)
         self.assertIn("4/8", note)
 
+    def test_legacy_metrics_render_without_completed_step_diagnostics(self):
+        rows = physical_comparison_rows(
+            {
+                "backend": "quimb_product_formula",
+                "ground_energy": -1.0,
+                "results": {
+                    "no_cd": {
+                        "final_energy": -0.9,
+                        "ground_state_fidelity": 0.8,
+                        "mps_diagnostics": {"status": "ok"},
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(rows[1]["final_energy"], -0.9)
+        self.assertEqual(rows[1]["ground_state_fidelity"], 0.8)
+
+    def test_certified_mpo_note_reports_ladder_convergence_not_protocol_status(self):
+        note = physical_validation_note(
+            {
+                "backend": "tenpy_tdvp_mpo",
+                "full_learned_terms": 8,
+                "convergence": {"status": "pass"},
+                "certification": {"status": "pass"},
+                "results": {
+                    "no_cd": {
+                        "mps_diagnostics": {"status": "unresolved_error", "completed_steps": 0, "steps": 4}
+                    }
+                },
+            }
+        )
+
+        self.assertIn("convergence: pass", note)
+        self.assertIn("certification: pass", note)
+
     def test_q156_comparison_table_marks_dynamical_metrics_unavailable(self):
         with TemporaryDirectory() as tmp:
             study_dir = Path(tmp) / "sweep_test"

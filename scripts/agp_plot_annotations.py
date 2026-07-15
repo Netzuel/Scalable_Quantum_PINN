@@ -235,11 +235,19 @@ def physical_comparison_rows(payload: Mapping[str, object]) -> list[dict[str, ob
         diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
         completed_steps = diagnostics.get("completed_steps")
         planned_steps = diagnostics.get("steps")
-        result_is_complete = not diagnostics or (
-            str(diagnostics.get("status", "ok")) == "ok"
-            and completed_steps is not None
+        diagnostic_status = str(diagnostics.get("status", "ok"))
+        explicit_partial = diagnostic_status != "ok" or (
+            completed_steps is not None
             and planned_steps is not None
-            and int(completed_steps) >= int(planned_steps)
+            and int(completed_steps) < int(planned_steps)
+        )
+        result_is_complete = not explicit_partial and (
+            str(payload.get("backend", "")) != "tenpy_tdvp_mpo"
+            or (
+                completed_steps is not None
+                and planned_steps is not None
+                and int(completed_steps) >= int(planned_steps)
+            )
         )
         final_energy = _finite_float(source.get("final_energy")) if result_is_complete else None
         energy_error = _finite_float(source.get("energy_error")) if result_is_complete else None
@@ -271,14 +279,14 @@ def physical_validation_note(payload: Mapping[str, object]) -> str:
         return ""
     convergence = payload.get("convergence", {})
     convergence = convergence if isinstance(convergence, Mapping) else {}
-    status = str(convergence.get("status", "not_tested")).replace("_", " ")
+    convergence_status = str(convergence.get("status", "not_tested")).replace("_", " ")
     certification = payload.get("certification", {})
     certification = certification if isinstance(certification, Mapping) else {}
     certified = str(certification.get("status", "not_tested")) == "pass"
-    if backend in {"quimb_mps", "quimb_product_formula"} and status == "pass":
+    if backend in {"quimb_mps", "quimb_product_formula"} and convergence_status == "pass":
         return "MPS convergence: pass."
     if backend in {"quimb_mps", "quimb_product_formula"}:
-        return f"MPS convergence: {status}; physical comparison is diagnostic only."
+        return f"MPS convergence: {convergence_status}; physical comparison is diagnostic only."
     full_terms = payload.get("full_learned_terms")
     deployed_terms = None
     ablation = False
@@ -307,20 +315,23 @@ def physical_validation_note(payload: Mapping[str, object]) -> str:
                 continue
             completed = diagnostics.get("completed_steps")
             planned = diagnostics.get("steps")
-            status = str(diagnostics.get("status", "ok"))
-            if status != "ok" or (
+            protocol_status = str(diagnostics.get("status", "ok"))
+            if protocol_status != "ok" or (
                 completed is not None and planned is not None and int(completed) < int(planned)
             ):
-                partial_rows.append(f"{protocol}={status}")
+                partial_rows.append(f"{protocol}={protocol_status}")
     partial_note = (
         f"; partial/not feasible final-time data ({', '.join(partial_rows)})"
         if partial_rows
         else ""
     )
-    if certified and status == "pass":
-        return f"Backend: tenpy_tdvp_mpo{support}; convergence: pass; certification: pass."
+    if certified:
+        return (
+            f"Backend: tenpy_tdvp_mpo{support}; convergence: {convergence_status}; "
+            "certification: pass."
+        )
     return (
-        f"Backend: tenpy_tdvp_mpo{support}; convergence: {status}; "
+        f"Backend: tenpy_tdvp_mpo{support}; convergence: {convergence_status}; "
         f"physical comparison is diagnostic only{partial_note}."
     )
 

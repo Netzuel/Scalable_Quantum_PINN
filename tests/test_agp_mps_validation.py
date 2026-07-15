@@ -212,6 +212,77 @@ class AGPMPSValidationTests(unittest.TestCase):
             "not_tested",
         )
 
+    def test_mpo_eligibility_rejects_no_cd_only_resolution(self):
+        import agp_mps_validation
+
+        case = {
+            "ablation": False,
+            "learned_support": "full_support",
+            "settings": {
+                "backend": "tenpy_tdvp_mpo",
+                "integrator": "tdvp",
+                "learned_terms": 8,
+                "full_learned_terms": 8,
+                "learned_scale": 1.0,
+                "hamiltonian_identity": "hamiltonian",
+                "ground_reference_identity": "ground",
+                "ground_bitstring": "00",
+                "schedule_identity": "schedule",
+                "checkpoint_identity": "checkpoint",
+                "coefficient_identity": "coefficient",
+                "total_time": 1.0,
+                "initial_state": "+ +",
+            },
+            "results": {
+                "no_cd": {
+                    "mps_diagnostics": {"status": "ok", "completed_steps": 8, "steps": 8}
+                }
+            },
+        }
+
+        self.assertEqual(agp_mps_validation._completed_comparable_mpo_resolution_count([case]), 0)
+
+    def test_mpo_eligibility_skips_interleaved_ablation_for_all_gates(self):
+        import agp_mps_validation
+
+        def resolution(name, *, ablation=False):
+            return {
+                "name": name,
+                "ablation": ablation,
+                "learned_support": "ablation" if ablation else "full_support",
+                "settings": {
+                    "backend": "tenpy_tdvp_mpo",
+                    "integrator": "tdvp",
+                    "n_qubits": 2,
+                    "learned_terms": 4 if ablation else 8,
+                    "full_learned_terms": 8,
+                    "learned_scale": 1.0,
+                    "hamiltonian_identity": "hamiltonian",
+                    "ground_reference_identity": "ground",
+                    "ground_bitstring": "00",
+                    "schedule_identity": "schedule",
+                    "checkpoint_identity": "checkpoint",
+                    "coefficient_identity": "coefficient",
+                    "total_time": 1.0,
+                    "initial_state": "+ +",
+                },
+                "results": {
+                    protocol: {
+                        "final_energy": -1.0,
+                        "ground_state_fidelity": 1.0,
+                        "mps_diagnostics": {"status": "ok", "completed_steps": 8, "steps": 8},
+                    }
+                    for protocol in ("no_cd", "kipu_dqfm_l1", "learned_sparse_agp")
+                },
+            }
+
+        eligible = agp_mps_validation.eligible_mpo_resolution_ladder(
+            [resolution("coarse"), resolution("ablation", ablation=True), resolution("fine")]
+        )
+
+        self.assertEqual([row["name"] for row in eligible], ["coarse", "fine"])
+        self.assertEqual(agp_mps_validation._completed_comparable_mpo_resolution_count(eligible), 2)
+
     def test_mpo_compression_uses_measured_upper_bound_and_unresolved_statuses(self):
         base_diagnostics = {
             "status": "ok",
@@ -369,6 +440,89 @@ class AGPMPSValidationTests(unittest.TestCase):
 
         self.assertEqual(selected["no_cd"]["final_energy"], -2.0)
         self.assertEqual(selected["learned_sparse_agp"]["final_energy"], -3.5)
+
+    def test_statevector_reference_requires_matching_full_physics_identity(self):
+        payload = {
+            "validation_identity": {
+                "n_qubits": 2,
+                "hamiltonian_identity": "wrong-hamiltonian",
+                "schedule_identity": "schedule",
+                "total_time": 1.0,
+                "checkpoint_identity": "checkpoint",
+                "coefficient_identity": "coefficient",
+                "learned_terms": 8,
+                "full_learned_terms": 8,
+                "learned_scale": 1.0,
+                "initial_state": "+ +",
+                "ground_reference_identity": "ground",
+                "ground_bitstring": "00",
+                "steps": 16,
+                "integrator": "tdvp",
+            },
+            "results": {
+                "no_cd": {"final_energy": -1.0},
+                "kipu_dqfm_l1": {"final_energy": -1.0},
+                "learned_sparse_agp": {"final_energy": -1.0, "learned_terms": 8},
+            },
+        }
+        required_identity = {**payload["validation_identity"], "hamiltonian_identity": "expected-hamiltonian"}
+
+        selected = statevector_results_for_learned_terms(
+            payload,
+            learned_terms=8,
+            learned_scale=1.0,
+            require_matching_learned_terms=True,
+            required_identity=required_identity,
+        )
+
+        self.assertEqual(selected, {})
+
+    def test_mpo_backend_exception_preserves_complete_result_schema(self):
+        h0 = SparsePauliOperator({"X": -1.0}, n_qubits=1)
+        h1 = SparsePauliOperator({"Z": -1.0}, n_qubits=1)
+        settings = {
+            "integrator": "tdvp",
+            "steps": 4,
+            "timestep": 0.25,
+            "temporal_grid_points": 5,
+            "temporal_retained_norm": 0.9999,
+            "mpo_max_bond": 8,
+            "mpo_cutoff": 1.0e-12,
+            "mps_max_bond": 8,
+            "mps_cutoff": 1.0e-12,
+            "lanczos_max": 12,
+            "mpo_workspace_cap_bytes": 8 * 1024 * 1024,
+        }
+        with patch("scripts.agp_mpo_backend.evolve_protocol_tdvp", side_effect=RuntimeError("backend failure")):
+            row = run_mpo_case(
+                h0=h0,
+                h1=h1,
+                learned=None,
+                exact_ground_energy=-1.0,
+                ground_bitstring="0",
+                protocols=("no_cd",),
+                total_time=1.0,
+                settings=settings,
+                backend={"qubit_order_candidates": ("native",), **settings},
+            )["no_cd"]
+
+        self.assertEqual(
+            set(row),
+            {
+                "final_energy",
+                "ground_energy",
+                "ground_state_fidelity",
+                "energy_error",
+                "excitation_probability",
+                "z_rmse",
+                "z_observables_status",
+                "nearest_neighbor_zz_rmse",
+                "nearest_neighbor_zz_status",
+                "mps_diagnostics",
+            },
+        )
+        self.assertEqual(row["z_observables_status"], "not_tested")
+        self.assertEqual(row["mps_diagnostics"]["status"], "unresolved_error")
 
     def test_statevector_agreement_gate_compares_same_protocols(self):
         mps = {
