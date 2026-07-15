@@ -24,6 +24,7 @@ _COLUMN_RETAINED_ENERGY_ATOL = 128.0 * np.finfo(np.float64).eps
 _SPECTRAL_EIGENVALUE_RELATIVE_ATOL = 128.0 * np.finfo(np.float64).eps
 _SPECTRAL_COMPONENT_ATOL_SCALE = 32.0
 _DEFAULT_MPO_WORKSPACE_CAP_BYTES = 256 * 1024 * 1024
+_MPO_WORKSPACE_SAFETY_MARGIN_BYTES = 1024 * 1024
 _COMPLEX_BYTES = np.dtype(np.complex128).itemsize
 _INDEX_BYTES = np.dtype(np.uint64).itemsize
 _PAULI_INDEX = {symbol: index for index, symbol in enumerate("IXYZ")}
@@ -443,6 +444,11 @@ def compress_mpo_hilbert_schmidt(
             "maximum relative cumulative discarded squared singular weight per Pauli unfolding"
         ),
         "workspace_cap_bytes": workspace_cap,
+        "workspace_safety_margin_bytes": _MPO_WORKSPACE_SAFETY_MARGIN_BYTES,
+        "workspace_semantics": (
+            "hard cap on compression-created array and MPO-construction workspace; "
+            "caller-owned MPO and Pauli provenance are excluded"
+        ),
         "peak_workspace_bytes": 0,
         "peak_explicit_workspace_bytes": 0,
         "required_workspace_bytes": 0,
@@ -470,12 +476,10 @@ def compress_mpo_hilbert_schmidt(
         math.fsum(abs(coefficient) ** 2 for _, coefficient in pauli_terms)
     )
     if not pauli_terms:
-        cores = [np.zeros((1, 4, 1), dtype=np.complex128)]
-        for _ in range(1, mpo.L):
-            core = np.zeros((1, 4, 1), dtype=np.complex128)
-            core[0, 0, 0] = 1.0
-            cores.append(core)
-        zero_output_required = sum(core.nbytes for core in cores) * 4
+        zero_core_bytes = mpo.L * 4 * _COMPLEX_BYTES
+        zero_output_required = (
+            5 * zero_core_bytes + _MPO_WORKSPACE_SAFETY_MARGIN_BYTES
+        )
         if zero_output_required > workspace_cap:
             return _compression_not_feasible(
                 diagnostics,
@@ -484,6 +488,11 @@ def compress_mpo_hilbert_schmidt(
                 failed_bond=None,
                 reason="zero compressed MPO output exceeds workspace cap",
             )
+        cores = [np.zeros((1, 4, 1), dtype=np.complex128)]
+        for _ in range(1, mpo.L):
+            core = np.zeros((1, 4, 1), dtype=np.complex128)
+            core[0, 0, 0] = 1.0
+            cores.append(core)
         compressed = _mpo_from_pauli_cores(MPO, npc, sites=mpo.sites, cores=cores)
         diagnostics.update(
             {
@@ -504,7 +513,10 @@ def compress_mpo_hilbert_schmidt(
         )
         return compressed, diagnostics
 
-    initial_required = len(pauli_terms) * (4 * _INDEX_BYTES + 3 * _COMPLEX_BYTES)
+    initial_required = (
+        len(pauli_terms) * (4 * _INDEX_BYTES + 3 * _COMPLEX_BYTES)
+        + _MPO_WORKSPACE_SAFETY_MARGIN_BYTES
+    )
     diagnostics["required_workspace_bytes"] = initial_required
     if initial_required > workspace_cap:
         return _compression_not_feasible(
@@ -539,12 +551,13 @@ def compress_mpo_hilbert_schmidt(
         previous_rank, entry_count = values.shape
         remaining_sites = mpo.L - bond
         shift = 2 * (remaining_sites - 1)
-        index_workspace = entry_count * 6 * _INDEX_BYTES
+        index_workspace = entry_count * 7 * _INDEX_BYTES
         pre_index_required = (
             sum(core.nbytes for core in cores)
             + codes.nbytes
             + values.nbytes
             + index_workspace
+            + _MPO_WORKSPACE_SAFETY_MARGIN_BYTES
         )
         required_workspace = max(required_workspace, pre_index_required)
         if pre_index_required > workspace_cap:
@@ -568,6 +581,7 @@ def compress_mpo_hilbert_schmidt(
         retained_bound = min(hard_max_bond, row_count, column_count)
         matrix_bytes = row_count * column_count * _COMPLEX_BYTES
         gram_bytes = row_count * row_count * _COMPLEX_BYTES
+        retained_core_bytes = previous_rank * 4 * retained_bound * _COMPLEX_BYTES
         next_values_bytes = retained_bound * column_count * _COMPLEX_BYTES
         core_bytes = sum(core.nbytes for core in cores)
         conservative_required = (
@@ -580,8 +594,10 @@ def compress_mpo_hilbert_schmidt(
             + inverse.nbytes
             + 2 * matrix_bytes
             + 5 * gram_bytes
+            + retained_core_bytes
             + 2 * next_values_bytes
             + row_count * np.dtype(np.float64).itemsize
+            + _MPO_WORKSPACE_SAFETY_MARGIN_BYTES
         )
         required_workspace = max(required_workspace, conservative_required)
         if conservative_required > workspace_cap:
@@ -602,10 +618,8 @@ def compress_mpo_hilbert_schmidt(
             )
         gram = matrix @ matrix.conj().T
         eigenvalues, left_vectors = np.linalg.eigh(gram)
-        descending = np.argsort(eigenvalues)[::-1]
-        eigenvalues = np.maximum(eigenvalues[descending], 0.0)
-        left_vectors = left_vectors[:, descending]
-        singular_values = np.sqrt(eigenvalues)
+        descending_eigenvalues = np.maximum(eigenvalues[::-1], 0.0)
+        singular_values = np.sqrt(descending_eigenvalues)
         retained_rank, discarded_weight = _svd_retained_rank(
             singular_values,
             max_bond=hard_max_bond,
@@ -621,8 +635,16 @@ def compress_mpo_hilbert_schmidt(
             discarded_weight <= relative_cutoff + 64.0 * np.finfo(np.float64).eps
         )
 
-        retained_vectors = left_vectors[:, :retained_rank]
-        cores.append(retained_vectors.reshape(previous_rank, 4, retained_rank))
+        retained_core = np.array(
+            left_vectors[:, -retained_rank:][:, ::-1].reshape(
+                previous_rank, 4, retained_rank
+            ),
+            dtype=np.complex128,
+            order="C",
+            copy=True,
+        )
+        cores.append(retained_core)
+        retained_vectors = retained_core.reshape(row_count, retained_rank)
         next_values = retained_vectors.conj().T @ matrix
         explicit_workspace = (
             core_bytes
@@ -636,19 +658,38 @@ def compress_mpo_hilbert_schmidt(
             + gram.nbytes
             + eigenvalues.nbytes
             + left_vectors.nbytes
+            + descending_eigenvalues.nbytes
+            + singular_values.nbytes
+            + retained_core.nbytes
             + next_values.nbytes
         )
         peak_explicit_workspace = max(peak_explicit_workspace, explicit_workspace)
         peak_workspace = max(peak_workspace, conservative_required)
         codes = unique_suffixes
         values = next_values
+        del (
+            symbols,
+            suffixes,
+            inverse,
+            matrix,
+            gram,
+            eigenvalues,
+            left_vectors,
+            descending_eigenvalues,
+            singular_values,
+            discarded_values,
+            retained_vectors,
+        )
 
-    final_core = np.zeros((values.shape[0], 4, 1), dtype=np.complex128)
-    for entry, code in enumerate(codes):
-        final_core[:, int(code), 0] += values[:, entry]
-    cores.append(final_core)
-    compressed_output_bytes = sum(core.nbytes for core in cores) * 4
-    final_required = max(required_workspace, compressed_output_bytes)
+    final_core_bytes = values.shape[0] * 4 * _COMPLEX_BYTES
+    prospective_core_bytes = sum(core.nbytes for core in cores) + final_core_bytes
+    final_required = max(
+        required_workspace,
+        codes.nbytes
+        + values.nbytes
+        + 5 * prospective_core_bytes
+        + _MPO_WORKSPACE_SAFETY_MARGIN_BYTES,
+    )
     if final_required > workspace_cap:
         return _compression_not_feasible(
             diagnostics,
@@ -657,6 +698,12 @@ def compress_mpo_hilbert_schmidt(
             failed_bond=mpo.L - 1,
             reason="compressed MPO output exceeds workspace cap",
         )
+
+    final_core = np.zeros((values.shape[0], 4, 1), dtype=np.complex128)
+    for entry, code in enumerate(codes):
+        final_core[:, int(code), 0] += values[:, entry]
+    cores.append(final_core)
+    compressed_output_bytes = sum(core.nbytes for core in cores) * 4
 
     compressed = _mpo_from_pauli_cores(MPO, npc, sites=mpo.sites, cores=cores)
     hilbert_schmidt_scale = float(2**mpo.L)
@@ -677,7 +724,7 @@ def compress_mpo_hilbert_schmidt(
     discarded_weight = float(sum(per_bond_discarded_weights))
     diagnostics.update(
         {
-            "peak_workspace_bytes": max(peak_workspace, compressed_output_bytes),
+            "peak_workspace_bytes": max(peak_workspace, final_required),
             "peak_explicit_workspace_bytes": peak_explicit_workspace,
             "required_workspace_bytes": final_required,
             "post_bonds": list(compressed.chi),
@@ -818,6 +865,9 @@ def probe_mpo_compression(
                 exact_norm_squared=exact_norm_squared,
                 compressed_norm_squared=float(compressed_metrics["compressed_norm_squared"]),
                 cross_overlap=complex(compressed_metrics["cross_overlap"]),
+                difference_norm_squared=float(
+                    compressed_metrics["difference_norm_squared"]
+                ),
                 estimated_exact_work=estimated_exact_work,
                 peak_workspace_bytes=max(
                     estimated_sparse_bytes,
@@ -835,6 +885,9 @@ def probe_mpo_compression(
         * exact_mpo.L
         * max(effective_random_bond**3, 1)
     )
+    estimated_random_workspace = _estimate_random_mps_workspace_bytes(
+        compressed_mpo, random_bond=effective_random_bond
+    )
     try:
         np.random.seed(int(seed))
         for index in range(int(random_state_count)):
@@ -845,6 +898,19 @@ def probe_mpo_compression(
                         estimated_exact_work=estimated_random_work,
                         required_workspace_bytes=0,
                         reason="Pauli-pair random-MPS contractions exceed exact_work_cap",
+                    )
+                )
+                continue
+            if estimated_random_workspace > workspace_cap:
+                probes.append(
+                    _not_feasible_probe(
+                        f"random_{index}",
+                        estimated_exact_work=estimated_random_work,
+                        required_workspace_bytes=estimated_random_workspace,
+                        reason=(
+                            "random-MPS construction and compressed action exceed "
+                            "workspace_cap_bytes"
+                        ),
                     )
                 )
                 continue
@@ -907,7 +973,10 @@ def probe_mpo_compression(
                     ),
                     cross_overlap=complex(random_metrics["cross_overlap"]),
                     estimated_exact_work=estimated_random_work,
-                    peak_workspace_bytes=int(random_metrics["peak_workspace_bytes"]),
+                    peak_workspace_bytes=max(
+                        estimated_random_workspace,
+                        int(random_metrics["peak_workspace_bytes"]),
+                    ),
                 )
             )
     finally:
@@ -972,18 +1041,23 @@ def _compressed_product_action_metrics(
     exact_action: dict[int, complex],
     workspace_cap_bytes: int,
 ) -> dict[str, object]:
-    output_states = np.asarray(sorted(exact_action), dtype=np.uint64)
-    exact_amplitudes = np.asarray(
-        [exact_action[int(state)] for state in output_states], dtype=np.complex128
-    )
+    output_count = len(exact_action)
     maximum_bond = max(mpo.chi)
     maximum_local_bytes = max(
         mpo.chi[site] * mpo.chi[site + 1] * 4 * _COMPLEX_BYTES
         for site in range(mpo.L)
     )
-    query_bytes = max(output_states.size, 1) * maximum_bond * _COMPLEX_BYTES
+    query_bytes = max(output_count, 1) * maximum_bond * _COMPLEX_BYTES
+    amplitude_bytes = max(output_count, 1) * _COMPLEX_BYTES
+    output_index_bytes = max(output_count, 1) * _INDEX_BYTES
     transfer_bytes = maximum_bond * maximum_bond * _COMPLEX_BYTES
-    required_workspace = maximum_local_bytes + 2 * query_bytes + 4 * transfer_bytes
+    required_workspace = (
+        maximum_local_bytes
+        + 2 * query_bytes
+        + 4 * transfer_bytes
+        + 3 * amplitude_bytes
+        + output_index_bytes
+    )
     if required_workspace > workspace_cap_bytes:
         return {
             "status": "not_feasible",
@@ -991,6 +1065,10 @@ def _compressed_product_action_metrics(
             "resource_reason": "compressed product-state transfer exceeds workspace cap",
         }
 
+    output_states = np.asarray(sorted(exact_action), dtype=np.uint64)
+    exact_amplitudes = np.asarray(
+        [exact_action[int(state)] for state in output_states], dtype=np.complex128
+    )
     left_boundary = mpo.get_IdL(0)
     right_boundary = mpo.get_IdR(mpo.L - 1)
     if left_boundary is None or right_boundary is None:
@@ -1025,14 +1103,60 @@ def _compressed_product_action_metrics(
 
     compressed_amplitudes = query[:, int(right_boundary)]
     compressed_norm_squared = float(np.real(density[int(right_boundary), int(right_boundary)]))
+    compressed_norm_squared = _nonnegative_roundoff(
+        compressed_norm_squared, scale=max(abs(compressed_norm_squared), 1.0)
+    )
+    queried_compressed_norm_squared = float(
+        np.vdot(compressed_amplitudes, compressed_amplitudes).real
+    )
+    unqueried_compressed_norm_squared = _cancellation_safe_nonnegative_difference(
+        compressed_norm_squared,
+        queried_compressed_norm_squared,
+    )
+    amplitude_scale = max(
+        float(np.max(np.abs(exact_amplitudes), initial=0.0)),
+        float(np.max(np.abs(compressed_amplitudes), initial=0.0)),
+        np.finfo(np.float64).tiny,
+    )
+    amplitude_tolerance = (
+        64.0 * max(mpo.L, 1) * np.finfo(np.float64).eps * amplitude_scale
+    )
+    amplitude_differences = compressed_amplitudes - exact_amplitudes
+    amplitude_differences[np.abs(amplitude_differences) <= amplitude_tolerance] = 0.0
+    difference_norm_squared = float(
+        np.vdot(amplitude_differences, amplitude_differences).real
+        + unqueried_compressed_norm_squared
+    )
     return {
         "status": "ok",
-        "compressed_norm_squared": _nonnegative_roundoff(
-            compressed_norm_squared, scale=max(abs(compressed_norm_squared), 1.0)
-        ),
+        "compressed_norm_squared": compressed_norm_squared,
         "cross_overlap": np.vdot(exact_amplitudes, compressed_amplitudes),
+        "difference_norm_squared": difference_norm_squared,
+        "amplitude_roundoff_tolerance": amplitude_tolerance,
         "peak_workspace_bytes": max(peak_workspace, required_workspace),
     }
+
+
+def _estimate_random_mps_workspace_bytes(mpo: Any, *, random_bond: int) -> int:
+    state_bonds = [1]
+    state_bonds.extend(
+        min(random_bond, 2 ** min(cut, mpo.L - cut))
+        for cut in range(1, mpo.L)
+    )
+    state_bonds.append(1)
+    action_bonds = [
+        state_bond * mpo_bond
+        for state_bond, mpo_bond in zip(state_bonds, mpo.chi)
+    ]
+    state_tensor_bytes = sum(
+        state_bonds[site] * 2 * state_bonds[site + 1] * _COMPLEX_BYTES
+        for site in range(mpo.L)
+    )
+    compressed_action_bytes = sum(
+        action_bonds[site] * 2 * action_bonds[site + 1] * _COMPLEX_BYTES
+        for site in range(mpo.L)
+    )
+    return 3 * compressed_action_bytes + 3 * state_tensor_bytes
 
 
 def _random_mps_action_metrics(
@@ -1114,14 +1238,22 @@ def _action_error_probe(
     cross_overlap: complex,
     estimated_exact_work: int,
     peak_workspace_bytes: int,
+    difference_norm_squared: float | None = None,
 ) -> dict[str, object]:
-    difference_norm_squared = (
-        exact_norm_squared + compressed_norm_squared - 2.0 * float(np.real(cross_overlap))
-    )
-    difference_norm_squared = _nonnegative_roundoff(
-        difference_norm_squared,
-        scale=max(exact_norm_squared, compressed_norm_squared, 1.0),
-    )
+    if difference_norm_squared is None:
+        difference_norm_squared, roundoff_bound = _overlap_squared_difference(
+            exact_norm_squared,
+            compressed_norm_squared,
+            cross_overlap,
+        )
+        error_method = "overlap_with_roundoff_bound"
+    else:
+        difference_norm_squared = _nonnegative_roundoff(
+            difference_norm_squared,
+            scale=max(exact_norm_squared, compressed_norm_squared, 1.0),
+        )
+        roundoff_bound = 0.0
+        error_method = "direct_product_amplitudes"
     return {
         "name": name,
         "kind": kind,
@@ -1130,6 +1262,8 @@ def _action_error_probe(
         "relative_action_error": float(
             np.sqrt(difference_norm_squared / exact_norm_squared)
         ),
+        "action_error_method": error_method,
+        "difference_roundoff_bound": float(roundoff_bound),
         "estimated_exact_work": int(estimated_exact_work),
         "peak_workspace_bytes": int(peak_workspace_bytes),
     }
@@ -1209,6 +1343,39 @@ def _nonnegative_roundoff(value: float, *, scale: float) -> float:
     if value < 0.0:
         raise ValueError("Action contraction produced a negative squared norm.")
     return value
+
+
+def _cancellation_safe_nonnegative_difference(total: float, part: float) -> float:
+    """Subtract two contraction norms without reporting cancellation noise as error."""
+    difference = total - part
+    scale = max(abs(total), abs(part), 1.0)
+    roundoff_bound = 512.0 * np.finfo(np.float64).eps * scale
+    if abs(difference) <= roundoff_bound:
+        return 0.0
+    return _nonnegative_roundoff(difference, scale=scale)
+
+
+def _overlap_squared_difference(
+    exact_norm_squared: float,
+    compressed_norm_squared: float,
+    cross_overlap: complex,
+) -> tuple[float, float]:
+    """Return an overlap-derived squared error with an explicit cancellation bound."""
+    scale = max(
+        abs(exact_norm_squared),
+        abs(compressed_norm_squared),
+        abs(cross_overlap),
+        1.0,
+    )
+    roundoff_bound = 512.0 * np.finfo(np.float64).eps * scale
+    difference = (
+        exact_norm_squared
+        + compressed_norm_squared
+        - 2.0 * float(np.real(cross_overlap))
+    )
+    if abs(difference) <= roundoff_bound:
+        return 0.0, roundoff_bound
+    return _nonnegative_roundoff(difference, scale=scale), roundoff_bound
 
 
 def dense_pauli_sum(terms: Sequence[tuple[str, complex]]) -> np.ndarray:

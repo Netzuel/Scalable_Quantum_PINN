@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 from pathlib import Path
 import subprocess
 import sys
+import tracemalloc
 import unittest
 from unittest import mock
 import warnings
 
 import numpy as np
+
+import scripts.agp_mpo_backend as mpo_backend
 
 try:
     import tomllib
@@ -337,6 +341,77 @@ class ExactPauliMPOTests(unittest.TestCase):
 
 @unittest.skipUnless(_TENPY_AVAILABLE, "TeNPy tensor-network extra is not installed")
 class MPOCompressionTests(unittest.TestCase):
+    def test_q24_compression_owns_retained_cores_within_hard_traced_cap(self) -> None:
+        from tenpy.networks.site import SpinHalfSite
+
+        n_qubits = 24
+        terms = tuple(
+            (
+                _base4_pauli_label(
+                    (index * 0x9E3779B97F4A7C15) % (4**n_qubits), n_qubits
+                ),
+                complex((index % 29) + 1) / 29.0,
+            )
+            for index in range(2048)
+        )
+
+        class PauliSource:
+            L = n_qubits
+            bc = "finite"
+            sites = [SpinHalfSite(conserve=None) for _ in range(n_qubits)]
+            chi = [1] * (n_qubits + 1)
+            _agp_pauli_terms = terms
+
+        workspace_cap = 33 * 1024 * 1024
+        ownership: list[bool] = []
+        original_builder = mpo_backend._mpo_from_pauli_cores
+
+        with mock.patch.object(
+            mpo_backend.np,
+            "fromiter",
+            side_effect=AssertionError("coefficient buffer was allocated before preflight"),
+        ) as fromiter:
+            blocked, blocked_diagnostics = compress_mpo_hilbert_schmidt(
+                PauliSource(),
+                max_bond=64,
+                cutoff=1.0e-12,
+                workspace_cap_bytes=1,
+            )
+        fromiter.assert_not_called()
+        self.assertIsNone(blocked)
+        self.assertEqual(blocked_diagnostics["status"], "not_feasible")
+        self.assertGreater(blocked_diagnostics["required_workspace_bytes"], 1)
+
+        def checked_builder(*args: object, **kwargs: object) -> object:
+            cores = kwargs["cores"]
+            ownership.extend(core.flags.owndata and core.base is None for core in cores)
+            return original_builder(*args, **kwargs)
+
+        gc.collect()
+        tracemalloc.start()
+        baseline = tracemalloc.get_traced_memory()[0]
+        try:
+            with mock.patch.object(
+                mpo_backend, "_mpo_from_pauli_cores", side_effect=checked_builder
+            ):
+                compressed, diagnostics = compress_mpo_hilbert_schmidt(
+                    PauliSource(),
+                    max_bond=64,
+                    cutoff=1.0e-12,
+                    workspace_cap_bytes=workspace_cap,
+                )
+            traced_peak = tracemalloc.get_traced_memory()[1] - baseline
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(diagnostics["status"], "ok")
+        self.assertIsNotNone(compressed)
+        self.assertTrue(ownership)
+        self.assertTrue(all(ownership))
+        self.assertLessEqual(traced_peak, workspace_cap)
+        self.assertLessEqual(diagnostics["peak_workspace_bytes"], workspace_cap)
+        self.assertLessEqual(diagnostics["required_workspace_bytes"], workspace_cap)
+
     def test_adversarial_full_support_compression_never_densifies_exact_mpo(self) -> None:
         terms = [
             (
@@ -536,6 +611,79 @@ class MPOCompressionTests(unittest.TestCase):
         self.assertEqual(diagnostics["not_feasible_probes"], 1)
         self.assertEqual(diagnostics["probes"][0]["status"], "not_feasible")
         self.assertGreater(diagnostics["probes"][0]["estimated_exact_work"], 1)
+
+    def test_random_probe_preflights_workspace_before_constructing_state(self) -> None:
+        from tenpy.networks.mps import MPS
+
+        exact, _ = build_exact_pauli_mpo(
+            [("XX", 1.0), ("YZ", -0.25)], n_qubits=2, order=(0, 1)
+        )
+        compressed, compression = compress_mpo_hilbert_schmidt(
+            exact, max_bond=4, cutoff=0.0
+        )
+        self.assertEqual(compression["status"], "ok")
+
+        with mock.patch.object(
+            MPS,
+            "from_random_unitary_evolution",
+            side_effect=AssertionError("random MPS constructor was called"),
+        ) as constructor:
+            diagnostics = probe_mpo_compression(
+                exact,
+                compressed,
+                product_states=(),
+                random_state_count=1,
+                random_bond=2,
+                workspace_cap_bytes=1,
+            )
+
+        constructor.assert_not_called()
+        self.assertEqual(diagnostics["tested_probes"], 0)
+        self.assertEqual(diagnostics["not_feasible_probes"], 1)
+        self.assertEqual(diagnostics["probes"][0]["status"], "not_feasible")
+        self.assertGreater(diagnostics["probes"][0]["required_workspace_bytes"], 1)
+
+    def test_action_error_zeros_roundoff_but_detects_small_real_difference(self) -> None:
+        terms = [("XX", 0.7), ("YZ", -0.3), ("II", 0.2)]
+        exact, _ = build_exact_pauli_mpo(terms, n_qubits=2, order=(0, 1))
+        identical, compression = compress_mpo_hilbert_schmidt(
+            exact, max_bond=16, cutoff=0.0
+        )
+        self.assertEqual(compression["status"], "ok")
+
+        identical_diagnostics = probe_mpo_compression(
+            exact,
+            identical,
+            product_states=(("up", "down"),),
+            random_state_count=1,
+            random_bond=2,
+            seed=19,
+        )
+        self.assertEqual(identical_diagnostics["tested_probes"], 2)
+        self.assertTrue(
+            all(
+                probe["relative_action_error"] == 0.0
+                for probe in identical_diagnostics["probes"]
+            )
+        )
+
+        relative_perturbation = 1.0e-10
+        perturbed_terms = [
+            (label, coefficient * (1.0 + relative_perturbation))
+            for label, coefficient in terms
+        ]
+        perturbed, _ = build_exact_pauli_mpo(
+            perturbed_terms, n_qubits=2, order=(0, 1)
+        )
+        perturbed_diagnostics = probe_mpo_compression(
+            exact,
+            perturbed,
+            product_states=(("up", "down"),),
+            random_state_count=0,
+        )
+        measured = perturbed_diagnostics["probes"][0]["relative_action_error"]
+        self.assertGreater(measured, 0.0)
+        self.assertAlmostEqual(measured, relative_perturbation, delta=1.0e-13)
 
     def test_zero_action_denominator_is_not_tested(self) -> None:
         zero, _ = build_exact_pauli_mpo(

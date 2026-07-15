@@ -32,6 +32,10 @@ The high-review remediation added two further RED gates:
   `Array.to_ndarray()` interception before any SVD.
 - The action test failed at the intercepted `exact_mpo.apply_naively()` call,
   and the random resource test failed because `exact_work_cap` did not exist.
+- The interrupted remediation left product and random action probes calling
+  `_cancellation_safe_nonnegative_difference` and
+  `_overlap_squared_difference` without defining them. The focused test run
+  failed with `NameError` in both action-error regressions.
 
 ## Implementation
 
@@ -48,17 +52,30 @@ The high-review remediation added two further RED gates:
   tensors.
 - Every local unfolding is preflighted against `workspace_cap_bytes` using a
   conservative estimate that includes index arrays, local matrices, eigensolver
-  work, retained values, and compressed output copies. Diagnostics expose the
-  cap, conservative peak, explicit-array peak, required bytes, and failed bond.
-  A cap violation returns `(None, {"status": "not_feasible", ...})` before the
+  work, owned retained cores, retained values, and compressed output copies.
+  Retained TT cores are C-contiguous copies, so no returned core keeps an
+  eigensolver matrix alive through a view. Diagnostics expose the cap,
+  conservative peak, explicit-array peak, required bytes, and failed bond. A
+  cap violation returns `(None, {"status": "not_feasible", ...})` before the
   prohibited allocation.
+- The q24/2048 regression first sets a one-byte cap while intercepting
+  `np.fromiter`; it returns `not_feasible` without creating the coefficient
+  buffer. The successful 33 MiB run uses `tracemalloc`, verifies every retained
+  core owns its compact buffer, and requires both reported peak and required
+  workspace to remain within the cap.
 - Product probes compute the exact action from every Pauli term by aggregating
   output bitstrings and amplitudes. Compressed action norms and cross terms use
   streamed local transfer contractions and batched amplitude queries.
 - Seeded random MPS probes compute exact norms from Pauli-pair expectations and
   cross terms from individual fixed-bond Pauli actions against one bounded
-  compressed action. Cases above `exact_work_cap` or the workspace cap return a
-  named `not_feasible` probe; no exact MPO action is formed or approximated.
+  compressed action. Their construction and action workspace are estimated
+  before invoking the MPS constructor. Cases above `exact_work_cap` or the
+  workspace cap return a named `not_feasible` probe; no exact MPO action is
+  formed or approximated.
+- Product probes calculate their output-amplitude difference directly and only
+  zero cancellation-scale residuals. Random-MPS probes use the corresponding
+  overlap roundoff bound. Identical actions therefore report exactly zero while
+  a relative `1e-10` perturbation remains detectable.
 - Requested random bond dimension is capped at the finite-chain Schmidt bound
   and both values are reported. Exact zero action denominators remain
   `not_tested`.
@@ -75,19 +92,23 @@ conda run -n torch-mps python -m py_compile scripts/agp_mpo_backend.py tests/tes
 git diff --check
 ```
 
-Result: 32 focused tests passed, compilation passed, and the diff check was
+Result: 35 focused tests passed, compilation passed, and the diff check was
 clean. Coverage includes exact dense equivalence, duplicate combination and
 cancellation metadata, explicit arithmetic-zero tolerance, qubit-order
 equivalence, large-q construction with dense guards, compression error and
 resource limits, global Hilbert-Schmidt discarded-weight accounting,
-deterministic product/random MPS action errors, zero-denominator status, and
+deterministic product/random MPS action errors, cancellation-safe zero action
+errors with a detectable small perturbation, zero-denominator status, and
 optional-import behavior.
 
 The adversarial q12/512 test uses labels scrambled across the full 12-site
 Pauli address space. With `max_bond=8` and an 8 MiB cap it reports
 `peak_workspace_bytes=842240`, `peak_explicit_workspace_bytes=465408`, and
 retained bond 8 across the central cuts while a fatal `to_ndarray()` patch is
-active. A separate 1 KiB test returns `not_feasible` before allocation.
+active. The q24/2048 test extends that evidence with an owned-core,
+tracemalloc-bounded successful compression and a one-byte preflight gate. A
+separate random-MPS test verifies a one-byte cap returns `not_feasible` without
+calling its constructor.
 
 ## Scope
 
