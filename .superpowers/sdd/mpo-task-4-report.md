@@ -72,6 +72,10 @@ configs or generated validation artifacts.
   both statevector RK4 and calibrated-MPO integrator semantics.
 - Plot/table normalization accepts canonical `nested_l1` as well as legacy
   `kipu_dqfm_l1`, mapping both to the nested-commutator row.
+- Made the statevector physical-validation CLI's HCD-summary refresh import
+  repository-root safe via `scripts.projected_sparse_training_common`. Direct
+  CLI execution from the repository root no longer depends on an externally
+  supplied `PYTHONPATH`.
 
 ## TDD Evidence
 
@@ -88,6 +92,11 @@ Final coverage adds a trailing-ablation payload-publication test, a
 statevector-identity producer/consumer match-and-mismatch test, canonical
 nested-l1 rendering, and the framework-script layout allowlist update.
 
+The final import-path regression creates a one-qubit temporary Hamiltonian and
+coefficient export, invokes the statevector CLI in a subprocess from the
+repository root with `PYTHONPATH` removed, and asserts both the emitted
+`validation_identity` and the refreshed HCD connection-summary plot.
+
 ## Verification
 
 ```text
@@ -98,6 +107,17 @@ conda run -n torch-mps python -m unittest \
 
 Result: 128 tests passed, including the MPO, MPS, physical-validation, and
 layout suites.
+
+Final statevector CLI import-path verification:
+
+```text
+conda run -n torch-mps python -m unittest \
+  tests.test_agp_physical_validation tests.test_agp_mps_validation \
+  tests.test_agp_benchmark_layout -v
+```
+
+Result: 74 tests passed, including the real subprocess invocation from the
+repository root without `PYTHONPATH`.
 
 ```text
 conda run -n torch-mps python -m py_compile \

@@ -1,3 +1,6 @@
+import json
+import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -5,6 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
+import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -725,6 +729,90 @@ class AGPPhysicalValidationTests(unittest.TestCase):
 
         self.assertEqual(best["name"], "learned_sparse_agp_terms_2048_scale_1")
         self.assertEqual(best["selection_metric"], "energy_error")
+
+    def test_statevector_cli_runs_from_repo_root_without_pythonpath(self):
+        """Exercise the CLI import and its post-summary plotting refresh."""
+
+        with TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            hamiltonian_path = temp_root / "tiny_pair.json"
+            hamiltonian_path.write_text(
+                json.dumps(
+                    {
+                        "format": "pauli_hamiltonian_pair_v1",
+                        "system": "CliImportTest",
+                        "n_qubits": 1,
+                        "distance": "1_0",
+                        "hamiltonians": {
+                            "initial": {"terms": {"X": [1.0, 0.0]}},
+                            "final": {"terms": {"Z": [1.0, 0.0]}},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            trained_run = temp_root / "trained_run"
+            coefficient_path = trained_run / "Models_Data" / "final_agp_coefficients.pt"
+            coefficient_path.parent.mkdir(parents=True)
+            torch.save(
+                {
+                    "pauli_labels": ["Y"],
+                    "counterdiabatic_coefficients": torch.tensor([[0.1], [0.1]]),
+                    "tau": torch.tensor([0.0, 1.0]),
+                    "lambda": torch.tensor([0.0, 1.0]),
+                    "d_lambda_dt": torch.tensor([1.0, 1.0]),
+                },
+                coefficient_path,
+            )
+            config_path = temp_root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "physical": {
+                            "parameters": {
+                                "system": "CliImportTest",
+                                "num_qubits": 1,
+                                "distance": "1_0",
+                                "T": 0.01,
+                                "hamiltonian_source": str(hamiltonian_path),
+                            }
+                        },
+                        "physical_validation": {
+                            "evolution_steps": 2,
+                            "learned_top_terms": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = temp_root / "validation"
+            environment = dict(os.environ)
+            environment.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(FRAMEWORK_SCRIPTS_DIR / "agp_physical_validation.py"),
+                    "--config",
+                    str(config_path),
+                    "--trained-run",
+                    str(trained_run),
+                    "--output-dir",
+                    str(output_dir),
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            self.assertIn('"validation_identity"', result.stdout)
+            payload = json.loads(
+                (output_dir / "Models_Data" / "physical_validation_summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["validation_identity"]["n_qubits"], 1)
+            self.assertTrue((output_dir / "Images" / "hcd_connection_summary.pdf").is_file())
 
 
 if __name__ == "__main__":

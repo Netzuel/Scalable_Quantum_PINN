@@ -624,7 +624,7 @@ def refresh_hcd_connection_summary(trained_run: Path, output_dir: Path) -> None:
         print(f"skip_hcd_connection_summary_refresh missing_coefficients={coefficient_path}")
         return
 
-    from projected_sparse_training_common import plot_connection_summary, rank_coefficients
+    from scripts.projected_sparse_training_common import plot_connection_summary, rank_coefficients
 
     payload = torch.load(coefficient_path, map_location="cpu")
     coefficients = payload.get("counterdiabatic_coefficients")
