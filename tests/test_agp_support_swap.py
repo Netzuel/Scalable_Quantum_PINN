@@ -19,8 +19,12 @@ from agp_holdout_feedback import (  # noqa: E402
     adaptive_temporal_refinement_settings_from_feedback,
     compact_support_swap_plan,
     feedback_refinements_complete,
+    fixed_unseen_probe_settings_from_feedback,
+    fixed_unseen_reference_rms,
+    load_or_validate_fixed_unseen_probe,
     make_adaptive_tau_grid,
     pau_transfer_stability_settings_from_feedback,
+    save_fixed_unseen_probe,
     support_swap_settings_from_feedback,
     temporal_refinement_settings_from_feedback,
 )
@@ -28,6 +32,42 @@ from utils import SparsePauliOperator  # noqa: E402
 
 
 class AGPSupportSwapTests(unittest.TestCase):
+    def test_fixed_unseen_settings_are_read_from_feedback_config(self):
+        settings = fixed_unseen_probe_settings_from_feedback(
+            {
+                "fixed_unseen_probes": {
+                    "enabled": True,
+                    "active_terms": 4096,
+                    "null_terms": 4096,
+                    "reference_rms_threshold": 1.0e-12,
+                    "seed": 11,
+                    "candidate_multiplier": 8,
+                }
+            }
+        )
+
+        self.assertTrue(settings.enabled)
+        self.assertEqual(settings.active_terms, 4096)
+        self.assertEqual(settings.null_terms, 4096)
+
+    def test_persisted_fixed_probe_rejects_changed_labels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "fixed_unseen_probe_labels.json"
+            save_fixed_unseen_probe(path, {"active_labels": ["XI"], "null_labels": ["YI"]})
+            with self.assertRaisesRegex(ValueError, "immutable fixed unseen probe"):
+                load_or_validate_fixed_unseen_probe(path, expected_excluded_labels={"XI"})
+
+    def test_empty_fixed_probe_candidate_tail_needs_no_model(self):
+        values = fixed_unseen_reference_rms(
+            h0=None,
+            h1=None,
+            settings=None,
+            agp_labels=[],
+            candidate_labels=[],
+        )
+
+        self.assertEqual(values.shape, (0,))
+
     def test_pau_transfer_stability_settings_are_read_from_config(self):
         settings = pau_transfer_stability_settings_from_feedback(
             {
