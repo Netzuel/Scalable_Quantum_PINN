@@ -21,7 +21,10 @@ from agp_holdout_study import (  # noqa: E402
     Thresholds,
     build_common_holdout_residual_labels,
     evaluate_one_run,
+    feedback_threshold_decision,
+    fixed_unseen_plot_series,
     load_json,
+    moving_unseen_diagnostics,
     optional_float,
 )
 from agp_residual_probes import (  # noqa: E402
@@ -497,7 +500,7 @@ def evaluate_fixed_unseen_probe(
     active_row = evaluate_partition(active_labels, "active")
     null_row = evaluate_partition(null_labels, "null")
     reference_floor = float(probe_metadata.get("reference_rms_threshold", 1.0e-12)) ** 2
-    return fixed_unseen_probe_row_metrics(_fixed_unseen_metrics_from_totals(
+    metrics = fixed_unseen_probe_row_metrics(_fixed_unseen_metrics_from_totals(
         active_terms=len(active_labels),
         active_residual=float(active_row["holdout_total_residual"]),
         active_reference=float(active_row["holdout_reference_residual"]),
@@ -506,6 +509,7 @@ def evaluate_fixed_unseen_probe(
         null_reference=float(null_row["holdout_reference_residual"]),
         reference_floor=reference_floor,
     ))
+    return metrics
 
 
 def configured_certification_probe_labels(
@@ -1350,7 +1354,7 @@ def plot_feedback_relative_residuals(rows: list[dict[str, object]], images_dir: 
     series = [
         ("training", [float(row["training_final_relative_residual"]) for row in rows], OKABE_ITO[0], "o"),
         ("holdout", [float(row["holdout_relative_residual"]) for row in rows], OKABE_ITO[1], "s"),
-        ("unseen", unseen_values, OKABE_ITO[2], "^"),
+        ("moving unseen quotient", unseen_values, OKABE_ITO[2], "^"),
     ]
     fig, ax = plt.subplots(figsize=(5.8, 3.5))
     for label, values, color, marker in series:
@@ -1366,6 +1370,61 @@ def plot_feedback_relative_residuals(rows: list[dict[str, object]], images_dir: 
     fig.legend(loc="upper center", ncol=3, frameon=False, fontsize=LEGEND_FS, bbox_to_anchor=(0.53, 1.02))
     fig.subplots_adjust(top=0.80, left=0.13, right=0.98, bottom=0.16)
     fig.savefig(images_dir / "holdout_feedback_relative_residuals.pdf", format="pdf")
+    plt.close(fig)
+
+
+def plot_fixed_unseen_probes(
+    rows: list[dict[str, object]],
+    output_path: Path,
+    *,
+    unseen_threshold: float,
+) -> None:
+    """Plot the stable active quotient separately from null leakage diagnostics."""
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    set_paper_style(plt)
+    series = fixed_unseen_plot_series(rows)
+    rounds = series["rounds"]
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.3))
+    axes[0].semilogy(
+        rounds,
+        series["active_relative"],
+        marker="o",
+        linewidth=LINE_WIDTH,
+        color=OKABE_ITO[0],
+        label="fixed active quotient",
+    )
+    axes[0].axhline(unseen_threshold, linestyle=":", color="0.5", linewidth=0.8)
+    axes[0].set_ylabel("relative residual", fontsize=LABEL_FS)
+    axes[0].set_title("fixed active unseen gate", fontsize=TITLE_FS)
+    axes[1].semilogy(
+        rounds,
+        series["null_absolute_per_term"],
+        marker="s",
+        linewidth=LINE_WIDTH,
+        color=OKABE_ITO[1],
+        label="null absolute / term",
+    )
+    axes[1].semilogy(
+        rounds,
+        series["null_scaled"],
+        marker="^",
+        linewidth=LINE_WIDTH,
+        color=OKABE_ITO[2],
+        label="null scaled",
+    )
+    axes[1].set_title("fixed null leakage", fontsize=TITLE_FS)
+    for axis in axes:
+        axis.set_xlabel("feedback round", fontsize=LABEL_FS)
+        axis.set_xticks(rounds)
+        axis.tick_params(axis="both", labelsize=TICK_FS, length=TICK_LENGTH, width=TICK_WIDTH)
+        axis.legend(frameon=False, fontsize=LEGEND_FS)
+    fig.subplots_adjust(top=0.84, left=0.10, right=0.98, bottom=0.18, wspace=0.34)
+    fig.savefig(output_path, format="pdf")
     plt.close(fig)
 
 
@@ -1521,6 +1580,7 @@ def write_feedback_summary(
     residual_top_k: int,
     thresholds: Thresholds,
     residual_budget: dict[str, object],
+    fixed_unseen_probe: Mapping[str, object] | None = None,
     temporal_refinement: dict[str, object] | None = None,
     adaptive_temporal_refinement: dict[str, object] | None = None,
     keep_round_images: bool = True,
@@ -1529,39 +1589,12 @@ def write_feedback_summary(
     data_dir = output_dir / "Models_Data"
     images_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
-    accepted = []
-    for row in rows:
-        unseen_value = row.get("unseen_relative_residual")
-        unseen_status = row.get("unseen_relative_residual_status", {})
-        unseen_valid = bool(isinstance(unseen_status, dict) and unseen_status.get("valid", unseen_value is not None))
-        if (
-            float(row["holdout_relative_residual"]) <= thresholds.holdout
-            and unseen_valid
-            and unseen_value is not None
-            and float(unseen_value) <= thresholds.unseen
-            and int(row.get("unseen_residual_terms", 0)) > 0
-        ):
-            accepted.append(row)
-    if accepted:
-        decision = {
-            "status": "found_feedback_round",
-            "round": int(accepted[0]["feedback_round"]),
-            "conclusion": f"Feedback round {int(accepted[0]['feedback_round'])} passes holdout and unseen thresholds.",
-            "thresholds": {
-                "holdout_relative_residual_max": thresholds.holdout,
-                "unseen_relative_residual_max": thresholds.unseen,
-            },
-        }
-    else:
-        decision = {
-            "status": "not_found_in_feedback_run",
-            "round": None,
-            "conclusion": "No feedback round passes both holdout and unseen thresholds.",
-            "thresholds": {
-                "holdout_relative_residual_max": thresholds.holdout,
-                "unseen_relative_residual_max": thresholds.unseen,
-            },
-        }
+    decision = feedback_threshold_decision(
+        rows,
+        holdout_threshold=thresholds.holdout,
+        unseen_threshold=thresholds.unseen,
+        fixed_unseen_probe=fixed_unseen_probe,
+    )
     payload = {
         "description": (
             "Holdout-feedback training: high-RMS unseen holdout residual strings are added to the "
@@ -1569,7 +1602,9 @@ def write_feedback_summary(
         ),
         "holdout_residual_terms": residual_top_k,
         "residual_budget": residual_budget,
+        "fixed_unseen_probe": dict(fixed_unseen_probe) if fixed_unseen_probe is not None else None,
         "decision": decision,
+        "moving_unseen_diagnostic": moving_unseen_diagnostics(rows),
         "rounds": round_rows,
         "rows": rows,
     }
@@ -1581,6 +1616,11 @@ def write_feedback_summary(
         json.dump(payload, handle, indent=2)
         handle.write("\n")
     plot_feedback_relative_residuals(rows, images_dir, thresholds)
+    plot_fixed_unseen_probes(
+        rows,
+        images_dir / "holdout_feedback_fixed_unseen_probes.pdf",
+        unseen_threshold=thresholds.unseen,
+    )
     plot_feedback_seen_unseen(rows, images_dir)
     plot_feedback_residual_spectrum(rows, spectra, images_dir)
     plot_feedback_added_terms(round_rows, images_dir)
@@ -1982,6 +2022,7 @@ def main() -> None:
                     residual_top_k=residual_top_k,
                     thresholds=thresholds,
                     residual_budget=residual_budget,
+                    fixed_unseen_probe=fixed_unseen_probe,
                     temporal_refinement=temporal_summary if isinstance(temporal_summary, dict) else None,
                     adaptive_temporal_refinement=adaptive_summary if isinstance(adaptive_summary, dict) else None,
                     keep_round_images=keep_round_images,
@@ -2135,6 +2176,7 @@ def main() -> None:
             residual_top_k=residual_top_k,
             thresholds=thresholds,
             residual_budget=residual_budget,
+            fixed_unseen_probe=fixed_unseen_probe,
             keep_round_images=keep_round_images,
         )
 
@@ -2369,6 +2411,7 @@ def main() -> None:
         residual_top_k=residual_top_k,
         thresholds=thresholds,
         residual_budget=residual_budget,
+        fixed_unseen_probe=fixed_unseen_probe,
         temporal_refinement=temporal_refinement_summary,
         adaptive_temporal_refinement=adaptive_temporal_summary,
         keep_round_images=keep_round_images,

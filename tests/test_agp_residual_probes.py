@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import torch
@@ -15,6 +16,11 @@ from agp_residual_probes import (  # noqa: E402
     FixedUnseenProbeConfig,
     fixed_unseen_metrics,
     select_fixed_unseen_probes,
+)
+from agp_holdout_feedback import plot_fixed_unseen_probes  # noqa: E402
+from agp_holdout_study import (  # noqa: E402
+    feedback_threshold_decision,
+    fixed_unseen_plot_series,
 )
 
 
@@ -90,6 +96,81 @@ class AGPResidualProbeTests(unittest.TestCase):
 
         self.assertIsNone(metrics["active_relative"])
         self.assertEqual(metrics["active_status"]["reason"], "zero_reference")
+
+    def test_fixed_active_probe_is_the_stable_unseen_gate(self):
+        row = {
+            "feedback_round": 7,
+            "holdout_relative_residual": 0.05,
+            "unseen_relative_residual": None,
+            "fixed_unseen_active_relative": 0.8,
+            "fixed_unseen_active_status": {"valid": True, "reason": "finite_reference"},
+        }
+
+        decision = feedback_threshold_decision(
+            [row],
+            holdout_threshold=0.1,
+            unseen_threshold=1.0,
+        )
+
+        self.assertEqual(decision["status"], "found_feedback_round")
+        self.assertEqual(decision["unseen_gate_source"], "fixed_unseen_active")
+
+    def test_fixed_active_gate_is_not_tested_when_probe_is_incomplete_or_reference_is_zero(self):
+        row = {
+            "feedback_round": 3,
+            "holdout_relative_residual": 0.01,
+            "fixed_unseen_enabled": True,
+            "fixed_unseen_probe_status": "insufficient_candidates",
+            "fixed_unseen_active_relative": None,
+            "fixed_unseen_active_status": {"valid": False, "reason": "zero_reference"},
+        }
+
+        decision = feedback_threshold_decision(
+            [row],
+            holdout_threshold=0.1,
+            unseen_threshold=1.0,
+        )
+
+        self.assertEqual(decision["status"], "not_found_in_feedback_run")
+        self.assertEqual(decision["unseen_gate"]["status"], "not_tested")
+        self.assertEqual(decision["unseen_gate"]["reason"], "insufficient_candidates")
+
+    def test_plot_series_keeps_null_leakage_when_moving_ratio_is_undefined(self):
+        series = fixed_unseen_plot_series([{
+            "feedback_round": 7,
+            "fixed_unseen_active_relative": 0.4,
+            "fixed_unseen_null_absolute_per_term": 0.03,
+            "fixed_unseen_null_scaled": 0.02,
+            "unseen_relative_residual": None,
+        }])
+
+        self.assertEqual(series["rounds"].tolist(), [7.0])
+        self.assertEqual(series["active_relative"].tolist(), [0.4])
+        self.assertEqual(series["null_absolute_per_term"].tolist(), [0.03])
+        self.assertEqual(series["null_scaled"].tolist(), [0.02])
+        self.assertTrue(np.isnan(series["moving_unseen_relative"][0]))
+
+    def test_fixed_unseen_plot_writes_separate_active_and_null_panels(self):
+        rows = [
+            {
+                "feedback_round": 0,
+                "fixed_unseen_active_relative": 0.5,
+                "fixed_unseen_null_absolute_per_term": 0.03,
+                "fixed_unseen_null_scaled": 0.04,
+            },
+            {
+                "feedback_round": 1,
+                "fixed_unseen_active_relative": None,
+                "fixed_unseen_null_absolute_per_term": 0.02,
+                "fixed_unseen_null_scaled": None,
+            },
+        ]
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fixed_unseen.pdf"
+            plot_fixed_unseen_probes(rows, path, unseen_threshold=1.0)
+
+            self.assertTrue(path.is_file())
+            self.assertGreater(path.stat().st_size, 0)
 
 
 if __name__ == "__main__":

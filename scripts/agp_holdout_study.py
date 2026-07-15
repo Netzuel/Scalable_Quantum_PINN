@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, getcontext
 from pathlib import Path
@@ -52,6 +53,145 @@ class Thresholds:
     unseen: float
     top_stability: float
     top_fraction: float
+
+
+def _finite_series_value(value: object) -> float:
+    if value is None:
+        return float("nan")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return numeric if math.isfinite(numeric) else float("nan")
+
+
+def fixed_unseen_gate(
+    row: Mapping[str, object],
+    *,
+    unseen_threshold: float,
+    fixed_unseen_probe: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Classify the fixed active probe without falling back to moving diagnostics."""
+
+    lifecycle = fixed_unseen_probe if fixed_unseen_probe is not None else row
+    if not bool(lifecycle.get("fixed_unseen_enabled", lifecycle.get("enabled", True))):
+        return {"status": "not_tested", "value": None, "reason": "disabled"}
+    probe_status = str(lifecycle.get("fixed_unseen_probe_status", lifecycle.get("status", "complete")))
+    if probe_status != "complete":
+        return {
+            "status": "not_tested",
+            "value": None,
+            "reason": str(lifecycle.get("insufficiency_reason", probe_status)),
+        }
+    active_status = row.get("fixed_unseen_active_status")
+    if not isinstance(active_status, Mapping):
+        return {"status": "not_tested", "value": None, "reason": "missing_active_status"}
+    if not bool(active_status.get("valid", False)):
+        return {
+            "status": "not_tested",
+            "value": None,
+            "reason": str(active_status.get("reason", "missing_active_reference")),
+        }
+    value = _finite_series_value(row.get("fixed_unseen_active_relative"))
+    if math.isnan(value):
+        return {"status": "not_tested", "value": None, "reason": "missing_active_reference"}
+    return {
+        "status": "pass" if value <= unseen_threshold else "fail",
+        "value": value,
+        "reason": "finite_reference",
+        "threshold": float(unseen_threshold),
+    }
+
+
+def feedback_threshold_decision(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    holdout_threshold: float,
+    unseen_threshold: float,
+    fixed_unseen_probe: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Choose feedback rounds with a stable fixed-active unseen certification gate."""
+
+    gates = []
+    accepted: list[Mapping[str, object]] = []
+    for row in rows:
+        gate = fixed_unseen_gate(
+            row,
+            unseen_threshold=unseen_threshold,
+            fixed_unseen_probe=fixed_unseen_probe,
+        )
+        gates.append({"round": int(row.get("feedback_round", 0)), **gate})
+        if (
+            float(row["holdout_relative_residual"]) <= holdout_threshold
+            and gate["status"] == "pass"
+        ):
+            accepted.append(row)
+    selected_gate = (
+        next(gate for gate in gates if gate["round"] == int(accepted[0].get("feedback_round", 0)))
+        if accepted
+        else (gates[-1] if gates else {"status": "not_tested", "value": None, "reason": "no_rows"})
+    )
+    if accepted:
+        selected = accepted[0]
+        return {
+            "status": "found_feedback_round",
+            "round": int(selected["feedback_round"]),
+            "conclusion": (
+                f"Feedback round {int(selected['feedback_round'])} passes holdout and fixed active unseen thresholds."
+            ),
+            "unseen_gate_source": "fixed_unseen_active",
+            "unseen_gate": selected_gate,
+            "unseen_gates": gates,
+            "thresholds": {
+                "holdout_relative_residual_max": float(holdout_threshold),
+                "unseen_relative_residual_max": float(unseen_threshold),
+            },
+        }
+    return {
+        "status": "not_found_in_feedback_run",
+        "round": None,
+        "conclusion": "No feedback round passes holdout and fixed active unseen thresholds.",
+        "unseen_gate_source": "fixed_unseen_active",
+        "unseen_gate": selected_gate,
+        "unseen_gates": gates,
+        "thresholds": {
+            "holdout_relative_residual_max": float(holdout_threshold),
+            "unseen_relative_residual_max": float(unseen_threshold),
+        },
+    }
+
+
+def fixed_unseen_plot_series(rows: Sequence[Mapping[str, object]]) -> dict[str, np.ndarray]:
+    """Return fixed active/null and moving-unseen diagnostics with NaN gaps."""
+
+    return {
+        "rounds": np.asarray([float(row.get("feedback_round", 0)) for row in rows]),
+        "active_relative": np.asarray(
+            [_finite_series_value(row.get("fixed_unseen_active_relative")) for row in rows]
+        ),
+        "null_absolute_per_term": np.asarray(
+            [_finite_series_value(row.get("fixed_unseen_null_absolute_per_term")) for row in rows]
+        ),
+        "null_scaled": np.asarray(
+            [_finite_series_value(row.get("fixed_unseen_null_scaled")) for row in rows]
+        ),
+        "moving_unseen_relative": np.asarray(
+            [_finite_series_value(row.get("unseen_relative_residual")) for row in rows]
+        ),
+    }
+
+
+def moving_unseen_diagnostics(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Preserve moving-unseen output as diagnostics, never a certification gate."""
+
+    return [
+        {
+            "round": int(row.get("feedback_round", 0)),
+            "value": row.get("unseen_relative_residual"),
+            "status": row.get("unseen_relative_residual_status"),
+        }
+        for row in rows
+    ]
 
 
 def load_json(path: Path) -> dict[str, object] | list[dict[str, object]]:
@@ -451,9 +591,7 @@ def add_stability_and_criteria(
             bool(stability_value is not None and float(stability_value) >= thresholds.top_stability)
         )
 
-        unseen_relative = row.get("unseen_relative_residual")
-        unseen_status = row.get("unseen_relative_residual_status", {})
-        unseen_valid = bool(isinstance(unseen_status, dict) and unseen_status.get("valid", unseen_relative is not None))
+        unseen_gate = fixed_unseen_gate(row, unseen_threshold=thresholds.unseen)
         criteria = {
             "training_plateau": {
                 "value": improvement,
@@ -467,11 +605,13 @@ def add_stability_and_criteria(
                 "pass": float(row["holdout_relative_residual"]) <= thresholds.holdout,
             },
             "unseen_relative_residual": {
-                "value": unseen_relative,
+                "value": unseen_gate["value"],
                 "threshold": thresholds.unseen,
-                "pass": unseen_valid and unseen_relative is not None and float(unseen_relative) <= thresholds.unseen,
-                "valid": unseen_valid,
-                "note": "Invalid when the AGP=0 reference residual on the unseen subset is zero.",
+                "pass": unseen_gate["status"] == "pass",
+                "status": unseen_gate["status"],
+                "reason": unseen_gate["reason"],
+                "source": "fixed_unseen_active",
+                "note": "The moving unseen quotient is diagnostic-only and cannot certify this gate.",
             },
             "top_term_stability": {
                 "value": stability_value,
@@ -521,7 +661,7 @@ def plot_relative_residuals(rows: list[dict[str, object]], images_dir: Path, thr
     series = [
         ("training", [float(row["training_final_relative_residual"]) for row in rows], OKABE_ITO[0], "o"),
         ("holdout", [float(row["holdout_relative_residual"]) for row in rows], OKABE_ITO[1], "s"),
-        ("unseen", [optional_float(row["unseen_relative_residual"]) for row in rows], OKABE_ITO[2], "^"),
+        ("moving unseen quotient", [optional_float(row["unseen_relative_residual"]) for row in rows], OKABE_ITO[2], "^"),
     ]
     fig, ax = plt.subplots(figsize=(5.8, 3.5))
     for label, values, color, marker in series:
