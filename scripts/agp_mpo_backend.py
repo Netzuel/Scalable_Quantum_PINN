@@ -12,6 +12,7 @@ import hashlib
 from itertools import combinations
 import math
 from numbers import Integral
+import time
 import warnings
 from typing import Any, Sequence
 
@@ -79,6 +80,20 @@ class QubitOrderSelection:
     max_cut_terms: int
     mean_cut_terms: float
     candidate_scores: tuple[QubitOrderScore, ...]
+
+
+@dataclass
+class PreparedTDVPOperators:
+    """Compressed static operators and full temporal-mode accounting for evolution."""
+
+    sites: list[object]
+    h0_mpo: object | None
+    h1_mpo: object | None
+    cd_mode_mpos: list[object]
+    temporal_factorization: TemporalFactorization | None
+    order: tuple[int, ...]
+    diagnostics: dict[str, object]
+    h1_exact_mpo: object | None = None
 
 
 def factor_direct_cd_coefficients(
@@ -1739,6 +1754,241 @@ def mpo_to_dense(mpo: Any) -> np.ndarray:
     )
 
 
+def prepare_tdvp_operators(
+    *,
+    labels: Sequence[str],
+    static_modes: np.ndarray,
+    temporal_factors: np.ndarray,
+    n_qubits: int,
+    order: Sequence[int],
+    mpo_max_bond: int,
+    mpo_cutoff: float,
+    h0_terms: Sequence[tuple[str, complex]] | None = None,
+    h1_terms: Sequence[tuple[str, complex]] | None = None,
+    temporal_factorization: TemporalFactorization | None = None,
+    mpo_workspace_cap_bytes: int = _DEFAULT_MPO_WORKSPACE_CAP_BYTES,
+) -> PreparedTDVPOperators:
+    """Build compressed static MPOs without dropping any declared CD mode or term."""
+    n_qubits = _validate_n_qubits(n_qubits)
+    normalized_order = _validate_order(order, n_qubits=n_qubits)
+    mode_array = _finite_real_array(static_modes, name="static_modes", ndim=2)
+    factor_array = _finite_real_array(temporal_factors, name="temporal_factors", ndim=2)
+    normalized_labels = tuple(labels)
+    if len(normalized_labels) != mode_array.shape[1]:
+        raise ValueError("labels and static_modes must contain the same number of terms.")
+    if factor_array.shape[1] != mode_array.shape[0]:
+        raise ValueError("temporal_factors and static_modes must have the same temporal rank.")
+    if not factor_array.shape[0]:
+        raise ValueError("temporal_factors must contain at least one time sample.")
+    for label in normalized_labels:
+        _validate_pauli_label(label, n_qubits=n_qubits)
+    if normalized_labels and np.any(np.all(mode_array == 0.0, axis=0)):
+        raise ValueError("Every declared CD label must contribute to at least one temporal mode.")
+    if mode_array.shape[0] and np.any(np.all(mode_array == 0.0, axis=1)):
+        raise ValueError("Every declared temporal mode must contain at least one CD term.")
+
+    static_compression: dict[str, object] = {"cd_modes": []}
+    sites: list[object] = []
+    h0_mpo = h1_mpo = h1_exact_mpo = None
+    status = "ok"
+
+    def build_static(
+        name: str, terms: Sequence[tuple[str, complex]]
+    ) -> tuple[Any | None, Any | None]:
+        nonlocal sites, status
+        exact, metadata = build_exact_pauli_mpo(
+            terms, n_qubits=n_qubits, order=normalized_order
+        )
+        if not sites:
+            sites = list(exact.sites)
+        compressed, compression = compress_mpo_hilbert_schmidt(
+            exact,
+            max_bond=mpo_max_bond,
+            cutoff=mpo_cutoff,
+            workspace_cap_bytes=mpo_workspace_cap_bytes,
+        )
+        static_compression[name] = {"build": metadata, "compression": compression}
+        if compressed is None:
+            status = "not_feasible"
+        else:
+            compressed._agp_pauli_terms = exact._agp_pauli_terms
+        return exact, compressed
+
+    if h0_terms is not None:
+        _, h0_mpo = build_static("h0", h0_terms)
+    if h1_terms is not None:
+        h1_exact_mpo, h1_mpo = build_static("h1", h1_terms)
+
+    cd_mode_mpos: list[object] = []
+    for mode_index, row in enumerate(mode_array):
+        exact, metadata = build_exact_pauli_mpo(
+            list(zip(normalized_labels, row, strict=True)),
+            n_qubits=n_qubits,
+            order=normalized_order,
+        )
+        if not sites:
+            sites = list(exact.sites)
+        compressed, compression = compress_mpo_hilbert_schmidt(
+            exact,
+            max_bond=mpo_max_bond,
+            cutoff=mpo_cutoff,
+            workspace_cap_bytes=mpo_workspace_cap_bytes,
+        )
+        static_compression["cd_modes"].append(
+            {"mode": mode_index, "build": metadata, "compression": compression,
+             "status": "ok" if compressed is not None else "not_feasible"}
+        )
+        if compressed is None:
+            status = "not_feasible"
+        else:
+            compressed._agp_pauli_terms = exact._agp_pauli_terms
+            cd_mode_mpos.append(compressed)
+
+    if not sites:
+        _, _, _, MPO, _ = _require_tenpy()
+        identity, _ = build_exact_pauli_mpo(
+            [("I" * n_qubits, 0.0)], n_qubits=n_qubits, order=normalized_order
+        )
+        sites = list(identity.sites)
+        del MPO
+
+    diagnostics: dict[str, object] = {
+        "status": status,
+        "learned_input_terms": len(normalized_labels),
+        "temporal_rank": int(mode_array.shape[0]),
+        "support_fraction": 1.0 if normalized_labels else 0.0,
+        "full_support_status": "pass" if status == "ok" else "not_feasible",
+        "static_mpo_compression": static_compression,
+        "static_mpo_bonds": {
+            name: _mpo_bonds(mpo)
+            for name, mpo in (("h0", h0_mpo), ("h1", h1_mpo))
+            if mpo is not None
+        },
+    }
+    return PreparedTDVPOperators(
+        sites=sites,
+        h0_mpo=h0_mpo,
+        h1_mpo=h1_mpo,
+        cd_mode_mpos=cd_mode_mpos,
+        temporal_factorization=temporal_factorization,
+        order=normalized_order,
+        diagnostics=diagnostics,
+        h1_exact_mpo=h1_exact_mpo,
+    )
+
+
+def evolve_protocol_tdvp(
+    *,
+    h0_terms: Sequence[tuple[str, complex]],
+    h1_terms: Sequence[tuple[str, complex]],
+    cd_factorization: TemporalFactorization | None,
+    total_time: float = 1.0,
+    steps: int = 128,
+    cd_labels: Sequence[str] = (),
+    protocol: str | None = None,
+    schedule: Any | None = None,
+    order: Sequence[int] | None = None,
+    initial_state: Sequence[object] | None = None,
+    ground_bitstring: str | None = None,
+    mps_max_bond: int = 128,
+    mps_cutoff: float = 1.0e-12,
+    mpo_max_bond: int = 256,
+    mpo_cutoff: float = 1.0e-12,
+    lanczos_max: int = 20,
+    mpo_workspace_cap_bytes: int = _DEFAULT_MPO_WORKSPACE_CAP_BYTES,
+) -> tuple[Any, dict[str, object]]:
+    """Evolve the full declared MPO support with midpoint TDVP (two-site except q=1)."""
+    return _evolve_protocol_mpo(
+        integrator="tdvp",
+        h0_terms=h0_terms,
+        h1_terms=h1_terms,
+        cd_factorization=cd_factorization,
+        total_time=total_time,
+        steps=steps,
+        cd_labels=cd_labels,
+        protocol=protocol,
+        schedule=schedule,
+        order=order,
+        initial_state=initial_state,
+        ground_bitstring=ground_bitstring,
+        mps_max_bond=mps_max_bond,
+        mps_cutoff=mps_cutoff,
+        mpo_max_bond=mpo_max_bond,
+        mpo_cutoff=mpo_cutoff,
+        lanczos_max=lanczos_max,
+        mpo_workspace_cap_bytes=mpo_workspace_cap_bytes,
+    )
+
+
+def evolve_protocol_expm_mpo(**kwargs: Any) -> tuple[Any, dict[str, object]]:
+    """Run the same midpoint MPO protocol with TeNPy's ExpMPO comparison engine."""
+    kwargs.setdefault("cd_labels", ())
+    kwargs.setdefault("protocol", None)
+    kwargs.setdefault("schedule", None)
+    kwargs.setdefault("order", None)
+    kwargs.setdefault("initial_state", None)
+    kwargs.setdefault("ground_bitstring", None)
+    kwargs.setdefault("lanczos_max", 20)
+    kwargs.setdefault("mpo_workspace_cap_bytes", _DEFAULT_MPO_WORKSPACE_CAP_BYTES)
+    return _evolve_protocol_mpo(integrator="expm_mpo", **kwargs)
+
+
+def dense_midpoint_evolution(
+    h0_terms: Sequence[tuple[str, complex]],
+    h1_terms: Sequence[tuple[str, complex]],
+    *,
+    total_time: float = 1.0,
+    steps: int = 128,
+    cd_labels: Sequence[str] = (),
+    cd_factorization: TemporalFactorization | None = None,
+    protocol: str | None = None,
+    schedule: Any | None = None,
+    order: Sequence[int] | None = None,
+    initial_state: Sequence[object] | None = None,
+) -> np.ndarray:
+    """Test-only dense midpoint reference for systems with at most four qubits."""
+    n_qubits = _protocol_n_qubits(h0_terms, h1_terms)
+    _validate_dense_helper_size(n_qubits)
+    normalized_order = tuple(range(n_qubits)) if order is None else _validate_order(order, n_qubits=n_qubits)
+    resolved_protocol, factorization, resolved_cd_labels = _resolve_protocol_factorization(
+        protocol=protocol,
+        cd_factorization=cd_factorization,
+        cd_labels=cd_labels,
+        h0_terms=h0_terms,
+        h1_terms=h1_terms,
+        total_time=total_time,
+        steps=steps,
+        schedule=schedule,
+    )
+    chain_initial, _ = _chain_initial_state(initial_state, normalized_order)
+    state = _dense_product_state(chain_initial)
+    dt = _validate_evolution_parameters(total_time, steps)
+    for step in range(int(steps)):
+        tau = (step + 0.5) / int(steps)
+        lam, _ = _schedule_values(schedule, tau, total_time)
+        coefficients = _temporal_mode_values(factorization, tau)
+        terms = _protocol_terms_at_time(
+            h0_terms, h1_terms, lam, resolved_cd_labels, factorization, coefficients, resolved_protocol
+        )
+        chain_terms = [(permute_pauli_label(label, normalized_order), value) for label, value in terms]
+        hamiltonian = dense_pauli_sum(chain_terms)
+        if not np.allclose(hamiltonian, hamiltonian.conj().T, atol=1.0e-10):
+            raise ValueError("Midpoint Hamiltonian is not Hermitian.")
+        eigenvalues, eigenvectors = np.linalg.eigh(hamiltonian)
+        state = (eigenvectors * np.exp(-1.0j * dt * eigenvalues)) @ (eigenvectors.conj().T @ state)
+    return state
+
+
+def state_overlap_dense(state: Any, dense_state: np.ndarray) -> complex:
+    """Return an MPS/dense-state overlap only for q <= 4 test references."""
+    _validate_dense_helper_size(int(state.L))
+    vector = _mps_to_dense_statevector(state)
+    reference = np.asarray(dense_state, dtype=np.complex128).reshape(-1)
+    if vector.shape != reference.shape:
+        raise ValueError("Dense reference state has incompatible dimension.")
+    return np.vdot(vector, reference)
+
+
 def _require_tenpy() -> tuple[Any, Any, Any, Any, Any]:
     try:
         from tenpy.linalg import np_conserved as npc
@@ -1750,6 +2000,621 @@ def _require_tenpy() -> tuple[Any, Any, Any, Any, Any]:
             "TeNPy is required for MPO operations; install the tensor-network optional dependency."
         ) from error
     return SpinHalfSite, TermList, MPOGraph, MPO, npc
+
+
+def _evolve_protocol_mpo(
+    *,
+    integrator: str,
+    h0_terms: Sequence[tuple[str, complex]],
+    h1_terms: Sequence[tuple[str, complex]],
+    cd_factorization: TemporalFactorization | None,
+    total_time: float,
+    steps: int,
+    cd_labels: Sequence[str],
+    protocol: str | None,
+    schedule: Any | None,
+    order: Sequence[int] | None,
+    initial_state: Sequence[object] | None,
+    ground_bitstring: str | None,
+    mps_max_bond: int,
+    mps_cutoff: float,
+    mpo_max_bond: int,
+    mpo_cutoff: float,
+    lanczos_max: int,
+    mpo_workspace_cap_bytes: int,
+) -> tuple[Any, dict[str, object]]:
+    n_qubits = _protocol_n_qubits(h0_terms, h1_terms)
+    dt = _validate_evolution_parameters(total_time, steps)
+    if integrator not in {"tdvp", "expm_mpo"}:
+        raise ValueError("integrator must be 'tdvp' or 'expm_mpo'.")
+    if int(mps_max_bond) < 1 or int(mpo_max_bond) < 1 or int(lanczos_max) < 1:
+        raise ValueError("Bond and Lanczos limits must be positive.")
+    if not np.isfinite(mps_cutoff) or float(mps_cutoff) < 0.0:
+        raise ValueError("mps_cutoff must be finite and nonnegative.")
+    if not np.isfinite(mpo_cutoff) or float(mpo_cutoff) < 0.0:
+        raise ValueError("mpo_cutoff must be finite and nonnegative.")
+    normalized_order = tuple(range(n_qubits)) if order is None else _validate_order(order, n_qubits=n_qubits)
+    resolved_protocol, factorization, resolved_cd_labels = _resolve_protocol_factorization(
+        protocol=protocol,
+        cd_factorization=cd_factorization,
+        cd_labels=cd_labels,
+        h0_terms=h0_terms,
+        h1_terms=h1_terms,
+        total_time=total_time,
+        steps=steps,
+        schedule=schedule,
+    )
+    factor_values = (
+        factorization.temporal_factors
+        if factorization is not None
+        else np.empty((int(steps) + 1, 0), dtype=np.float64)
+    )
+    mode_values = (
+        factorization.static_modes
+        if factorization is not None
+        else np.empty((0, 0), dtype=np.float64)
+    )
+    prepared = prepare_tdvp_operators(
+        labels=resolved_cd_labels,
+        static_modes=mode_values,
+        temporal_factors=factor_values,
+        n_qubits=n_qubits,
+        order=normalized_order,
+        mpo_max_bond=int(mpo_max_bond),
+        mpo_cutoff=float(mpo_cutoff),
+        h0_terms=h0_terms,
+        h1_terms=h1_terms,
+        temporal_factorization=factorization,
+        mpo_workspace_cap_bytes=mpo_workspace_cap_bytes,
+    )
+    chain_initial, original_initial = _chain_initial_state(initial_state, normalized_order)
+    state = _make_product_mps(prepared.sites, chain_initial)
+    state._agp_qubit_order = normalized_order
+    chain_ground, original_ground = _chain_ground_bitstring(ground_bitstring, normalized_order)
+    base_diagnostics: dict[str, object] = {
+        "status": prepared.diagnostics["status"],
+        "integrator": integrator,
+        "protocol": resolved_protocol,
+        "steps": int(steps),
+        "completed_steps": 0,
+        "total_time": float(total_time),
+        "dt": dt,
+        "temporal_rank": 0 if factorization is None else factorization.rank,
+        "evaluated_cd_terms": len(resolved_cd_labels),
+        "static_mpo_bonds": prepared.diagnostics["static_mpo_bonds"],
+        "dynamic_mpo_peak_bond": 1,
+        "dynamic_mpo_discarded_weight": 0.0,
+        "operator_build_seconds": 0.0,
+        "evolution_seconds": 0.0,
+        "truncation_error": 0.0,
+        "norm_drift": 0.0,
+        "peak_mps_bond": _mps_peak_bond(state),
+        "final_mps_bond": _mps_peak_bond(state),
+        "resource_statuses": {
+            "static_mpo_compression": prepared.diagnostics["status"],
+            "dynamic_mpo_assembly": "not_tested",
+        },
+        "initial_state_original": original_initial,
+        "initial_state_chain": [original_initial[site] for site in normalized_order],
+        "ground_bitstring_original": original_ground,
+        "ground_bitstring_chain": chain_ground,
+        "midpoint_lambdas": [],
+        "ground_fidelity_status": "not tested" if chain_ground is None else "pending",
+    }
+    if prepared.diagnostics["status"] != "ok":
+        base_diagnostics["status"] = "not_feasible"
+        base_diagnostics["ground_fidelity_status"] = "not tested"
+        return state, base_diagnostics
+
+    evolution_start = time.perf_counter()
+    operator_build_seconds = 0.0
+    truncation_error = 0.0
+    peak_bond = _mps_peak_bond(state)
+    dynamic_peak_bond = 1
+    midpoint_lambdas: list[float] = []
+    for step in range(int(steps)):
+        tau = (step + 0.5) / int(steps)
+        lam, _ = _schedule_values(schedule, tau, total_time)
+        midpoint_lambdas.append(lam)
+        temporal_values = _temporal_mode_values(factorization, tau)
+        build_start = time.perf_counter()
+        dynamic_mpo = _assemble_dynamic_mpo(
+            prepared,
+            h0_coefficient=1.0 - lam,
+            h1_coefficient=lam,
+            cd_mode_coefficients=temporal_values,
+            workspace_cap_bytes=mpo_workspace_cap_bytes,
+            expm_compatible=integrator == "expm_mpo",
+        )
+        operator_build_seconds += time.perf_counter() - build_start
+        dynamic_peak_bond = max(dynamic_peak_bond, max(_mpo_bonds(dynamic_mpo), default=1))
+        if integrator == "tdvp":
+            engine, engine_name = _make_tdvp_engine(
+                state,
+                dynamic_mpo,
+                dt=dt,
+                mps_max_bond=int(mps_max_bond),
+                mps_cutoff=float(mps_cutoff),
+                lanczos_max=int(lanczos_max),
+            )
+        else:
+            engine, engine_name = _make_expm_engine(
+                state,
+                dynamic_mpo,
+                dt=dt,
+                mps_max_bond=int(mps_max_bond),
+                mps_cutoff=float(mps_cutoff),
+            )
+        # TeNPy 1.1.0's run() logging assumes at least one MPS bond; evolve directly
+        # so the explicit q=1 single-site path remains supported.
+        engine.run_evolution(1, dt)
+        state = engine.psi
+        truncation_error += float(engine.trunc_err.eps)
+        peak_bond = max(peak_bond, _mps_peak_bond(state))
+
+    evolution_seconds = time.perf_counter() - evolution_start
+    base_diagnostics.update(
+        {
+            "status": "ok",
+            "completed_steps": int(steps),
+            "tdvp_engine": engine_name if integrator == "tdvp" else None,
+            "midpoint_lambdas": midpoint_lambdas,
+            "operator_build_seconds": operator_build_seconds,
+            "evolution_seconds": evolution_seconds,
+            "truncation_error": truncation_error,
+            "norm_drift": abs(float(abs(state.norm) ** 2) - 1.0),
+            "peak_mps_bond": peak_bond,
+            "final_mps_bond": _mps_peak_bond(state),
+            "dynamic_mpo_peak_bond": dynamic_peak_bond,
+            "resource_statuses": {
+                "static_mpo_compression": "ok",
+                "dynamic_mpo_assembly": "ok",
+            },
+        }
+    )
+    base_diagnostics.update(_final_mpo_metrics(state, prepared.h1_exact_mpo, chain_ground))
+    return state, base_diagnostics
+
+
+def _resolve_protocol_factorization(
+    *,
+    protocol: str | None,
+    cd_factorization: TemporalFactorization | None,
+    cd_labels: Sequence[str],
+    h0_terms: Sequence[tuple[str, complex]],
+    h1_terms: Sequence[tuple[str, complex]],
+    total_time: float,
+    steps: int,
+    schedule: Any | None,
+) -> tuple[str, TemporalFactorization | None, tuple[str, ...]]:
+    resolved = protocol or ("learned" if cd_factorization is not None else "no_cd")
+    if resolved not in {"no_cd", "learned", "nested_l1"}:
+        raise ValueError("protocol must be 'no_cd', 'learned', or 'nested_l1'.")
+    if resolved == "no_cd":
+        if cd_factorization is not None or cd_labels:
+            raise ValueError("no_cd does not accept learned CD modes or labels.")
+        return resolved, None, ()
+    if resolved == "learned":
+        if cd_factorization is None or not cd_labels:
+            raise ValueError("learned evolution requires cd_factorization and cd_labels.")
+        if cd_factorization.static_modes.shape[1] != len(cd_labels):
+            raise ValueError("cd_labels must match the learned factorization term count.")
+        return resolved, cd_factorization, tuple(cd_labels)
+    if cd_factorization is not None or cd_labels:
+        raise ValueError("nested_l1 constructs its own full direct-CD factorization.")
+    factorization, labels = _factor_nested_l1_direct_cd(
+        h0_terms, h1_terms, total_time=total_time, steps=steps, schedule=schedule
+    )
+    return resolved, factorization, labels
+
+
+def _factor_nested_l1_direct_cd(
+    h0_terms: Sequence[tuple[str, complex]],
+    h1_terms: Sequence[tuple[str, complex]],
+    *,
+    total_time: float,
+    steps: int,
+    schedule: Any | None,
+) -> tuple[TemporalFactorization | None, tuple[str, ...]]:
+    tau = np.linspace(0.0, 1.0, int(steps) + 1)
+    samples: list[dict[str, complex]] = []
+    all_labels: set[str] = set()
+    for value in tau:
+        lam, dlam_dt = _schedule_values(schedule, float(value), total_time)
+        terms = _nested_l1_direct_cd_terms(h0_terms, h1_terms, lam, dlam_dt)
+        samples.append(terms)
+        all_labels.update(terms)
+    if not all_labels:
+        return None, ()
+    labels = tuple(sorted(all_labels))
+    coefficients = np.empty((tau.size, len(labels)), dtype=np.float64)
+    for row, terms in enumerate(samples):
+        for column, label in enumerate(labels):
+            value = terms.get(label, 0.0)
+            if abs(value.imag) > 1.0e-10:
+                raise ValueError("Nested l=1 construction produced a non-Hermitian coefficient.")
+            coefficients[row, column] = float(value.real)
+    return factor_direct_cd_coefficients(tau, coefficients, retained_norm=1.0), labels
+
+
+def _nested_l1_direct_cd_terms(
+    h0_terms: Sequence[tuple[str, complex]],
+    h1_terms: Sequence[tuple[str, complex]],
+    lam: float,
+    dlam_dt: float,
+) -> dict[str, complex]:
+    h_ad = _combine_pauli_terms(((1.0 - lam, h0_terms), (lam, h1_terms)))
+    d_h = _combine_pauli_terms(((1.0, h1_terms), (-1.0, h0_terms)))
+    candidate = {label: 1.0j * value for label, value in _commutator_term_maps(h_ad, d_h).items()}
+    if not candidate:
+        return {}
+    direction = _commutator_term_maps(candidate, h_ad)
+    denominator = math.fsum(abs(value) ** 2 for value in direction.values())
+    if denominator <= 1.0e-24:
+        return {}
+    numerator = sum(np.conjugate(value) * (1.0j * d_h.get(label, 0.0)) for label, value in direction.items())
+    alpha = float(np.real(numerator) / denominator)
+    return {label: dlam_dt * alpha * value for label, value in candidate.items()}
+
+
+def _combine_pauli_terms(
+    weighted_terms: Sequence[tuple[float, Sequence[tuple[str, complex]]]]
+) -> dict[str, complex]:
+    contributions: dict[str, list[complex]] = {}
+    for scale, terms in weighted_terms:
+        for label, coefficient in terms:
+            value = _finite_complex(coefficient) * float(scale)
+            contributions.setdefault(label, []).append(value)
+    return {
+        label: value
+        for label, values in contributions.items()
+        if abs(value := _stable_complex_sum(values)) > 0.0
+    }
+
+
+def _commutator_term_maps(
+    left: dict[str, complex], right: dict[str, complex]
+) -> dict[str, complex]:
+    contributions: dict[str, list[complex]] = {}
+    for left_label, left_value in left.items():
+        for right_label, right_value in right.items():
+            phase, label = _multiply_pauli_labels(left_label, right_label)
+            reverse_phase, reverse_label = _multiply_pauli_labels(right_label, left_label)
+            if label != reverse_label:
+                raise RuntimeError("Pauli multiplication returned inconsistent labels.")
+            coefficient = left_value * right_value * (phase - reverse_phase)
+            if coefficient != 0.0:
+                contributions.setdefault(label, []).append(coefficient)
+    return {
+        label: value
+        for label, values in contributions.items()
+        if abs(value := _stable_complex_sum(values)) > 0.0
+    }
+
+
+def _protocol_terms_at_time(
+    h0_terms: Sequence[tuple[str, complex]],
+    h1_terms: Sequence[tuple[str, complex]],
+    lam: float,
+    cd_labels: Sequence[str],
+    factorization: TemporalFactorization | None,
+    mode_coefficients: np.ndarray,
+    protocol: str,
+) -> list[tuple[str, complex]]:
+    terms = _combine_pauli_terms(((1.0 - lam, h0_terms), (lam, h1_terms)))
+    if protocol != "no_cd":
+        if factorization is None:
+            raise RuntimeError("Counterdiabatic protocol is missing its factorization.")
+        if mode_coefficients.shape != (factorization.rank,):
+            raise ValueError("Temporal-mode interpolation did not return every declared mode.")
+        for column, label in enumerate(cd_labels):
+            value = float(np.dot(mode_coefficients, factorization.static_modes[:, column]))
+            terms[label] = terms.get(label, 0.0) + value
+    return [(label, coefficient) for label, coefficient in terms.items() if coefficient != 0.0]
+
+
+def _temporal_mode_values(
+    factorization: TemporalFactorization | None, tau: float
+) -> np.ndarray:
+    if factorization is None:
+        return np.empty(0, dtype=np.float64)
+    if not 0.0 <= float(tau) <= 1.0:
+        raise ValueError("Midpoint tau must be in [0, 1].")
+    return np.asarray(
+        [np.interp(float(tau), factorization.tau, factorization.temporal_factors[:, mode])
+         for mode in range(factorization.rank)],
+        dtype=np.float64,
+    )
+
+
+def _schedule_values(schedule: Any | None, tau: float, total_time: float) -> tuple[float, float]:
+    if schedule is None:
+        lam = float(np.sin(0.5 * np.pi * tau) ** 2)
+        derivative = float(0.5 * np.pi / total_time * np.sin(np.pi * tau))
+    else:
+        result = schedule(float(tau), float(total_time))
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise ValueError("schedule must return (lambda, d_lambda_dt).")
+        lam, derivative = (float(result[0]), float(result[1]))
+    if not np.isfinite(lam) or not np.isfinite(derivative):
+        raise ValueError("schedule returned non-finite values.")
+    return lam, derivative
+
+
+def _assemble_dynamic_mpo(
+    prepared: PreparedTDVPOperators,
+    *,
+    h0_coefficient: float,
+    h1_coefficient: float,
+    cd_mode_coefficients: np.ndarray,
+    workspace_cap_bytes: int,
+    expm_compatible: bool = False,
+) -> Any:
+    if prepared.h0_mpo is None or prepared.h1_mpo is None:
+        raise RuntimeError("Time-dependent evolution requires compressed H_initial and H_final MPOs.")
+    if cd_mode_coefficients.shape != (len(prepared.cd_mode_mpos),):
+        raise ValueError("Dynamic assembly requires one coefficient for every declared temporal mode.")
+    if expm_compatible:
+        contributions: dict[str, list[complex]] = {}
+        for scale, mpo in zip(
+            [h0_coefficient, h1_coefficient, *cd_mode_coefficients.tolist()],
+            [prepared.h0_mpo, prepared.h1_mpo, *prepared.cd_mode_mpos],
+            strict=True,
+        ):
+            try:
+                pauli_terms = mpo._agp_pauli_terms
+            except AttributeError as error:
+                raise RuntimeError("ExpMPO requires Pauli provenance for every full-support component.") from error
+            for label, coefficient in pauli_terms:
+                contributions.setdefault(label, []).append(float(scale) * coefficient)
+        exact_terms = [
+            (label, _stable_complex_sum(values))
+            for label, values in contributions.items()
+        ]
+        dynamic, _ = build_exact_pauli_mpo(
+            exact_terms,
+            n_qubits=len(prepared.sites),
+            order=tuple(range(len(prepared.sites))),
+        )
+        return dynamic
+    components = [prepared.h0_mpo, prepared.h1_mpo, *prepared.cd_mode_mpos]
+    coefficients = [h0_coefficient, h1_coefficient, *cd_mode_coefficients.tolist()]
+    component_tensors = [_effective_finite_mpo_tensors(mpo) for mpo in components]
+    required_bytes = sum(
+        max(tensors[site].shape[0], 1) * max(tensors[site].shape[1], 1) * 4 * _COMPLEX_BYTES
+        for tensors in component_tensors for site in range(len(tensors))
+    )
+    if required_bytes > int(workspace_cap_bytes):
+        raise MemoryError("Dynamic MPO assembly exceeds mpo_workspace_cap_bytes.")
+    _, _, _, MPO, npc = _require_tenpy()
+    tensors: list[np.ndarray] = []
+    length = len(prepared.sites)
+    for site in range(length):
+        local = [items[site] for items in component_tensors]
+        if length == 1:
+            tensors.append(sum(float(scale) * item for scale, item in zip(coefficients, local, strict=True)))
+        elif site == 0:
+            tensors.append(np.concatenate(
+                [float(scale) * item for scale, item in zip(coefficients, local, strict=True)], axis=1
+            ))
+        elif site == length - 1:
+            tensors.append(np.concatenate(local, axis=0))
+        else:
+            left_dim = sum(item.shape[0] for item in local)
+            right_dim = sum(item.shape[1] for item in local)
+            block = np.zeros((left_dim, right_dim, 2, 2), dtype=np.complex128)
+            left = right = 0
+            for item in local:
+                next_left = left + item.shape[0]
+                next_right = right + item.shape[1]
+                block[left:next_left, right:next_right] = item
+                left, right = next_left, next_right
+            tensors.append(block)
+    return _mpo_from_effective_tensors(MPO, npc, sites=prepared.sites, tensors=tensors)
+
+
+def _make_tdvp_engine(
+    state: Any,
+    mpo: Any,
+    *,
+    dt: float,
+    mps_max_bond: int,
+    mps_cutoff: float,
+    lanczos_max: int,
+) -> tuple[Any, str]:
+    from tenpy.algorithms.tdvp import SingleSiteTDVPEngine, TwoSiteTDVPEngine
+
+    engine_class = SingleSiteTDVPEngine if int(state.L) == 1 else TwoSiteTDVPEngine
+    name = "single_site_tdvp_l1" if int(state.L) == 1 else "two_site_tdvp"
+    options = {
+        "dt": dt,
+        "N_steps": 1,
+        "trunc_params": {"chi_max": mps_max_bond, "svd_min": mps_cutoff},
+        "lanczos_params": {"N_max": lanczos_max},
+    }
+    engine = engine_class(state, _static_mpo_model(mpo), options)
+    _mark_engine_options_consumed(engine)
+    return engine, name
+
+
+def _make_expm_engine(
+    state: Any,
+    mpo: Any,
+    *,
+    dt: float,
+    mps_max_bond: int,
+    mps_cutoff: float,
+) -> tuple[Any, str]:
+    from tenpy.algorithms.mpo_evolution import TimeDependentExpMPOEvolution
+
+    options = {
+        "dt": dt,
+        "N_steps": 1,
+        "trunc_params": {"chi_max": mps_max_bond, "svd_min": mps_cutoff},
+        "compression_method": "zip_up",
+        "approximation": "I",
+        "order": 2,
+    }
+    engine = TimeDependentExpMPOEvolution(state, _frozen_time_mpo_model(mpo), options)
+    _mark_engine_options_consumed(engine)
+    return engine, "time_dependent_expm_mpo"
+
+
+def _mark_engine_options_consumed(engine: Any) -> None:
+    """Avoid TeNPy 1.1.0 false unused-option warnings when stepping manually."""
+    engine.options.get("dt", None)
+    engine.options.get("N_steps", None)
+    truncation = engine.options.subconfig("trunc_params")
+    truncation.get("chi_max", None)
+    truncation.get("svd_min", None)
+
+
+def _static_mpo_model(mpo: Any) -> Any:
+    from tenpy.models.lattice import Lattice
+    from tenpy.models.model import MPOModel
+
+    lattice = Lattice([1], list(mpo.sites), bc="open", bc_MPS="finite")
+    return MPOModel(lattice, mpo)
+
+
+def _frozen_time_mpo_model(mpo: Any) -> Any:
+    from tenpy.models.lattice import Lattice
+    from tenpy.models.model import MPOModel
+    from tenpy.tools.params import asConfig
+
+    class FrozenTimeMPOModel(MPOModel):
+        def __init__(self, hamiltonian: Any):
+            lattice = Lattice([1], list(hamiltonian.sites), bc="open", bc_MPS="finite")
+            super().__init__(lattice, hamiltonian)
+            self.options = asConfig({"time": 0.0}, "FrozenTimeMPOModel")
+
+        def update_time_parameter(self, new_time: float) -> "FrozenTimeMPOModel":
+            self.options["time"] = new_time
+            return self
+
+    return FrozenTimeMPOModel(mpo)
+
+
+def _protocol_n_qubits(
+    h0_terms: Sequence[tuple[str, complex]], h1_terms: Sequence[tuple[str, complex]]
+) -> int:
+    candidates = [label for terms in (h0_terms, h1_terms) for label, _ in terms]
+    if not candidates:
+        raise ValueError("At least one H_initial or H_final Pauli term is required.")
+    n_qubits = len(candidates[0])
+    _validate_n_qubits(n_qubits)
+    for label in candidates:
+        _validate_pauli_label(label, n_qubits=n_qubits)
+    return n_qubits
+
+
+def _validate_evolution_parameters(total_time: float, steps: int) -> float:
+    if not np.isfinite(total_time) or float(total_time) <= 0.0:
+        raise ValueError("total_time must be finite and positive.")
+    if isinstance(steps, bool) or not isinstance(steps, Integral) or int(steps) < 1:
+        raise ValueError("steps must be a positive integer.")
+    return float(total_time) / int(steps)
+
+
+def _chain_initial_state(
+    initial_state: Sequence[object] | None, order: Sequence[int]
+) -> tuple[list[object], list[object]]:
+    n_qubits = len(order)
+    original = list(initial_state) if initial_state is not None else ["+"] * n_qubits
+    if len(original) != n_qubits:
+        raise ValueError("initial_state must specify one local state per original qubit.")
+    chain = [original[site] for site in order]
+    return [_normalize_local_state(value) for value in chain], original
+
+
+def _normalize_local_state(value: object) -> object:
+    if value == "0":
+        return "up"
+    if value == "1":
+        return "down"
+    if value == "+":
+        return np.asarray([1.0, 1.0], dtype=np.complex128) / np.sqrt(2.0)
+    if value == "-":
+        return np.asarray([1.0, -1.0], dtype=np.complex128) / np.sqrt(2.0)
+    if isinstance(value, str):
+        if value not in {"up", "down"}:
+            raise ValueError("initial_state strings must be 0, 1, +, -, up, or down.")
+        return value
+    array = np.asarray(value, dtype=np.complex128)
+    if array.shape != (2,) or not np.all(np.isfinite(array)) or np.linalg.norm(array) == 0.0:
+        raise ValueError("Each initial_state vector must be a finite nonzero two-component vector.")
+    return array / np.linalg.norm(array)
+
+
+def _chain_ground_bitstring(
+    ground_bitstring: str | None, order: Sequence[int]
+) -> tuple[str | None, str | None]:
+    if ground_bitstring is None:
+        return None, None
+    if len(ground_bitstring) != len(order) or any(bit not in "01" for bit in ground_bitstring):
+        raise ValueError("ground_bitstring must contain one binary digit per original qubit.")
+    return "".join(ground_bitstring[site] for site in order), ground_bitstring
+
+
+def _make_product_mps(sites: Sequence[Any], states: Sequence[object]) -> Any:
+    from tenpy.networks.mps import MPS
+
+    return MPS.from_product_state(
+        list(sites), list(states), bc="finite", dtype=np.complex128, unit_cell_width=len(sites)
+    )
+
+
+def _dense_product_state(states: Sequence[object]) -> np.ndarray:
+    vector = np.asarray([1.0 + 0.0j])
+    for state in states:
+        local = state
+        if isinstance(local, str):
+            local = np.asarray([1.0, 0.0] if local == "up" else [0.0, 1.0], dtype=np.complex128)
+        vector = np.kron(vector, local)
+    return vector
+
+
+def _mps_to_dense_statevector(state: Any) -> np.ndarray:
+    theta = state.get_theta(0, int(state.L)).to_ndarray()
+    vector = np.asarray(theta, dtype=np.complex128)[0, ..., 0].reshape(-1)
+    return complex(state.norm) * vector
+
+
+def _mps_peak_bond(state: Any) -> int:
+    return max((int(value) for value in state.chi), default=1)
+
+
+def _mpo_bonds(mpo: Any) -> tuple[int, ...]:
+    return tuple(int(value) for value in mpo.chi)
+
+
+def _final_mpo_metrics(state: Any, h1_exact_mpo: Any | None, ground_chain: str | None) -> dict[str, object]:
+    metrics: dict[str, object] = {
+        "final_energy_status": "not tested",
+        "ground_fidelity_status": "not tested" if ground_chain is None else "not_feasible",
+    }
+    if h1_exact_mpo is not None:
+        try:
+            energy = sum(
+                coefficient * _mps_pauli_expectation(state, label)
+                for label, coefficient in h1_exact_mpo._agp_pauli_terms
+            )
+            if abs(energy.imag) > 1.0e-9:
+                raise ValueError("Exact final MPO produced a non-real energy expectation.")
+            metrics.update({"final_energy": float(energy.real), "final_energy_status": "ok"})
+        except (AttributeError, ValueError):
+            metrics["final_energy_status"] = "not_feasible"
+    if ground_chain is not None:
+        target = _make_product_mps(
+            state.sites, ["up" if bit == "0" else "down" for bit in ground_chain]
+        )
+        metrics.update(
+            {
+                "ground_fidelity": float(abs(state.overlap(target, ignore_form=True)) ** 2),
+                "ground_fidelity_status": "ok",
+            }
+        )
+    return metrics
 
 
 def _effective_finite_mpo_tensors(mpo: Any) -> list[np.ndarray]:
@@ -1987,7 +2852,7 @@ def _real_overlap(left: Any, right: Any) -> float:
 
 def _validate_dense_helper_size(n_qubits: int) -> None:
     if n_qubits < 1 or n_qubits > 4:
-        raise ValueError("Dense MPO test helpers are restricted to q <= 4.")
+        raise ValueError("Dense MPO test helpers are restricted to q <= 4 (at most four qubits).")
 
 
 def _finite_complex(coefficient: complex) -> complex:

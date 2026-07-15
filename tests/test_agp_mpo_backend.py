@@ -1019,6 +1019,233 @@ class MPOCompressionTests(unittest.TestCase):
                 compress_mpo_hilbert_schmidt(exact, max_bond=2, cutoff=cutoff)
 
 
+@unittest.skipUnless(_TENPY_AVAILABLE, "TeNPy tensor-network extra is not installed")
+class TDVPEvolutionTests(unittest.TestCase):
+    def _single_qubit_settings(self) -> dict[str, object]:
+        return {
+            "h0_terms": [("X", -1.0)],
+            "h1_terms": [("Z", -1.0)],
+            "cd_factorization": None,
+            "total_time": 1.0,
+            "steps": 64,
+            "mps_max_bond": 8,
+            "mps_cutoff": 1.0e-13,
+            "mpo_max_bond": 16,
+            "mpo_cutoff": 1.0e-13,
+        }
+
+    def test_tdvp_no_cd_matches_dense_midpoint_evolution(self) -> None:
+        settings = self._single_qubit_settings()
+        state, diagnostics = mpo_backend.evolve_protocol_tdvp(**settings)
+        reference = mpo_backend.dense_midpoint_evolution(
+            settings["h0_terms"],
+            settings["h1_terms"],
+            total_time=1.0,
+            steps=4096,
+        )
+
+        self.assertGreater(
+            abs(mpo_backend.state_overlap_dense(state, reference)) ** 2,
+            1.0 - 1.0e-7,
+        )
+        self.assertEqual(diagnostics["steps"], 64)
+        self.assertEqual(diagnostics["completed_steps"], 64)
+        self.assertEqual(diagnostics["integrator"], "tdvp")
+        self.assertEqual(diagnostics["tdvp_engine"], "single_site_tdvp_l1")
+        self.assertEqual(diagnostics["status"], "ok")
+        for key in (
+            "norm_drift",
+            "truncation_error",
+            "peak_mps_bond",
+            "final_mps_bond",
+            "static_mpo_bonds",
+            "dynamic_mpo_peak_bond",
+            "operator_build_seconds",
+            "evolution_seconds",
+            "resource_statuses",
+        ):
+            self.assertIn(key, diagnostics)
+
+    def test_prepare_tdvp_operators_includes_every_mode_and_term(self) -> None:
+        result = mpo_backend.prepare_tdvp_operators(
+            labels=("XI", "YI", "XZ"),
+            static_modes=np.asarray([[1.0, 2.0, 3.0], [0.5, 0.25, -0.1]]),
+            temporal_factors=np.ones((5, 2)),
+            n_qubits=2,
+            order=(0, 1),
+            mpo_max_bond=16,
+            mpo_cutoff=1.0e-13,
+        )
+
+        self.assertEqual(result.diagnostics["learned_input_terms"], 3)
+        self.assertEqual(result.diagnostics["temporal_rank"], 2)
+        self.assertEqual(result.diagnostics["support_fraction"], 1.0)
+        self.assertEqual(result.diagnostics["full_support_status"], "pass")
+        self.assertEqual(len(result.cd_mode_mpos), 2)
+        self.assertEqual(
+            len(result.diagnostics["static_mpo_compression"]["cd_modes"]),
+            2,
+        )
+        self.assertTrue(
+            all(
+                item["status"] == "ok"
+                for item in result.diagnostics["static_mpo_compression"]["cd_modes"]
+            )
+        )
+
+    def test_expm_mpo_matches_tdvp_on_one_and_two_qubits(self) -> None:
+        cases = (
+            self._single_qubit_settings(),
+            {
+                "h0_terms": [("XI", -1.0), ("IX", -1.0)],
+                "h1_terms": [("ZI", -0.7), ("IZ", -1.1), ("ZZ", 0.2)],
+                "cd_factorization": None,
+                "total_time": 0.5,
+                "steps": 48,
+                "mps_max_bond": 8,
+                "mps_cutoff": 1.0e-13,
+                "mpo_max_bond": 16,
+                "mpo_cutoff": 1.0e-13,
+            },
+        )
+
+        for settings in cases:
+            with self.subTest(n_qubits=len(settings["h0_terms"][0][0])):
+                tdvp_state, tdvp_diagnostics = mpo_backend.evolve_protocol_tdvp(
+                    **settings
+                )
+                expm_state, expm_diagnostics = mpo_backend.evolve_protocol_expm_mpo(
+                    **settings
+                )
+                self.assertGreater(
+                    abs(tdvp_state.overlap(expm_state)) ** 2,
+                    1.0 - 2.0e-6,
+                )
+                self.assertEqual(tdvp_diagnostics["status"], "ok")
+                self.assertEqual(expm_diagnostics["status"], "ok")
+                self.assertEqual(expm_diagnostics["integrator"], "expm_mpo")
+
+    def test_learned_and_nested_l1_paths_match_dense_midpoint_evolution(self) -> None:
+        h0 = [("XI", -1.0), ("IX", -0.8)]
+        h1 = [("ZI", -0.7), ("IZ", -1.1), ("ZZ", 0.15)]
+        tau = np.linspace(0.0, 1.0, 65)
+        direct_cd = np.stack(
+            [0.18 * np.sin(np.pi * tau), -0.11 * np.sin(2.0 * np.pi * tau)],
+            axis=1,
+        )
+        factorization = factor_direct_cd_coefficients(
+            tau,
+            direct_cd,
+            retained_norm=1.0 - 1.0e-14,
+        )
+        common = {
+            "h0_terms": h0,
+            "h1_terms": h1,
+            "total_time": 0.6,
+            "steps": 64,
+            "mps_max_bond": 8,
+            "mps_cutoff": 1.0e-13,
+            "mpo_max_bond": 32,
+            "mpo_cutoff": 1.0e-13,
+        }
+
+        learned_state, learned_diagnostics = mpo_backend.evolve_protocol_tdvp(
+            **common,
+            cd_labels=("YI", "IY"),
+            cd_factorization=factorization,
+            protocol="learned",
+        )
+        learned_reference = mpo_backend.dense_midpoint_evolution(
+            h0,
+            h1,
+            total_time=0.6,
+            steps=4096,
+            cd_labels=("YI", "IY"),
+            cd_factorization=factorization,
+            protocol="learned",
+        )
+        nested_state, nested_diagnostics = mpo_backend.evolve_protocol_tdvp(
+            **common,
+            cd_factorization=None,
+            protocol="nested_l1",
+        )
+        nested_reference = mpo_backend.dense_midpoint_evolution(
+            h0,
+            h1,
+            total_time=0.6,
+            steps=4096,
+            protocol="nested_l1",
+        )
+
+        self.assertGreater(
+            abs(mpo_backend.state_overlap_dense(learned_state, learned_reference)) ** 2,
+            1.0 - 2.0e-6,
+        )
+        self.assertGreater(
+            abs(mpo_backend.state_overlap_dense(nested_state, nested_reference)) ** 2,
+            1.0 - 2.0e-6,
+        )
+        self.assertEqual(learned_diagnostics["evaluated_cd_terms"], 2)
+        self.assertEqual(learned_diagnostics["temporal_rank"], 2)
+        self.assertEqual(nested_diagnostics["protocol"], "nested_l1")
+        self.assertGreater(nested_diagnostics["evaluated_cd_terms"], 0)
+
+    def test_schedule_factors_initial_state_and_ground_bits_use_midpoint_order(self) -> None:
+        schedule_calls: list[float] = []
+
+        def linear_schedule(tau: float, total_time: float) -> tuple[float, float]:
+            schedule_calls.append(tau)
+            return tau, 1.0 / total_time
+
+        state, diagnostics = mpo_backend.evolve_protocol_tdvp(
+            h0_terms=[("XI", -1.0), ("IZ", -0.25)],
+            h1_terms=[("ZI", -0.8), ("IZ", 0.4)],
+            cd_factorization=None,
+            protocol="no_cd",
+            schedule=linear_schedule,
+            total_time=0.2,
+            steps=4,
+            order=(1, 0),
+            initial_state=("0", "+"),
+            ground_bitstring="10",
+            mps_max_bond=8,
+            mps_cutoff=1.0e-13,
+            mpo_max_bond=16,
+            mpo_cutoff=1.0e-13,
+        )
+
+        self.assertEqual(schedule_calls, [0.125, 0.375, 0.625, 0.875])
+        self.assertEqual(diagnostics["midpoint_lambdas"], schedule_calls)
+        self.assertEqual(diagnostics["initial_state_original"], ["0", "+"])
+        self.assertEqual(diagnostics["initial_state_chain"], ["+", "0"])
+        self.assertEqual(diagnostics["ground_bitstring_original"], "10")
+        self.assertEqual(diagnostics["ground_bitstring_chain"], "01")
+        self.assertEqual(getattr(state, "_agp_qubit_order"), (1, 0))
+        self.assertEqual(diagnostics["ground_fidelity_status"], "ok")
+
+    def test_resource_failures_are_explicit_and_do_not_fallback(self) -> None:
+        state, diagnostics = mpo_backend.evolve_protocol_tdvp(
+            **self._single_qubit_settings(),
+            mpo_workspace_cap_bytes=1,
+        )
+
+        self.assertEqual(diagnostics["status"], "not_feasible")
+        self.assertEqual(diagnostics["completed_steps"], 0)
+        self.assertEqual(
+            diagnostics["resource_statuses"]["static_mpo_compression"],
+            "not_feasible",
+        )
+        self.assertIsNotNone(state)
+
+    def test_dense_evolution_helpers_reject_more_than_four_qubits(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at most four qubits"):
+            mpo_backend.dense_midpoint_evolution(
+                [("XIIII", -1.0)],
+                [("ZIIII", -1.0)],
+                steps=2,
+            )
+
+
 class LazyOptionalImportTests(unittest.TestCase):
     def test_module_imports_without_tenpy_and_mpo_call_fails_with_install_hint(self) -> None:
         root = Path(__file__).resolve().parents[1]
