@@ -111,9 +111,9 @@ def factor_direct_cd_coefficients(
         raise ValueError("direct-CD coefficient endpoint rows must be zero within endpoint_tolerance.")
 
     left, singular_values, right = np.linalg.svd(coefficient_array, full_matrices=False)
-    squared_singular_values = singular_values * singular_values
-    total_norm_sq = float(np.sum(squared_singular_values))
-    if total_norm_sq == 0.0:
+    relative_squared_singular_values = _relative_squared_values(singular_values)
+    total_relative_norm_sq = float(np.sum(relative_squared_singular_values))
+    if total_relative_norm_sq == 0.0:
         rank = 0
         rank_for_retained_norm = 0
         temporal_factors = np.empty((tau_array.size, 0), dtype=np.float64)
@@ -122,24 +122,29 @@ def factor_direct_cd_coefficients(
         rank_increase_reason = None
         column_retained_energy_fractions = np.ones(coefficient_array.shape[1], dtype=np.float64)
     else:
-        cumulative_norm_sq = np.cumsum(squared_singular_values)
+        cumulative_relative_norm_sq = np.cumsum(relative_squared_singular_values)
         rank_for_retained_norm = int(
-            np.searchsorted(cumulative_norm_sq, float(retained_norm) * total_norm_sq) + 1
+            np.searchsorted(
+                cumulative_relative_norm_sq, float(retained_norm) * total_relative_norm_sq
+            )
+            + 1
         )
         rank_for_retained_norm = min(rank_for_retained_norm, singular_values.size)
         while (
             rank_for_retained_norm < singular_values.size
-            and cumulative_norm_sq[rank_for_retained_norm - 1] / total_norm_sq < retained_norm
+            and cumulative_relative_norm_sq[rank_for_retained_norm - 1] / total_relative_norm_sq
+            < retained_norm
         ):
             rank_for_retained_norm += 1
 
-        source_energies = np.sum(coefficient_array * coefficient_array, axis=0)
-        nonzero_columns = source_energies > 0.0
+        source_scales = np.max(np.abs(coefficient_array), axis=0)
+        nonzero_columns = source_scales > 0.0
+        source_relative_energies = _scaled_column_squared_norms(coefficient_array, source_scales)
         rank = rank_for_retained_norm
         while rank < singular_values.size:
             reconstructed = left[:, :rank] @ (singular_values[:rank, None] * right[:rank, :])
             column_retained_energy_fractions = _column_retained_energy_fractions(
-                source_energies, reconstructed
+                reconstructed, source_scales, source_relative_energies
             )
             if np.all(
                 column_retained_energy_fractions[nonzero_columns]
@@ -150,10 +155,12 @@ def factor_direct_cd_coefficients(
 
         temporal_factors = left[:, :rank]
         static_modes = singular_values[:rank, None] * right[:rank, :]
-        retained_norm_fraction = float(cumulative_norm_sq[rank - 1] / total_norm_sq)
+        retained_norm_fraction = float(
+            cumulative_relative_norm_sq[rank - 1] / total_relative_norm_sq
+        )
         final_reconstruction = temporal_factors @ static_modes
         column_retained_energy_fractions = _column_retained_energy_fractions(
-            source_energies, final_reconstruction
+            final_reconstruction, source_scales, source_relative_energies
         )
         if not np.all(
             column_retained_energy_fractions[nonzero_columns]
@@ -323,14 +330,33 @@ def _finite_weight(coefficient: complex) -> float:
     return float(abs(value))
 
 
+def _relative_squared_values(values: np.ndarray) -> np.ndarray:
+    scale = float(np.max(np.abs(values)))
+    if scale == 0.0:
+        return np.zeros(values.shape, dtype=np.float64)
+    normalized = values / scale
+    return normalized * normalized
+
+
+def _scaled_column_squared_norms(values: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    squared_norms = np.zeros(scales.shape, dtype=np.float64)
+    nonzero_columns = scales > 0.0
+    normalized = values[:, nonzero_columns] / scales[nonzero_columns]
+    squared_norms[nonzero_columns] = np.sum(normalized * normalized, axis=0)
+    return squared_norms
+
+
 def _column_retained_energy_fractions(
-    source_energies: np.ndarray, reconstructed: np.ndarray
+    reconstructed: np.ndarray,
+    source_scales: np.ndarray,
+    source_relative_energies: np.ndarray,
 ) -> np.ndarray:
-    fractions = np.ones(source_energies.shape, dtype=np.float64)
-    nonzero_columns = source_energies > 0.0
-    reconstructed_energies = np.sum(reconstructed * reconstructed, axis=0)
+    fractions = np.ones(source_scales.shape, dtype=np.float64)
+    nonzero_columns = source_scales > 0.0
+    reconstructed_relative_energies = _scaled_column_squared_norms(reconstructed, source_scales)
     fractions[nonzero_columns] = (
-        reconstructed_energies[nonzero_columns] / source_energies[nonzero_columns]
+        reconstructed_relative_energies[nonzero_columns]
+        / source_relative_energies[nonzero_columns]
     )
     return fractions
 

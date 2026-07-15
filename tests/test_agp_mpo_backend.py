@@ -73,6 +73,34 @@ class TemporalFactorizationTests(unittest.TestCase):
         )
         np.testing.assert_allclose(result.column_retained_energy_fractions, np.ones(2), atol=1.0e-12)
 
+    def test_underflow_scale_column_remains_nonzero_and_forces_energy_retention(self) -> None:
+        tau = np.linspace(0.0, 1.0, 5)
+        direct = np.asarray(
+            [[0.0, 0.0], [1.0e-100, 0.0], [0.0, 1.0e-200], [0.0, 0.0], [0.0, 0.0]]
+        )
+
+        result = factor_direct_cd_coefficients(tau, direct, retained_norm=0.99)
+
+        self.assertEqual(result.rank_for_retained_norm, 1)
+        self.assertEqual(result.rank, 2)
+        self.assertTrue(result.rank_increased_for_term_preservation)
+        self.assertGreaterEqual(result.minimum_column_retained_energy_fraction, 0.99 - 1.0e-12)
+        self.assertTrue(np.all(np.isfinite(result.column_retained_energy_fractions)))
+        self.assertTrue(np.isfinite(result.retained_norm_fraction))
+        np.testing.assert_allclose(result.column_retained_energy_fractions, np.ones(2), atol=1.0e-12)
+
+    def test_large_finite_coefficients_keep_energy_diagnostics_finite(self) -> None:
+        tau = np.linspace(0.0, 1.0, 5)
+        direct = np.asarray(
+            [[0.0, 0.0], [1.0e200, 0.0], [0.0, 5.0e199], [0.0, 0.0], [0.0, 0.0]]
+        )
+
+        result = factor_direct_cd_coefficients(tau, direct, retained_norm=0.99)
+
+        self.assertTrue(np.isfinite(result.retained_norm_fraction))
+        self.assertTrue(np.all(np.isfinite(result.column_retained_energy_fractions)))
+        self.assertGreaterEqual(result.minimum_column_retained_energy_fraction, 0.99 - 1.0e-12)
+
     def test_factorization_preserves_zero_direct_cd_endpoints(self) -> None:
         tau = np.linspace(0.0, 1.0, 5)
         direct = np.asarray(
