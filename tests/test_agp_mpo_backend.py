@@ -710,10 +710,18 @@ class MPOCompressionTests(unittest.TestCase):
         else:
             self.assertEqual(perturbed_probe["status"], "numerically_unresolved")
             self.assertIsNone(perturbed_probe["relative_action_error"])
+            self.assertGreater(perturbed_probe["squared_difference_estimate"], 0.0)
             self.assertAlmostEqual(
-                perturbed_probe["relative_action_error_lower_bound"],
+                np.sqrt(
+                    perturbed_probe["squared_difference_estimate"]
+                    / perturbed_probe["action_norm"] ** 2
+                ),
                 relative_perturbation,
                 delta=1.0e-13,
+            )
+            self.assertLessEqual(
+                perturbed_probe["relative_action_error_lower_bound"],
+                relative_perturbation,
             )
             self.assertGreaterEqual(
                 perturbed_probe["relative_action_error_upper_bound"],
@@ -816,6 +824,106 @@ class MPOCompressionTests(unittest.TestCase):
         probe = diagnostics["probes"][0]
         self.assertEqual(probe["status"], "tested")
         self.assertEqual(probe["relative_action_error"], 0.0)
+
+    def test_mutated_exact_identity_certificate_never_reports_zero(self) -> None:
+        exact, _ = build_exact_pauli_mpo(
+            [("XI", 0.7), ("IZ", -0.2)], n_qubits=2, order=(0, 1)
+        )
+        compressed, compression = compress_mpo_hilbert_schmidt(
+            exact, max_bond=8, cutoff=0.0
+        )
+        self.assertEqual(compression["status"], "ok")
+        self.assertEqual(
+            probe_mpo_compression(
+                exact,
+                compressed,
+                product_states=(("up", "down"),),
+                random_state_count=0,
+            )["probes"][0]["relative_action_error"],
+            0.0,
+        )
+
+        mutated_tensor = compressed.get_W(0).copy()
+        mutated_tensor *= 2.0
+        compressed.set_W(0, mutated_tensor)
+        diagnostics = probe_mpo_compression(
+            exact,
+            compressed,
+            product_states=(("up", "down"),),
+            random_state_count=0,
+        )
+
+        probe = diagnostics["probes"][0]
+        self.assertNotEqual(probe["relative_action_error"], 0.0)
+        self.assertEqual(diagnostics["exact_identity_certificate_status"], "invalidated")
+        if probe["status"] == "tested":
+            self.assertAlmostEqual(probe["relative_action_error"], 1.0, places=12)
+        else:
+            self.assertEqual(probe["status"], "numerically_unresolved")
+            self.assertGreaterEqual(probe["relative_action_error_upper_bound"], 1.0)
+
+    def test_product_unresolved_bounds_cover_adversarial_dense_error(self) -> None:
+        exact, _ = build_exact_pauli_mpo([("I", 1.0)], n_qubits=1, order=(0,))
+        perturbed, _ = build_exact_pauli_mpo(
+            [("I", 1.0), ("X", 1.0e-8)], n_qubits=1, order=(0,)
+        )
+        dense_error = np.linalg.norm(
+            (mpo_to_dense(perturbed) - mpo_to_dense(exact)) @ np.asarray([1.0, 0.0])
+        )
+
+        probe = probe_mpo_compression(
+            exact,
+            perturbed,
+            product_states=(("up",),),
+            random_state_count=0,
+        )["probes"][0]
+
+        self.assertEqual(probe["status"], "numerically_unresolved")
+        self.assertLessEqual(probe["relative_action_error_lower_bound"], dense_error)
+        self.assertGreaterEqual(probe["relative_action_error_upper_bound"], dense_error)
+        self.assertGreater(probe["roundoff_operation_estimate"], 0)
+        self.assertGreater(probe["squared_difference_arithmetic_uncertainty"], 0.0)
+
+    def test_random_unresolved_bounds_cover_adversarial_dense_error(self) -> None:
+        from tenpy.networks.mps import MPS
+
+        exact, _ = build_exact_pauli_mpo([("II", 1.0)], n_qubits=2, order=(0, 1))
+        perturbed, _ = build_exact_pauli_mpo(
+            [("II", 1.0), ("XI", 1.0e-8)], n_qubits=2, order=(0, 1)
+        )
+        random_state = np.random.get_state()
+        try:
+            np.random.seed(37)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                state = MPS.from_random_unitary_evolution(
+                    exact.sites,
+                    chi=2,
+                    p_state=["up"] * exact.L,
+                    bc="finite",
+                    dtype=np.complex128,
+                )
+        finally:
+            np.random.set_state(random_state)
+        state_vector = state.get_theta(0, exact.L).to_ndarray().reshape(-1)
+        dense_error = np.linalg.norm(
+            (mpo_to_dense(perturbed) - mpo_to_dense(exact)) @ state_vector
+        )
+
+        probe = probe_mpo_compression(
+            exact,
+            perturbed,
+            product_states=(),
+            random_state_count=1,
+            random_bond=2,
+            seed=37,
+        )["probes"][0]
+
+        self.assertEqual(probe["status"], "numerically_unresolved")
+        self.assertLessEqual(probe["relative_action_error_lower_bound"], dense_error)
+        self.assertGreaterEqual(probe["relative_action_error_upper_bound"], dense_error)
+        self.assertGreater(probe["roundoff_operation_estimate"], 0)
+        self.assertGreater(probe["squared_difference_arithmetic_uncertainty"], 0.0)
 
     def test_zero_action_denominator_is_not_tested(self) -> None:
         zero, _ = build_exact_pauli_mpo(

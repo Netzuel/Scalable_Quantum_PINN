@@ -37,6 +37,14 @@ The high-review remediation added two further RED gates:
   `_overlap_squared_difference` without defining them. The focused test run
   failed with `NameError` in both action-error regressions.
 
+The final numerical review added three RED regressions:
+
+- A compressed MPO with exact-reconstruction provenance was mutated through
+  public `set_W`; the old provenance-only marker still reported exact zero.
+- Product and random tiny-q probes with a `1e-8` off-support perturbation had
+  no operation-count diagnostics and could not demonstrate that their
+  unresolved bounds enclosed the independently computed dense action error.
+
 ## Implementation
 
 - Exact TeNPy finite-state-graph construction combines duplicate labels first,
@@ -77,12 +85,22 @@ The high-review remediation added two further RED gates:
   actions report exactly zero only through the source-object or exact
   reconstruction provenance criterion, while a relative `1e-10` perturbation
   remains detectable.
+- Exact-reconstruction evidence now records a SHA-256 fingerprint of the
+  bounded compressed MPO tensor payloads, leg labels, shapes, and dtypes.
+  Verification recomputes that fingerprint before exact zero is used; a public
+  `set_W` mutation invalidates the certificate. The exact finite-state graph is
+  never fingerprinted or densified: only compression-created tensors whose
+  bonds remain within the recorded cap are eligible.
 - Cancellation handling is scale-relative: it has no unit-scale floor. A
   subtractive norm or overlap within its roundoff bound is not reported as
   zero. Unless the compared MPO is the source object or carries an exact
   reconstruction provenance marker, the probe is `numerically_unresolved` with
-  `relative_action_error=None`, a conservative upper bound, and a direct
-  lower bound when on-support amplitudes already prove a nonzero error.
+  `relative_action_error=None`. Its squared-error interval is
+  `[max(0, d - B), max(0, d) + B]`, where `d` is the computed signed
+  difference and `B` uses the binary64 `gamma_n = n eps / (1 - n eps)` model.
+  The operation estimate is derived from MPO bond dimensions and chain length;
+  every probe reports the estimate, model, assumptions, interval endpoints,
+  and arithmetic uncertainty.
 - The single-site random probe creates a seeded normalized local state with
   `MPS.from_product_state`; it never calls the no-bond random-unitary
   evolution path.
@@ -102,7 +120,7 @@ conda run -n torch-mps python -m py_compile scripts/agp_mpo_backend.py tests/tes
 git diff --check
 ```
 
-Result: 39 focused tests passed, compilation passed, and the diff check was
+Result: 42 focused tests passed, compilation passed, and the diff check was
 clean. Coverage includes exact dense equivalence, duplicate combination and
 cancellation metadata, explicit arithmetic-zero tolerance, qubit-order
 equivalence, large-q construction with dense guards, compression error and
@@ -110,7 +128,8 @@ resource limits, global Hilbert-Schmidt discarded-weight accounting,
 deterministic product/random MPS action errors, cancellation-safe zero action
 errors with a detectable small perturbation, scale-rescaled error probes,
 numerically-unresolved leakage bounds, single-site seeded random MPS probes,
-zero-denominator status, and optional-import behavior.
+zero-denominator status, mutation-safe exact-identity evidence, adversarial
+dense product/random bound enclosure, and optional-import behavior.
 
 The adversarial q12/512 test uses labels scrambled across the full 12-site
 Pauli address space. With `max_bond=8` and an 8 MiB cap it reports
