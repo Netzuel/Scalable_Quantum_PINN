@@ -82,6 +82,11 @@ FIXED_UNSEEN_ROW_FIELDS = (
     "fixed_unseen_null_absolute_per_term",
     "fixed_unseen_null_scaled",
 )
+CERTIFICATION_PROBE_MANIFEST_NAMES = (
+    "probe_gate_residual_labels.json",
+    "probe_watch_residual_labels.json",
+    "probe_test_residual_labels.json",
+)
 
 
 @dataclass(frozen=True)
@@ -308,10 +313,18 @@ def build_expanding_fixed_unseen_probe(
     initial_request: int,
     resource_cap: int | None,
 ) -> tuple[dict[str, object], list[str]]:
-    request = max(int(initial_request), int(moving_holdout_terms))
-    cap = max(request + 1, int(resource_cap)) if resource_cap is not None else max(request * 2, request + 1)
+    moving_holdout_terms = int(moving_holdout_terms)
+    request = max(int(initial_request), moving_holdout_terms)
+    cap = int(resource_cap) if resource_cap is not None else None
+    if cap is not None:
+        if cap < moving_holdout_terms:
+            raise ValueError(
+                "fixed unseen candidate cap must be at least the mandatory moving holdout "
+                f"request ({moving_holdout_terms}); got {cap}"
+            )
+        request = min(request, cap)
     history: list[dict[str, object]] = []
-    previous_hash: str | None = None
+    seen_hashes: set[str] = set()
     final_probe: dict[str, object] | None = None
     final_universe: list[str] = []
     final_reference = np.empty(0, dtype=float)
@@ -346,14 +359,14 @@ def build_expanding_fixed_unseen_probe(
         universe_hash = _stable_hash(universe)
         if not settings.enabled or probe.get("status") == "complete":
             break
-        if previous_hash == universe_hash:
+        if len(universe) < request or universe_hash in seen_hashes:
             insufficiency_reason = "generator_saturated"
             break
-        if request >= cap:
+        if cap is not None and request >= cap:
             insufficiency_reason = "resource_cap_reached"
             break
-        previous_hash = universe_hash
-        request = min(request * 2, cap)
+        seen_hashes.add(universe_hash)
+        request = request * 2 if cap is None else min(request * 2, cap)
 
     if final_probe is None:
         raise RuntimeError("fixed unseen probe expansion produced no candidate universe")
@@ -524,17 +537,78 @@ def configured_certification_probe_labels(
     return labels
 
 
+def configured_generated_run_roots(
+    payload: Mapping[str, object],
+    *,
+    scenario_root: Path,
+    extra_roots: Collection[Path] = (),
+) -> list[Path]:
+    """Return canonical scenario run roots declared by the active config."""
+
+    roots = {scenario_root / "runs", *(Path(root) for root in extra_roots)}
+
+    def collect(value: object) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if key in {"output_root", "baseline_root", "run_root"} and isinstance(item, (str, Path)):
+                    root = Path(item)
+                    roots.add(root if root.is_absolute() else scenario_root / root)
+                collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+
+    collect(payload)
+    return sorted({root.resolve() for root in roots}, key=str)
+
+
+def load_existing_certification_probe_labels(
+    roots: Collection[Path],
+) -> tuple[set[str], list[Path]]:
+    """Load persisted gate/watch/test labels from configured scenario run roots."""
+
+    manifest_paths: set[Path] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for filename in CERTIFICATION_PROBE_MANIFEST_NAMES:
+            manifest_paths.update(path.resolve() for path in root.rglob(filename))
+
+    labels: set[str] = set()
+    paths = sorted(manifest_paths, key=str)
+    for path in paths:
+        payload = load_json(path)
+        if not isinstance(payload, dict):
+            raise TypeError(f"{path} must contain a JSON object.")
+        manifest_labels = payload.get("labels", [])
+        if not isinstance(manifest_labels, list):
+            raise TypeError(f"{path} labels must be a JSON list.")
+        labels.update(str(label) for label in manifest_labels)
+    return labels, paths
+
+
 def fixed_unseen_probe_candidate_cap(
     feedback: Mapping[str, object],
     *,
-    initial_request: int,
-) -> int:
+    moving_holdout_terms: int | None = None,
+    initial_request: int | None = None,
+) -> int | None:
+    if moving_holdout_terms is None:
+        if initial_request is None:
+            raise TypeError("moving_holdout_terms is required")
+        moving_holdout_terms = int(initial_request)
     raw = feedback.get("fixed_unseen_probes", {})
     raw = raw if isinstance(raw, Mapping) else {}
     for key in ("max_candidate_terms", "candidate_request_cap", "generator_cap", "resource_cap"):
         if key in raw:
-            return max(int(initial_request), int(raw[key]))
-    return max(int(initial_request) * 2, int(initial_request) + 1)
+            cap = int(raw[key])
+            if cap < int(moving_holdout_terms):
+                raise ValueError(
+                    "holdout_feedback.fixed_unseen_probes candidate cap must be at least the "
+                    f"mandatory moving holdout request ({int(moving_holdout_terms)}); got {cap}"
+                )
+            return cap
+    return None
 
 
 def fixed_unseen_reference_rms(
@@ -1673,12 +1747,17 @@ def main() -> None:
     )
     fixed_probe_candidate_cap = fixed_unseen_probe_candidate_cap(
         feedback,
-        initial_request=initial_fixed_probe_request,
+        moving_holdout_terms=residual_top_k,
+    )
+    initial_candidate_request = (
+        initial_fixed_probe_request
+        if fixed_probe_candidate_cap is None
+        else min(initial_fixed_probe_request, fixed_probe_candidate_cap)
     )
     candidate_residual_labels, holdout_basis_agp_terms = build_common_holdout_residual_labels(
         run_dirs=sweep_run_dirs,
         config_payload=payload,
-        residual_top_k=initial_fixed_probe_request,
+        residual_top_k=initial_candidate_request,
         intermediate_top_k=intermediate_top_k,
     )
     if len(candidate_residual_labels) < residual_top_k:
@@ -1702,10 +1781,15 @@ def main() -> None:
         * (fixed_unseen_probe_settings.active_terms + fixed_unseen_probe_settings.null_terms),
     )
     if len(candidate_residual_labels) < fixed_probe_request:
+        bounded_fixed_probe_request = (
+            fixed_probe_request
+            if fixed_probe_candidate_cap is None
+            else min(fixed_probe_request, fixed_probe_candidate_cap)
+        )
         candidate_residual_labels, holdout_basis_agp_terms = build_common_holdout_residual_labels(
             run_dirs=sweep_run_dirs,
             config_payload=payload,
-            residual_top_k=min(fixed_probe_request, fixed_probe_candidate_cap),
+            residual_top_k=bounded_fixed_probe_request,
             intermediate_top_k=intermediate_top_k,
         )
     common_residual_labels = candidate_residual_labels[:residual_top_k]
@@ -1728,7 +1812,18 @@ def main() -> None:
         n_qubits=feedback_settings.model.n_qubits,
         distance=feedback_settings.model.distance,
     )
-    certification_probe_labels = configured_certification_probe_labels(payload, feedback)
+    certification_run_roots = configured_generated_run_roots(
+        payload,
+        scenario_root=RUN_DIR,
+        extra_roots=(baseline_root, output_root),
+    )
+    persisted_certification_labels, certification_manifest_paths = (
+        load_existing_certification_probe_labels(certification_run_roots)
+    )
+    certification_probe_labels = (
+        configured_certification_probe_labels(payload, feedback)
+        | persisted_certification_labels
+    )
     fixed_probe_base_excluded_labels = set(residual_labels) | certification_probe_labels
 
     def generate_fixed_probe_candidates(request: int) -> list[str]:
@@ -1772,6 +1867,9 @@ def main() -> None:
     else:
         fixed_unseen_probe = expected_fixed_unseen_probe
         fixed_unseen_probe["certification_probe_excluded_terms"] = len(certification_probe_labels)
+        fixed_unseen_probe["certification_probe_manifest_paths"] = [
+            str(path) for path in certification_manifest_paths
+        ]
         save_fixed_unseen_probe(fixed_probe_path, fixed_unseen_probe)
     existing_state = load_existing_feedback_state(
         output_dir=output_dir,

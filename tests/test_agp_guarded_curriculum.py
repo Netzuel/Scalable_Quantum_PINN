@@ -80,7 +80,23 @@ class AGPGuardedCurriculumTests(unittest.TestCase):
             labels, paths = load_existing_fixed_unseen_probe_labels([root])
 
         self.assertEqual(labels, {"XI", "YI"})
-        self.assertEqual(paths, [manifest])
+        self.assertEqual(paths, [manifest.resolve()])
+
+    def test_coupled_loader_deduplicates_overlapping_roots_deterministically(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nested = root / "runs" / "feedback"
+            manifest = nested / "run" / "Models_Data" / "fixed_unseen_probe_labels.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                json.dumps({"active_labels": ["XI"], "null_labels": ["YI"]}) + "\n",
+                encoding="utf-8",
+            )
+
+            labels, paths = load_existing_fixed_unseen_probe_labels([nested, root])
+
+        self.assertEqual(labels, {"XI", "YI"})
+        self.assertEqual(paths, [manifest.resolve()])
 
     def test_loaded_fixed_unseen_labels_exclude_a_coupled_certification_probe(self):
         h0 = SparsePauliOperator({"XI": -1.0, "IX": -1.0})

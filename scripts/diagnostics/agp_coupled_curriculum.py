@@ -509,17 +509,20 @@ def load_existing_fixed_unseen_probe_labels(
     """Load immutable fixed-unseen labels that certification probes must avoid."""
 
     labels: set[str] = set()
-    paths: list[Path] = []
+    manifest_paths: set[Path] = set()
     for root in roots:
         if not root.is_dir():
             continue
-        for path in sorted(root.rglob("fixed_unseen_probe_labels.json")):
-            payload = load_json(path)
-            if not isinstance(payload, dict):
-                raise TypeError(f"{path} must contain a JSON object.")
-            labels.update(str(label) for label in payload.get("active_labels", []))
-            labels.update(str(label) for label in payload.get("null_labels", []))
-            paths.append(path)
+        manifest_paths.update(
+            path.resolve() for path in root.rglob("fixed_unseen_probe_labels.json")
+        )
+    paths = sorted(manifest_paths, key=str)
+    for path in paths:
+        payload = load_json(path)
+        if not isinstance(payload, dict):
+            raise TypeError(f"{path} must contain a JSON object.")
+        labels.update(str(label) for label in payload.get("active_labels", []))
+        labels.update(str(label) for label in payload.get("null_labels", []))
     return labels, paths
 
 
