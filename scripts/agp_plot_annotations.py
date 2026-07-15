@@ -254,14 +254,33 @@ def _table_number(value: object) -> str:
 def physical_validation_note(payload: Mapping[str, object]) -> str:
     """Return an explicit qualification for tensor-network table metrics."""
 
-    if payload.get("backend") != "quimb_mps":
+    backend = str(payload.get("backend", ""))
+    if backend not in {"quimb_mps", "quimb_product_formula", "tenpy_tdvp_mpo"}:
         return ""
     convergence = payload.get("convergence", {})
     convergence = convergence if isinstance(convergence, Mapping) else {}
     status = str(convergence.get("status", "not_tested")).replace("_", " ")
-    if status == "pass":
+    certification = payload.get("certification", {})
+    certification = certification if isinstance(certification, Mapping) else {}
+    certified = str(certification.get("status", "not_tested")) == "pass"
+    if backend in {"quimb_mps", "quimb_product_formula"} and status == "pass":
         return "MPS convergence: pass."
-    return f"MPS convergence: {status}; physical comparison is diagnostic only."
+    if backend in {"quimb_mps", "quimb_product_formula"}:
+        return f"MPS convergence: {status}; physical comparison is diagnostic only."
+    full_terms = payload.get("full_learned_terms")
+    if full_terms is None:
+        resolution_results = payload.get("resolution_results", [])
+        if isinstance(resolution_results, Sequence) and resolution_results:
+            final_resolution = resolution_results[-1]
+            if isinstance(final_resolution, Mapping):
+                full_terms = final_resolution.get("full_learned_terms")
+    support = f"; full learned terms={full_terms}" if full_terms is not None else ""
+    if certified and status == "pass":
+        return f"Backend: tenpy_tdvp_mpo{support}; convergence: pass; certification: pass."
+    return (
+        f"Backend: tenpy_tdvp_mpo{support}; convergence: {status}; "
+        "physical comparison is diagnostic only."
+    )
 
 
 def plot_physical_comparison_table(

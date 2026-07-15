@@ -23,6 +23,8 @@ from agp_mps_validation import (
     statevector_results_for_learned_terms,
     validation_certification,
     cached_protocol_result,
+    resolve_validation_backend,
+    require_full_learned_support,
     group_hamiltonian_terms_by_support,
 )
 from utils import SparsePauliOperator
@@ -127,6 +129,72 @@ class AGPMPSValidationTests(unittest.TestCase):
 
         self.assertEqual(certification["status"], "pass")
         self.assertEqual(certification["required_gates"], ["statevector_agreement"])
+
+    def test_mpo_cache_key_includes_every_numerical_axis_and_checkpoint_identity(self):
+        settings = {
+            "backend": "tenpy_tdvp_mpo",
+            "integrator": "tdvp",
+            "steps": 24,
+            "temporal_grid_points": 257,
+            "temporal_retained_norm": 0.9999,
+            "mpo_max_bond": 64,
+            "mpo_cutoff": 1.0e-10,
+            "mps_max_bond": 32,
+            "mps_cutoff": 1.0e-9,
+            "lanczos_max": 20,
+            "mpo_workspace_cap_bytes": 1024,
+            "resource_caps": {"max_build_seconds": 3600, "max_peak_memory_gb": 24},
+            "qubit_order_candidates": ["native", "spectral"],
+            "checkpoint_identity": {"path": "/tmp/final.pt", "size": 123, "mtime_ns": 456},
+            "learned_terms": 32768,
+        }
+        previous = [{"settings": dict(settings), "results": {"learned_sparse_agp": {"final_energy": -1.0}}}]
+
+        self.assertIsNotNone(cached_protocol_result(previous, settings=settings, protocol="learned_sparse_agp"))
+        for key, value in (
+            ("temporal_retained_norm", 0.999),
+            ("mpo_max_bond", 128),
+            ("mps_cutoff", 1.0e-8),
+            ("steps", 48),
+            ("integrator", "expm_mpo"),
+            ("checkpoint_identity", {"path": "/tmp/final.pt", "size": 124, "mtime_ns": 456}),
+        ):
+            with self.subTest(key=key):
+                self.assertIsNone(
+                    cached_protocol_result(
+                        previous,
+                        settings={**settings, key: value},
+                        protocol="learned_sparse_agp",
+                    )
+                )
+
+    def test_certification_requires_temporal_mpo_mps_and_timestep_gates(self):
+        certification = validation_certification(
+            convergence={"status": "pass"},
+            compression={"status": "pass"},
+            statevector_agreement={"status": "not_tested"},
+            require_convergence=True,
+            require_compression=True,
+            require_statevector=False,
+        )
+
+        self.assertEqual(certification["status"], "pass")
+        self.assertIn("mpo_compression", certification["required_gates"])
+
+    def test_tenpy_backend_is_explicit_and_learned_certification_requires_full_support(self):
+        backend = resolve_validation_backend(
+            {"mpo_backend": {"name": "tenpy_tdvp_mpo", "qubit_order_candidates": ["native", "spectral"]}}
+        )
+
+        self.assertEqual(backend["name"], "tenpy_tdvp_mpo")
+        self.assertEqual(backend["qubit_order_candidates"], ("native", "spectral"))
+        self.assertEqual(resolve_validation_backend({})["name"], "quimb_product_formula")
+        with self.assertRaisesRegex(ValueError, "full learned support"):
+            require_full_learned_support(selected_terms=1024, available_terms=32768, ablation=False)
+        self.assertEqual(
+            require_full_learned_support(selected_terms=1024, available_terms=32768, ablation=True),
+            "ablation",
+        )
 
     def test_statevector_reference_selects_matching_learned_support(self):
         payload = {

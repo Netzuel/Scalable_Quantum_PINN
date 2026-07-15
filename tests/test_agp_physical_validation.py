@@ -304,6 +304,21 @@ class AGPPhysicalValidationTests(unittest.TestCase):
         self.assertIn("MPS convergence: not tested", note)
         self.assertIn("diagnostic only", note)
 
+    def test_tenpy_table_note_reports_backend_support_and_uncertified_status(self):
+        note = physical_validation_note(
+            {
+                "backend": "tenpy_tdvp_mpo",
+                "full_learned_terms": 32768,
+                "convergence": {"status": "not_feasible"},
+                "certification": {"status": "not_tested"},
+            }
+        )
+
+        self.assertIn("tenpy_tdvp_mpo", note)
+        self.assertIn("32768", note)
+        self.assertIn("not feasible", note)
+        self.assertIn("diagnostic only", note)
+
     def test_q156_comparison_table_marks_dynamical_metrics_unavailable(self):
         with TemporaryDirectory() as tmp:
             study_dir = Path(tmp) / "sweep_test"

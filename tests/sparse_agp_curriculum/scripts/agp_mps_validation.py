@@ -10,7 +10,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -45,6 +45,70 @@ _PAULI = {
     "Y": np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype=np.complex128),
     "Z": np.array([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128),
 }
+
+
+def resolve_validation_backend(validation: Mapping[str, object]) -> dict[str, object]:
+    """Return the explicit tensor-network backend configuration.
+
+    The product-formula evaluator remains the backwards-compatible default.
+    TeNPy is selected only by an explicit ``mpo_backend.name`` setting.
+    """
+
+    raw = validation.get("mpo_backend", {})
+    raw = raw if isinstance(raw, Mapping) else {}
+    name = str(raw.get("name", "quimb_product_formula"))
+    if name not in {"quimb_product_formula", "tenpy_tdvp_mpo"}:
+        raise ValueError("mpo_backend.name must be 'quimb_product_formula' or 'tenpy_tdvp_mpo'.")
+    candidates = raw.get("qubit_order_candidates", ("native", "spectral"))
+    if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)):
+        raise ValueError("mpo_backend.qubit_order_candidates must be a sequence of names.")
+    resource_caps = raw.get("resource_caps", {})
+    resource_caps = resource_caps if isinstance(resource_caps, Mapping) else {}
+    integrator = str(raw.get("integrator", "tdvp"))
+    if integrator not in {"tdvp", "expm_mpo"}:
+        raise ValueError("mpo_backend.integrator must be 'tdvp' or 'expm_mpo'.")
+    return {
+        "name": name,
+        "integrator": integrator,
+        "qubit_order_candidates": tuple(str(item) for item in candidates),
+        "temporal_grid_points": int(raw.get("temporal_grid_points", 257)),
+        "temporal_retained_norm": float(raw.get("temporal_retained_norm", 0.9999)),
+        "action_probe_seed": int(raw.get("action_probe_seed", 11)),
+        "action_probe_product_states": int(raw.get("action_probe_product_states", 4)),
+        "action_probe_random_mps": int(raw.get("action_probe_random_mps", 2)),
+        "action_error_max": float(raw.get("action_error_max", 1.0e-3)),
+        "resource_caps": dict(resource_caps),
+        "mpo_workspace_cap_bytes": int(
+            raw.get(
+                "mpo_workspace_cap_bytes",
+                float(resource_caps.get("max_peak_memory_gb", 24.0)) * (1024**3),
+            )
+        ),
+        "lanczos_max": int(raw.get("lanczos_max", 20)),
+        "ablation": bool(raw.get("ablation", False)),
+    }
+
+
+def require_full_learned_support(*, selected_terms: int, available_terms: int, ablation: bool) -> str:
+    """Classify a learned deployment without silently certifying a truncation."""
+
+    if int(selected_terms) == int(available_terms):
+        return "full_support"
+    if ablation:
+        return "ablation"
+    raise ValueError(
+        "tenpy_tdvp_mpo certifiable learned validation requires full learned support; "
+        "mark reduced support as ablation explicitly."
+    )
+
+
+def _checkpoint_identity(path: Path) -> dict[str, object]:
+    stat = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
 
 
 def _kron_paulis(label: str) -> np.ndarray:
@@ -466,6 +530,190 @@ def run_mps_case(
     return results
 
 
+def _learned_mpo_factorization(
+    learned: Mapping[str, object],
+    *,
+    learned_scale: float,
+    retained_norm: float,
+    temporal_grid_points: int,
+):
+    from scripts.agp_mpo_backend import factor_direct_cd_coefficients
+
+    if int(temporal_grid_points) < 2:
+        raise ValueError("temporal_grid_points must be at least two.")
+    source_tau = np.asarray(learned["tau"], dtype=np.float64)
+    source_coefficients = float(learned_scale) * np.asarray(learned["coefficients"], dtype=np.float64)
+    tau = np.linspace(0.0, 1.0, int(temporal_grid_points), dtype=np.float64)
+    coefficients = np.column_stack(
+        [np.interp(tau, source_tau, source_coefficients[:, column]) for column in range(source_coefficients.shape[1])]
+    )
+    return factor_direct_cd_coefficients(tau, coefficients, retained_norm=float(retained_norm))
+
+
+def _mpo_schedule(learned: Mapping[str, object] | None):
+    if learned is None:
+        return None
+
+    def schedule(tau: float, total_time: float) -> tuple[float, float]:
+        return learned_schedule(learned, float(tau) * float(total_time), float(total_time))
+
+    return schedule
+
+
+def _static_mpo_compression_summary(value: object) -> tuple[int | None, float | None]:
+    """Flatten the backend's per-component compression diagnostics for a resolution record."""
+
+    bonds: list[int] = []
+    discarded_weights: list[float] = []
+
+    def visit(node: object) -> None:
+        if isinstance(node, Mapping):
+            compression = node.get("compression")
+            if isinstance(compression, Mapping):
+                raw_bonds = compression.get("post_bonds", [])
+                if isinstance(raw_bonds, Sequence) and not isinstance(raw_bonds, (str, bytes)):
+                    bonds.extend(int(item) for item in raw_bonds)
+                discarded = compression.get("discarded_weight")
+                if discarded is not None:
+                    discarded_weights.append(float(discarded))
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, Sequence) and not isinstance(node, (str, bytes)):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return (max(bonds) if bonds else None, sum(discarded_weights) if discarded_weights else None)
+
+
+def run_mpo_case(
+    *,
+    h0: SparsePauliOperator,
+    h1: SparsePauliOperator,
+    learned: Mapping[str, object] | None,
+    exact_ground_energy: float,
+    ground_bitstring: str,
+    protocols: tuple[str, ...],
+    total_time: float,
+    settings: Mapping[str, object],
+    backend: Mapping[str, object],
+    learned_scale: float = 1.0,
+) -> dict[str, dict[str, object]]:
+    """Run the full-support TeNPy MPO backend and retain its diagnostics verbatim."""
+
+    from scripts.agp_mpo_backend import (
+        evolve_protocol_expm_mpo,
+        evolve_protocol_tdvp,
+        select_qubit_order,
+    )
+
+    h0_terms = list(h0.terms.items())
+    h1_terms = list(h1.terms.items())
+    results: dict[str, dict[str, object]] = {}
+    for protocol in protocols:
+        try:
+            factorization = None
+            labels: tuple[str, ...] = ()
+            if protocol == "learned_sparse_agp":
+                if learned is None:
+                    raise ValueError("learned payload is required for learned_sparse_agp.")
+                factorization = _learned_mpo_factorization(
+                    learned,
+                    learned_scale=learned_scale,
+                    retained_norm=float(settings["temporal_retained_norm"]),
+                    temporal_grid_points=int(settings["temporal_grid_points"]),
+                )
+                labels = tuple(str(label) for label in learned["labels"])
+            support_terms = [*h0_terms, *h1_terms]
+            if learned is not None:
+                rms = np.sqrt(np.mean(np.asarray(learned["coefficients"], dtype=np.float64) ** 2, axis=0))
+                support_terms.extend(zip((str(label) for label in learned["labels"]), rms, strict=True))
+            order = select_qubit_order(
+                support_terms,
+                n_qubits=h0.n_qubits,
+                candidates=tuple(backend["qubit_order_candidates"]),
+            )
+            engine = evolve_protocol_tdvp if str(settings["integrator"]) == "tdvp" else evolve_protocol_expm_mpo
+            mapped_protocol = {
+                "no_cd": "no_cd",
+                "kipu_dqfm_l1": "nested_l1",
+                "nested_l1": "nested_l1",
+                "learned_sparse_agp": "learned",
+            }.get(protocol)
+            if mapped_protocol is None:
+                raise ValueError(f"Unsupported protocol: {protocol!r}.")
+            start = time.perf_counter()
+            _, diagnostics = engine(
+                h0_terms=h0_terms,
+                h1_terms=h1_terms,
+                cd_factorization=factorization,
+                cd_labels=labels,
+                protocol=mapped_protocol,
+                schedule=_mpo_schedule(learned if protocol == "learned_sparse_agp" else None),
+                total_time=total_time,
+                steps=int(settings["steps"]),
+                order=order.order,
+                ground_bitstring=ground_bitstring,
+                mps_max_bond=int(settings["mps_max_bond"]),
+                mps_cutoff=float(settings["mps_cutoff"]),
+                mpo_max_bond=int(settings["mpo_max_bond"]),
+                mpo_cutoff=float(settings["mpo_cutoff"]),
+                lanczos_max=int(settings["lanczos_max"]),
+                mpo_workspace_cap_bytes=int(settings["mpo_workspace_cap_bytes"]),
+            )
+            diagnostics["runtime_seconds"] = time.perf_counter() - start
+            max_build_seconds = settings.get("max_build_seconds")
+            if max_build_seconds is not None and diagnostics["runtime_seconds"] > float(max_build_seconds):
+                diagnostics["status"] = "not_feasible"
+                diagnostics["resource_reason"] = "runtime exceeded configured max_build_seconds"
+            diagnostics["qubit_order_candidate"] = order.candidate
+            diagnostics["qubit_order"] = list(order.order)
+            diagnostics["temporal_retained_norm"] = (
+                None if factorization is None else float(factorization.retained_norm_fraction)
+            )
+            diagnostics["temporal_reconstruction_error"] = (
+                None if factorization is None else float(factorization.max_abs_error)
+            )
+            static_max_bond, static_discarded_weight = _static_mpo_compression_summary(
+                diagnostics.get("static_mpo_compression")
+            )
+            diagnostics["static_mpo_max_bond"] = static_max_bond
+            diagnostics["static_mpo_discarded_weight"] = static_discarded_weight
+            diagnostics["dynamic_mpo_max_bond"] = diagnostics.get("dynamic_mpo_peak_bond")
+            diagnostics["mpo_action_error"] = diagnostics.get("mpo_action_error")
+            diagnostics["mpo_action_status"] = diagnostics.get("mpo_action_status", "not_tested")
+            diagnostics["mps_max_bond"] = int(settings["mps_max_bond"])
+            diagnostics["mps_cutoff"] = float(settings["mps_cutoff"])
+            diagnostics["timestep"] = float(settings["timestep"])
+            final_energy = diagnostics.get("final_energy")
+            ground_fidelity = diagnostics.get("ground_fidelity")
+            row: dict[str, object] = {
+                "final_energy": final_energy,
+                "ground_energy": float(exact_ground_energy),
+                "ground_state_fidelity": ground_fidelity,
+                "energy_error": (
+                    float(final_energy) - float(exact_ground_energy)
+                    if diagnostics.get("final_energy_status") == "ok"
+                    else None
+                ),
+                "mps_diagnostics": diagnostics,
+            }
+            results[protocol] = row
+        except (MemoryError, ModuleNotFoundError, RuntimeError, ValueError) as exc:
+            results[protocol] = {
+                "final_energy": None,
+                "ground_energy": float(exact_ground_energy),
+                "ground_state_fidelity": None,
+                "energy_error": None,
+                "mps_diagnostics": {
+                    "status": "unresolved_error",
+                    "reason": str(exc),
+                    "runtime_seconds": 0.0,
+                },
+            }
+    return results
+
+
 def assess_mps_convergence(
     coarse: Mapping[str, Mapping[str, float]],
     fine: Mapping[str, Mapping[str, float]],
@@ -476,22 +724,28 @@ def assess_mps_convergence(
     """Require successive-resolution agreement for every retained protocol."""
 
     protocols: dict[str, dict[str, float | bool]] = {}
+    incomplete = False
     for protocol in fine:
         if protocol not in coarse:
+            incomplete = True
             continue
-        energy_delta = abs(float(fine[protocol]["final_energy"]) - float(coarse[protocol]["final_energy"]))
-        fidelity_delta = abs(
-            float(fine[protocol]["ground_state_fidelity"])
-            - float(coarse[protocol]["ground_state_fidelity"])
-        )
+        try:
+            energy_delta = abs(float(fine[protocol]["final_energy"]) - float(coarse[protocol]["final_energy"]))
+            fidelity_delta = abs(
+                float(fine[protocol]["ground_state_fidelity"])
+                - float(coarse[protocol]["ground_state_fidelity"])
+            )
+        except (KeyError, TypeError, ValueError):
+            incomplete = True
+            continue
         protocols[protocol] = {
             "energy_delta": energy_delta,
             "fidelity_delta": fidelity_delta,
             "pass": energy_delta <= energy_atol and fidelity_delta <= fidelity_atol,
         }
-    passed = bool(protocols) and all(bool(row["pass"]) for row in protocols.values())
+    passed = bool(protocols) and not incomplete and all(bool(row["pass"]) for row in protocols.values())
     return {
-        "status": "pass" if passed else "fail",
+        "status": "pass" if passed else ("not_tested" if incomplete else "fail"),
         "energy_atol": float(energy_atol),
         "fidelity_atol": float(fidelity_atol),
         "protocols": protocols,
@@ -504,29 +758,101 @@ def assess_statevector_agreement(
     *,
     energy_atol: float,
     fidelity_atol: float,
+    require_all_protocols: bool = False,
 ) -> dict[str, object]:
     protocols: dict[str, dict[str, float | bool]] = {}
+    incomplete = False
     for protocol, mps_row in mps_results.items():
         reference = statevector_results.get(protocol)
         if reference is None:
+            incomplete = True
             continue
-        energy_delta = abs(float(mps_row["final_energy"]) - float(reference["final_energy"]))
-        fidelity_delta = abs(
-            float(mps_row["ground_state_fidelity"])
-            - float(reference["ground_state_fidelity"])
-        )
+        try:
+            energy_delta = abs(float(mps_row["final_energy"]) - float(reference["final_energy"]))
+            fidelity_delta = abs(
+                float(mps_row["ground_state_fidelity"])
+                - float(reference["ground_state_fidelity"])
+            )
+        except (KeyError, TypeError, ValueError):
+            incomplete = True
+            continue
         protocols[protocol] = {
             "energy_delta": energy_delta,
             "fidelity_delta": fidelity_delta,
             "pass": energy_delta <= energy_atol and fidelity_delta <= fidelity_atol,
         }
-    passed = bool(protocols) and all(bool(row["pass"]) for row in protocols.values())
+    passed = bool(protocols) and not (require_all_protocols and incomplete) and all(bool(row["pass"]) for row in protocols.values())
     return {
-        "status": "pass" if passed else "fail",
+        "status": "pass" if passed else ("not_tested" if incomplete else "fail"),
         "energy_atol": float(energy_atol),
         "fidelity_atol": float(fidelity_atol),
         "protocols": protocols,
     }
+
+
+def assess_mpo_compression(
+    results: Mapping[str, Mapping[str, object]],
+    *,
+    action_error_max: float,
+) -> dict[str, object]:
+    """Require explicit temporal, MPO, and action evidence before certification."""
+
+    protocols: dict[str, dict[str, object]] = {}
+    statuses: list[str] = []
+    for protocol, row in results.items():
+        diagnostics = row.get("mps_diagnostics", {})
+        diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        evolution_status = str(diagnostics.get("status", "unresolved_error"))
+        temporal_status = "pass"
+        if protocol == "learned_sparse_agp":
+            retained = diagnostics.get("temporal_retained_norm")
+            rank = diagnostics.get("temporal_rank")
+            temporal_status = (
+                "pass"
+                if retained is not None and float(retained) > 0.0 and int(rank or 0) > 0
+                else "not_tested"
+            )
+        static_status = "pass" if diagnostics.get("static_mpo_compression") else "not_tested"
+        dynamic_status = (
+            "pass"
+            if str(diagnostics.get("resource_statuses", {}).get("dynamic_mpo_assembly", "not_tested")) == "ok"
+            else str(diagnostics.get("resource_statuses", {}).get("dynamic_mpo_assembly", "not_tested"))
+        )
+        action_error = diagnostics.get("mpo_action_error")
+        action_status = (
+            "pass"
+            if action_error is not None and float(action_error) <= float(action_error_max)
+            else "not_tested"
+        )
+        gate_statuses = [evolution_status, temporal_status, static_status, dynamic_status, action_status]
+        if "not_feasible" in gate_statuses:
+            status = "not_feasible"
+        elif any(item in {"not_tested", "not_comparable", "unresolved_error", "numerically_unresolved"} for item in gate_statuses):
+            status = "not_tested"
+        elif all(item == "pass" or item == "ok" for item in gate_statuses):
+            status = "pass"
+        else:
+            status = "fail"
+        protocols[protocol] = {
+            "status": status,
+            "temporal": temporal_status,
+            "static_mpo": static_status,
+            "dynamic_mpo": dynamic_status,
+            "mpo_action": action_status,
+            "mpo_action_error": action_error,
+        }
+        statuses.append(status)
+    if not statuses:
+        status = "not_tested"
+    elif "not_feasible" in statuses:
+        status = "not_feasible"
+    elif "not_tested" in statuses:
+        status = "not_tested"
+    elif all(item == "pass" for item in statuses):
+        status = "pass"
+    else:
+        status = "fail"
+    return {"status": status, "action_error_max": float(action_error_max), "protocols": protocols}
 
 
 def statevector_results_for_learned_terms(
@@ -534,15 +860,22 @@ def statevector_results_for_learned_terms(
     *,
     learned_terms: int,
     learned_scale: float,
+    require_matching_learned_terms: bool = False,
 ) -> dict[str, Mapping[str, object]]:
     raw_results = payload.get("results", {})
     if not isinstance(raw_results, dict):
         raise TypeError("statevector reference results must be a JSON object.")
-    results = {
+    results: dict[str, Mapping[str, object]] = {
         str(name): row
         for name, row in raw_results.items()
         if isinstance(row, dict)
     }
+    learned_default = results.get("learned_sparse_agp")
+    if require_matching_learned_terms and (
+        not isinstance(learned_default, Mapping)
+        or int(learned_default.get("learned_terms", -1)) != int(learned_terms)
+    ):
+        results.pop("learned_sparse_agp", None)
     variants = payload.get("learned_variant_results", {})
     if isinstance(variants, dict):
         for row in variants.values():
@@ -563,14 +896,19 @@ def validation_certification(
     statevector_agreement: Mapping[str, object],
     require_convergence: bool,
     require_statevector: bool,
+    compression: Mapping[str, object] | None = None,
+    require_compression: bool = False,
 ) -> dict[str, object]:
     gates: list[tuple[str, Mapping[str, object]]] = []
     if require_convergence:
         gates.append(("mps_convergence", convergence))
+    if require_compression:
+        gates.append(("mpo_compression", compression or {"status": "not_tested"}))
     if require_statevector:
         gates.append(("statevector_agreement", statevector_agreement))
     statuses = [str(gate.get("status", "not_tested")) for _, gate in gates]
-    if not statuses or "not_tested" in statuses:
+    unresolved = {"not_feasible", "not_tested", "not_comparable", "unresolved_error", "numerically_unresolved"}
+    if not statuses or any(status in unresolved for status in statuses):
         status = "not_tested"
     elif all(item == "pass" for item in statuses):
         status = "pass"
@@ -590,33 +928,32 @@ def cached_protocol_result(
 ) -> dict[str, object] | None:
     if not isinstance(previous_resolutions, list):
         return None
-    integer_keys = ("steps", "max_bond", "learned_terms")
-    float_keys = ("cutoff", "coefficient_threshold")
-    string_keys = ("operator_grouping",)
     for case in previous_resolutions:
         if not isinstance(case, dict):
             continue
         previous_settings = case.get("settings", {})
         if not isinstance(previous_settings, dict):
             continue
-        if any(int(previous_settings.get(key, -1)) != int(settings[key]) for key in integer_keys):
-            continue
-        if any(
-            not np.isclose(
-                float(previous_settings.get(key, np.nan)),
-                float(settings[key]),
-                rtol=0.0,
-                atol=max(1.0e-16, abs(float(settings[key])) * 1.0e-12),
-            )
-            for key in float_keys
-        ):
-            continue
-        if any(str(previous_settings.get(key, "")) != str(settings[key]) for key in string_keys):
+        if _canonical_cache_value(previous_settings) != _canonical_cache_value(settings):
             continue
         results = case.get("results", {})
         if isinstance(results, dict) and isinstance(results.get(protocol), dict):
             return dict(results[protocol])
     return None
+
+
+def _canonical_cache_value(value: object) -> object:
+    """Canonicalize all settings axes so a changed numerical contract cannot reuse a run."""
+
+    if isinstance(value, Mapping):
+        return tuple(sorted((str(key), _canonical_cache_value(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_canonical_cache_value(item) for item in value)
+    if isinstance(value, (np.floating, float)):
+        return ("float", float(value).hex())
+    if isinstance(value, (np.integer, int)) and not isinstance(value, bool):
+        return ("int", int(value))
+    return value
 
 
 def _load_json(path: Path) -> dict[str, object]:
@@ -699,6 +1036,7 @@ def main() -> None:
     validation = config.get("tensor_network_validation", {})
     if not isinstance(validation, dict) or not validation.get("enabled", False):
         raise ValueError("tensor_network_validation.enabled must be true in the benchmark config.")
+    backend = resolve_validation_backend(validation)
 
     n_qubits = int(parameters.get("num_qubits", 0))
     total_time = float(parameters.get("T", 1.0))
@@ -739,7 +1077,8 @@ def main() -> None:
         for row in configured_cases
         if isinstance(row, dict)
     )
-    learned_full = learned_term_selection(coefficient_path, max_requested_terms)
+    selection_limit = sys.maxsize if backend["name"] == "tenpy_tdvp_mpo" else max_requested_terms
+    learned_full = learned_term_selection(coefficient_path, selection_limit)
 
     output_dir = args.output_dir or _resolve_path(validation.get("output_dir", "mps_validation"), base=trained_run)
     if not output_dir.is_absolute():
@@ -757,10 +1096,11 @@ def main() -> None:
             previous_resolutions = previous_payload.get("resolution_results", [])
     payload: dict[str, object] = {
         "description": (
-            "Matrix-product-state dynamical validation using a symmetric Pauli-product formula, "
-            "bounded-bond compression, exact diagonal final-energy contractions, and exact product-state overlap."
+            "Tensor-network dynamical validation with an explicit legacy product-formula backend or "
+            "full-support compressed-MPO TDVP, exact final-energy contractions, and product-state overlap."
         ),
-        "backend": "quimb_mps",
+        "backend": backend["name"],
+        "backend_configuration": backend,
         "n_qubits": n_qubits,
         "total_time": total_time,
         "trained_run": str(trained_run),
@@ -791,16 +1131,56 @@ def main() -> None:
             or case.get("operator_grouping", validation.get("operator_grouping", "pauli_term"))
         )
         learned = subset_learned_terms(learned_full, learned_terms)
+        is_mpo_backend = backend["name"] == "tenpy_tdvp_mpo"
+        ablation = bool(case.get("ablation", backend["ablation"]))
+        support_class = "legacy"
+        if is_mpo_backend and "learned_sparse_agp" in protocols:
+            support_class = require_full_learned_support(
+                selected_terms=int(learned["selected_terms"]),
+                available_terms=int(learned["available_terms"]),
+                ablation=ablation,
+            )
+        mpo_max_bond = int(case.get("mpo_max_bond", case.get("max_bond", validation.get("max_bond", 64))))
+        mpo_cutoff = float(case.get("mpo_cutoff", case.get("cutoff", validation.get("cutoff", 1.0e-10))))
+        mps_max_bond = int(case.get("mps_max_bond", case.get("max_bond", validation.get("max_bond", 64))))
+        mps_cutoff = float(case.get("mps_cutoff", case.get("cutoff", validation.get("cutoff", 1.0e-10))))
+        resource_caps = backend["resource_caps"]
+        resource_caps = resource_caps if isinstance(resource_caps, Mapping) else {}
         case_payload: dict[str, object] = {
             "name": str(case.get("name", f"resolution_{case_index + 1}")),
+            "full_learned_terms": int(learned["available_terms"]),
+            "learned_support": support_class,
+            "ablation": ablation,
             "settings": {
+                "backend": backend["name"],
+                "integrator": str(case.get("integrator", backend["integrator"])),
                 "steps": steps,
+                "timestep": total_time / steps,
                 "max_bond": max_bond,
                 "learned_terms": int(learned["selected_terms"]),
+                "full_learned_terms": int(learned["available_terms"]),
                 "retained_rms_norm_fraction": float(learned["retained_rms_norm_fraction"]),
                 "cutoff": cutoff,
                 "coefficient_threshold": coefficient_threshold,
                 "operator_grouping": operator_grouping,
+                "temporal_grid_points": int(case.get("temporal_grid_points", backend["temporal_grid_points"])),
+                "temporal_retained_norm": float(case.get("temporal_retained_norm", backend["temporal_retained_norm"])),
+                "mpo_max_bond": mpo_max_bond,
+                "mpo_cutoff": mpo_cutoff,
+                "dynamic_mpo_max_bond": int(case.get("dynamic_mpo_max_bond", mpo_max_bond)),
+                "dynamic_mpo_cutoff": float(case.get("dynamic_mpo_cutoff", mpo_cutoff)),
+                "mps_max_bond": mps_max_bond,
+                "mps_cutoff": mps_cutoff,
+                "lanczos_max": int(case.get("lanczos_max", backend["lanczos_max"])),
+                "qubit_order_candidates": list(backend["qubit_order_candidates"]),
+                "action_probe_seed": int(backend["action_probe_seed"]),
+                "action_probe_product_states": int(backend["action_probe_product_states"]),
+                "action_probe_random_mps": int(backend["action_probe_random_mps"]),
+                "action_error_max": float(backend["action_error_max"]),
+                "mpo_workspace_cap_bytes": int(case.get("mpo_workspace_cap_bytes", backend["mpo_workspace_cap_bytes"])),
+                "max_build_seconds": case.get("max_build_seconds", resource_caps.get("max_build_seconds")),
+                "max_peak_memory_gb": case.get("max_peak_memory_gb", resource_caps.get("max_peak_memory_gb")),
+                "checkpoint_identity": _checkpoint_identity(coefficient_path),
             },
             "results": {},
         }
@@ -823,22 +1203,36 @@ def main() -> None:
                 f"grouping={operator_grouping}",
                 flush=True,
             )
-            result = run_mps_case(
-                h0=h0,
-                h1=h1,
-                learned=learned,
-                exact_ground_energy=ground_energy,
-                ground_bitstring=ground_bitstring,
-                protocols=(protocol,),
-                total_time=total_time,
-                steps=steps,
-                cutoff=cutoff,
-                max_bond=max_bond,
-                coefficient_threshold=coefficient_threshold,
-                learned_scale=float(validation.get("learned_scale", 1.0)),
-                operator_grouping=operator_grouping,
-                progress=bool(validation.get("progress", True)),
-            )
+            if is_mpo_backend:
+                result = run_mpo_case(
+                    h0=h0,
+                    h1=h1,
+                    learned=learned,
+                    exact_ground_energy=ground_energy,
+                    ground_bitstring=ground_bitstring,
+                    protocols=(protocol,),
+                    total_time=total_time,
+                    settings=case_payload["settings"],  # type: ignore[arg-type]
+                    backend=backend,
+                    learned_scale=float(validation.get("learned_scale", 1.0)),
+                )
+            else:
+                result = run_mps_case(
+                    h0=h0,
+                    h1=h1,
+                    learned=learned,
+                    exact_ground_energy=ground_energy,
+                    ground_bitstring=ground_bitstring,
+                    protocols=(protocol,),
+                    total_time=total_time,
+                    steps=steps,
+                    cutoff=cutoff,
+                    max_bond=max_bond,
+                    coefficient_threshold=coefficient_threshold,
+                    learned_scale=float(validation.get("learned_scale", 1.0)),
+                    operator_grouping=operator_grouping,
+                    progress=bool(validation.get("progress", True)),
+                )
             case_payload["results"].update(result)  # type: ignore[union-attr]
             _save_progress(summary_path, payload)
         _add_baseline_quotients(case_payload["results"])  # type: ignore[arg-type]
@@ -856,6 +1250,14 @@ def main() -> None:
         )
     payload["convergence"] = convergence
 
+    compression: dict[str, object] = {"status": "not_tested", "reason": "Legacy product-formula backend."}
+    if backend["name"] == "tenpy_tdvp_mpo":
+        compression = assess_mpo_compression(
+            final_results,  # type: ignore[arg-type]
+            action_error_max=float(backend["action_error_max"]),
+        )
+    payload["compression"] = compression
+
     statevector_agreement: dict[str, object] = {
         "status": "not_tested",
         "reason": "No statevector reference was configured.",
@@ -868,19 +1270,25 @@ def main() -> None:
             reference_payload,
             learned_terms=int(final_settings["learned_terms"]),  # type: ignore[index]
             learned_scale=float(validation.get("learned_scale", 1.0)),
+            require_matching_learned_terms=backend["name"] == "tenpy_tdvp_mpo",
         )
         statevector_agreement = assess_statevector_agreement(
             final_results,  # type: ignore[arg-type]
             reference_results,  # type: ignore[arg-type]
             energy_atol=float(validation.get("statevector_energy_atol", 0.05)),
             fidelity_atol=float(validation.get("statevector_fidelity_atol", 0.01)),
+            require_all_protocols=backend["name"] == "tenpy_tdvp_mpo",
         )
     payload["statevector_agreement"] = statevector_agreement
     payload["certification"] = validation_certification(
         convergence=convergence,
+        compression=compression,
         statevector_agreement=statevector_agreement,
         require_convergence=len(resolution_results) >= 2,
-        require_statevector=bool(statevector_reference),
+        require_compression=backend["name"] == "tenpy_tdvp_mpo" and not bool(resolution_results[-1]["ablation"]),
+        require_statevector=(
+            n_qubits <= 15 and backend["name"] == "tenpy_tdvp_mpo" and not bool(resolution_results[-1]["ablation"])
+        ) or bool(statevector_reference),
     )
     _save_progress(summary_path, payload)
     images_dir.mkdir(parents=True, exist_ok=True)
