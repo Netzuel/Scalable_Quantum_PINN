@@ -73,15 +73,25 @@ def fixed_unseen_gate(
 ) -> dict[str, object]:
     """Classify the fixed active probe without falling back to moving diagnostics."""
 
-    lifecycle = fixed_unseen_probe if fixed_unseen_probe is not None else row
-    if not bool(lifecycle.get("fixed_unseen_enabled", lifecycle.get("enabled", True))):
+    if fixed_unseen_probe is not None:
+        if "enabled" not in fixed_unseen_probe or "status" not in fixed_unseen_probe:
+            return {"status": "not_tested", "value": None, "reason": "missing_fixed_unseen_lifecycle"}
+        enabled = bool(fixed_unseen_probe["enabled"])
+        probe_status = str(fixed_unseen_probe["status"])
+        insufficiency_reason = fixed_unseen_probe.get("insufficiency_reason")
+    elif "fixed_unseen_enabled" in row and "fixed_unseen_probe_status" in row:
+        enabled = bool(row["fixed_unseen_enabled"])
+        probe_status = str(row["fixed_unseen_probe_status"])
+        insufficiency_reason = row.get("fixed_unseen_probe_reason")
+    else:
+        return {"status": "not_tested", "value": None, "reason": "missing_fixed_unseen_lifecycle"}
+    if not enabled:
         return {"status": "not_tested", "value": None, "reason": "disabled"}
-    probe_status = str(lifecycle.get("fixed_unseen_probe_status", lifecycle.get("status", "complete")))
     if probe_status != "complete":
         return {
             "status": "not_tested",
             "value": None,
-            "reason": str(lifecycle.get("insufficiency_reason", probe_status)),
+            "reason": str(insufficiency_reason or probe_status),
         }
     active_status = row.get("fixed_unseen_active_status")
     if not isinstance(active_status, Mapping):
@@ -178,6 +188,12 @@ def fixed_unseen_plot_series(rows: Sequence[Mapping[str, object]]) -> dict[str, 
         "moving_unseen_relative": np.asarray(
             [_finite_series_value(row.get("unseen_relative_residual")) for row in rows]
         ),
+        "labels": {
+            "active_relative": "fixed active quotient",
+            "null_absolute_per_term": "null absolute / term",
+            "null_scaled": "null scaled",
+            "moving_unseen_relative": "moving unseen quotient",
+        },
     }
 
 

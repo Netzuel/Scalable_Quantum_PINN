@@ -1396,7 +1396,7 @@ def plot_fixed_unseen_probes(
         marker="o",
         linewidth=LINE_WIDTH,
         color=OKABE_ITO[0],
-        label="fixed active quotient",
+        label=str(series["labels"]["active_relative"]),
     )
     axes[0].axhline(unseen_threshold, linestyle=":", color="0.5", linewidth=0.8)
     axes[0].set_ylabel("relative residual", fontsize=LABEL_FS)
@@ -1407,7 +1407,7 @@ def plot_fixed_unseen_probes(
         marker="s",
         linewidth=LINE_WIDTH,
         color=OKABE_ITO[1],
-        label="null absolute / term",
+        label=str(series["labels"]["null_absolute_per_term"]),
     )
     axes[1].semilogy(
         rounds,
@@ -1415,7 +1415,7 @@ def plot_fixed_unseen_probes(
         marker="^",
         linewidth=LINE_WIDTH,
         color=OKABE_ITO[2],
-        label="null scaled",
+        label=str(series["labels"]["null_scaled"]),
     )
     axes[1].set_title("fixed null leakage", fontsize=TITLE_FS)
     for axis in axes:
