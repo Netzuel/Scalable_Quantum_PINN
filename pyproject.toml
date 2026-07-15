@@ -23,7 +23,8 @@ chemistry = [
   "pyscf"
 ]
 tensor-network = [
-  "quimb==1.11.2"
+  "quimb==1.11.2",
+  "physics-tenpy==1.1.0"
 ]
 
 [tool.setuptools]
