@@ -319,6 +319,31 @@ class AGPPhysicalValidationTests(unittest.TestCase):
         self.assertIn("not feasible", note)
         self.assertIn("diagnostic only", note)
 
+    def test_table_hides_partial_mpo_final_time_metrics_and_labels_ablation(self):
+        payload = {
+            "backend": "tenpy_tdvp_mpo",
+            "convergence": {"status": "not_tested"},
+            "certification": {"status": "not_tested"},
+            "resolution_results": [{"ablation": True, "learned_terms": 4, "full_learned_terms": 8}],
+            "ground_energy": -1.0,
+            "results": {
+                "no_cd": {
+                    "final_energy": -0.9,
+                    "ground_state_fidelity": 0.8,
+                    "mps_diagnostics": {"status": "not_feasible", "completed_steps": 1, "steps": 4},
+                }
+            },
+        }
+
+        rows = physical_comparison_rows(payload)
+        note = physical_validation_note(payload)
+
+        self.assertIsNone(rows[1]["final_energy"])
+        self.assertIsNone(rows[1]["ground_state_fidelity"])
+        self.assertIn("partial/not feasible", note)
+        self.assertIn("ablation", note)
+        self.assertIn("4/8", note)
+
     def test_q156_comparison_table_marks_dynamical_metrics_unavailable(self):
         with TemporaryDirectory() as tmp:
             study_dir = Path(tmp) / "sweep_test"

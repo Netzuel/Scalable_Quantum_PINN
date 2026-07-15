@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import json
 import sys
 import time
@@ -76,6 +77,8 @@ def resolve_validation_backend(validation: Mapping[str, object]) -> dict[str, ob
         "action_probe_seed": int(raw.get("action_probe_seed", 11)),
         "action_probe_product_states": int(raw.get("action_probe_product_states", 4)),
         "action_probe_random_mps": int(raw.get("action_probe_random_mps", 2)),
+        "action_probe_exact_work_cap": int(raw.get("action_probe_exact_work_cap", 10_000_000)),
+        "action_probe_dynamic_samples": int(raw.get("action_probe_dynamic_samples", 3)),
         "action_error_max": float(raw.get("action_error_max", 1.0e-3)),
         "resource_caps": dict(resource_caps),
         "mpo_workspace_cap_bytes": int(
@@ -104,11 +107,66 @@ def require_full_learned_support(*, selected_terms: int, available_terms: int, a
 
 def _checkpoint_identity(path: Path) -> dict[str, object]:
     stat = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
     return {
         "path": str(path.resolve()),
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
+        "sha256": digest.hexdigest(),
     }
+
+
+def _canonical_hash(value: object) -> str:
+    def normalize(item: object) -> object:
+        if isinstance(item, Mapping):
+            return {str(key): normalize(value) for key, value in sorted(item.items(), key=lambda pair: str(pair[0]))}
+        if isinstance(item, (list, tuple)):
+            return [normalize(value) for value in item]
+        if isinstance(item, np.ndarray):
+            return {"shape": list(item.shape), "dtype": str(item.dtype), "sha256": hashlib.sha256(item.tobytes()).hexdigest()}
+        if isinstance(item, complex):
+            return [item.real, item.imag]
+        if isinstance(item, np.generic):
+            return item.item()
+        return item
+
+    return hashlib.sha256(json.dumps(normalize(value), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _hamiltonian_identity(h0: SparsePauliOperator, h1: SparsePauliOperator) -> str:
+    return _canonical_hash(
+        {
+            "h0": sorted((label, complex(value)) for label, value in h0.terms.items()),
+            "h1": sorted((label, complex(value)) for label, value in h1.terms.items()),
+        }
+    )
+
+
+def _ground_reference_identity(
+    validation: Mapping[str, object], *, ground_energy: float, ground_bitstring: str
+) -> str:
+    reference_path = validation.get("exact_final_ground_reference")
+    source: dict[str, object] = {"ground_energy": ground_energy, "ground_bitstring": ground_bitstring}
+    if reference_path:
+        path = _resolve_path(reference_path, base=ROOT)
+        source["reference_path"] = str(path.resolve())
+        source["reference_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return _canonical_hash(source)
+
+
+def _learned_schedule_identity(learned: Mapping[str, object], *, learned_scale: float) -> str:
+    return _canonical_hash(
+        {
+            "schedule_source": learned.get("schedule_source"),
+            "tau": np.asarray(learned["tau"], dtype=np.float64),
+            "lambda": None if learned.get("lambda") is None else np.asarray(learned["lambda"], dtype=np.float64),
+            "d_lambda_dt": None if learned.get("d_lambda_dt") is None else np.asarray(learned["d_lambda_dt"], dtype=np.float64),
+            "learned_scale": float(learned_scale),
+        }
+    )
 
 
 def _kron_paulis(label: str) -> np.ndarray:
@@ -586,6 +644,132 @@ def _static_mpo_compression_summary(value: object) -> tuple[int | None, float | 
     return (max(bonds) if bonds else None, sum(discarded_weights) if discarded_weights else None)
 
 
+def _aggregate_mpo_action_probes(diagnostics: Mapping[str, object]) -> dict[str, object]:
+    probes: list[Mapping[str, object]] = []
+    static = diagnostics.get("static_mpo_action_probes", {})
+    if isinstance(static, Mapping):
+        probes.extend(item for item in static.values() if isinstance(item, Mapping))
+    dynamic = diagnostics.get("dynamic_mpo_action_probes", [])
+    if isinstance(dynamic, Sequence) and not isinstance(dynamic, (str, bytes)):
+        probes.extend(item for item in dynamic if isinstance(item, Mapping))
+    statuses = [str(item.get("status", "not_tested")) for item in probes]
+    finite_error_intervals = [
+        interval
+        for item in probes
+        for interval in item.get("finite_error_intervals", [])
+        if isinstance(interval, Mapping)
+    ]
+    bounds = [
+        float(item["max_relative_action_error_upper_bound"])
+        for item in probes
+        if item.get("max_relative_action_error_upper_bound") is not None
+        and np.isfinite(float(item["max_relative_action_error_upper_bound"]))
+    ]
+    if "not_feasible" in statuses:
+        status = "not_feasible"
+    elif any(item in {"not_tested", "numerically_unresolved"} for item in statuses):
+        status = "numerically_unresolved" if "numerically_unresolved" in statuses else "not_tested"
+    elif probes and len(bounds) == len(probes):
+        status = "pass"
+    else:
+        status = "not_tested"
+    return {
+        "status": status,
+        "probe_count": len(probes),
+        "max_relative_action_error_upper_bound": max(bounds) if bounds else None,
+        "finite_error_intervals": finite_error_intervals,
+        "probes": probes,
+    }
+
+
+def _mps_z_observables(state: Any, ground_bitstring: str) -> dict[str, object]:
+    target_z = np.asarray([1.0 if bit == "0" else -1.0 for bit in ground_bitstring])
+    try:
+        z_values = np.asarray(
+            [float(np.real(state.expectation_value_term([("Z", site)]))) for site in range(state.L)],
+            dtype=np.float64,
+        )
+        result: dict[str, object] = {
+            "z_rmse": float(np.sqrt(np.mean((z_values - target_z) ** 2))),
+            "z_observables_status": "ok",
+        }
+        if state.L < 2:
+            result.update({"nearest_neighbor_zz_rmse": None, "nearest_neighbor_zz_status": "not_applicable"})
+            return result
+        target_zz = target_z[:-1] * target_z[1:]
+        zz_values = np.asarray(
+            [
+                float(np.real(state.expectation_value_term([("Z", site), ("Z", site + 1)])))
+                for site in range(state.L - 1)
+            ],
+            dtype=np.float64,
+        )
+        result.update(
+            {
+                "nearest_neighbor_zz_rmse": float(np.sqrt(np.mean((zz_values - target_zz) ** 2))),
+                "nearest_neighbor_zz_status": "ok",
+            }
+        )
+        return result
+    except (RuntimeError, TypeError, ValueError):
+        return {
+            "z_rmse": None,
+            "z_observables_status": "not_tested",
+            "nearest_neighbor_zz_rmse": None,
+            "nearest_neighbor_zz_status": "not_tested",
+        }
+
+
+def _completed_mpo_result(diagnostics: Mapping[str, object]) -> bool:
+    return (
+        str(diagnostics.get("status", "unresolved_error")) == "ok"
+        and int(diagnostics.get("completed_steps", -1)) == int(diagnostics.get("steps", -2))
+    )
+
+
+def _completed_comparable_mpo_resolution_count(
+    resolutions: Sequence[Mapping[str, object]],
+) -> int:
+    """Count the completed MPO ladder only when checkpoint/support provenance agrees."""
+
+    completed: list[Mapping[str, object]] = []
+    for case in resolutions:
+        if bool(case.get("ablation", False)):
+            continue
+        results = case.get("results", {})
+        if not isinstance(results, Mapping) or not results:
+            continue
+        if all(
+            isinstance(row, Mapping)
+            and isinstance(row.get("mps_diagnostics"), Mapping)
+            and _completed_mpo_result(row["mps_diagnostics"])
+            for row in results.values()
+        ):
+            completed.append(case)
+    if len(completed) < 2:
+        return len(completed)
+    comparable_axes = (
+        "backend",
+        "integrator",
+        "learned_terms",
+        "full_learned_terms",
+        "learned_scale",
+        "hamiltonian_identity",
+        "ground_reference_identity",
+        "ground_bitstring",
+        "schedule_identity",
+        "checkpoint_identity",
+    )
+    reference = completed[-1].get("settings", {})
+    if not isinstance(reference, Mapping):
+        return 0
+    for case in completed[-2:]:
+        settings = case.get("settings", {})
+        if not isinstance(settings, Mapping) or any(settings.get(key) != reference.get(key) for key in comparable_axes):
+            return 0
+    return len(completed)
+
+
 def run_mpo_case(
     *,
     h0: SparsePauliOperator,
@@ -643,7 +827,7 @@ def run_mpo_case(
             if mapped_protocol is None:
                 raise ValueError(f"Unsupported protocol: {protocol!r}.")
             start = time.perf_counter()
-            _, diagnostics = engine(
+            state, diagnostics = engine(
                 h0_terms=h0_terms,
                 h1_terms=h1_terms,
                 cd_factorization=factorization,
@@ -660,6 +844,13 @@ def run_mpo_case(
                 mpo_cutoff=float(settings["mpo_cutoff"]),
                 lanczos_max=int(settings["lanczos_max"]),
                 mpo_workspace_cap_bytes=int(settings["mpo_workspace_cap_bytes"]),
+                action_probe_product_states=int(settings.get("action_probe_product_states", 0)),
+                action_probe_random_mps=int(settings.get("action_probe_random_mps", 0)),
+                action_probe_seed=int(settings.get("action_probe_seed", 0)),
+                action_probe_exact_work_cap=int(settings.get("action_probe_exact_work_cap", 10_000_000)),
+                action_probe_dynamic_samples=int(
+                    settings.get("action_probe_dynamic_samples", 1 if int(settings.get("action_probe_product_states", 0)) or int(settings.get("action_probe_random_mps", 0)) else 0)
+                ),
             )
             diagnostics["runtime_seconds"] = time.perf_counter() - start
             max_build_seconds = settings.get("max_build_seconds")
@@ -680,22 +871,32 @@ def run_mpo_case(
             diagnostics["static_mpo_max_bond"] = static_max_bond
             diagnostics["static_mpo_discarded_weight"] = static_discarded_weight
             diagnostics["dynamic_mpo_max_bond"] = diagnostics.get("dynamic_mpo_peak_bond")
-            diagnostics["mpo_action_error"] = diagnostics.get("mpo_action_error")
-            diagnostics["mpo_action_status"] = diagnostics.get("mpo_action_status", "not_tested")
+            diagnostics["mpo_action_diagnostics"] = _aggregate_mpo_action_probes(diagnostics)
+            diagnostics["mpo_action_error"] = diagnostics["mpo_action_diagnostics"]["max_relative_action_error_upper_bound"]
+            diagnostics["mpo_action_status"] = diagnostics["mpo_action_diagnostics"]["status"]
             diagnostics["mps_max_bond"] = int(settings["mps_max_bond"])
             diagnostics["mps_cutoff"] = float(settings["mps_cutoff"])
             diagnostics["timestep"] = float(settings["timestep"])
-            final_energy = diagnostics.get("final_energy")
-            ground_fidelity = diagnostics.get("ground_fidelity")
+            complete = _completed_mpo_result(diagnostics)
+            final_energy = diagnostics.get("final_energy") if complete else None
+            ground_fidelity = diagnostics.get("ground_fidelity") if complete else None
+            observables = _mps_z_observables(state, ground_bitstring) if complete else {
+                "z_rmse": None,
+                "z_observables_status": "not_tested",
+                "nearest_neighbor_zz_rmse": None,
+                "nearest_neighbor_zz_status": "not_tested",
+            }
             row: dict[str, object] = {
                 "final_energy": final_energy,
                 "ground_energy": float(exact_ground_energy),
                 "ground_state_fidelity": ground_fidelity,
                 "energy_error": (
                     float(final_energy) - float(exact_ground_energy)
-                    if diagnostics.get("final_energy_status") == "ok"
+                    if complete and diagnostics.get("final_energy_status") == "ok"
                     else None
                 ),
+                "excitation_probability": 1.0 - float(ground_fidelity) if ground_fidelity is not None else None,
+                **observables,
                 "mps_diagnostics": diagnostics,
             }
             results[protocol] = row
@@ -818,16 +1019,25 @@ def assess_mpo_compression(
             if str(diagnostics.get("resource_statuses", {}).get("dynamic_mpo_assembly", "not_tested")) == "ok"
             else str(diagnostics.get("resource_statuses", {}).get("dynamic_mpo_assembly", "not_tested"))
         )
-        action_error = diagnostics.get("mpo_action_error")
-        action_status = (
-            "pass"
-            if action_error is not None and float(action_error) <= float(action_error_max)
-            else "not_tested"
+        action_diagnostics = diagnostics.get("mpo_action_diagnostics", {})
+        action_diagnostics = action_diagnostics if isinstance(action_diagnostics, Mapping) else {}
+        action_error = action_diagnostics.get(
+            "max_relative_action_error_upper_bound", diagnostics.get("mpo_action_error")
         )
+        measured_status = str(action_diagnostics.get("status", diagnostics.get("mpo_action_status", "not_tested")))
+        if measured_status in {"not_feasible", "not_tested", "not_comparable", "numerically_unresolved", "unresolved_error"}:
+            action_status = "not_tested"
+        elif action_error is None:
+            action_status = "not_tested"
+        elif float(action_error) > float(action_error_max):
+            action_status = "fail"
+        else:
+            action_status = "pass"
         gate_statuses = [evolution_status, temporal_status, static_status, dynamic_status, action_status]
-        if "not_feasible" in gate_statuses:
-            status = "not_feasible"
-        elif any(item in {"not_tested", "not_comparable", "unresolved_error", "numerically_unresolved"} for item in gate_statuses):
+        if any(
+            item in {"not_feasible", "not_tested", "not_comparable", "unresolved_error", "numerically_unresolved"}
+            for item in gate_statuses
+        ):
             status = "not_tested"
         elif all(item == "pass" or item == "ok" for item in gate_statuses):
             status = "pass"
@@ -844,8 +1054,6 @@ def assess_mpo_compression(
         statuses.append(status)
     if not statuses:
         status = "not_tested"
-    elif "not_feasible" in statuses:
-        status = "not_feasible"
     elif "not_tested" in statuses:
         status = "not_tested"
     elif all(item == "pass" for item in statuses):
@@ -898,6 +1106,8 @@ def validation_certification(
     require_statevector: bool,
     compression: Mapping[str, object] | None = None,
     require_compression: bool = False,
+    ablation: bool = False,
+    completed_comparable_resolutions: int | None = None,
 ) -> dict[str, object]:
     gates: list[tuple[str, Mapping[str, object]]] = []
     if require_convergence:
@@ -906,6 +1116,18 @@ def validation_certification(
         gates.append(("mpo_compression", compression or {"status": "not_tested"}))
     if require_statevector:
         gates.append(("statevector_agreement", statevector_agreement))
+    if ablation:
+        return {
+            "status": "not_tested",
+            "required_gates": [name for name, _ in gates],
+            "reason": "ablation deployments cannot certify learned physical validation.",
+        }
+    if completed_comparable_resolutions is not None and int(completed_comparable_resolutions) < 2:
+        return {
+            "status": "not_tested",
+            "required_gates": [name for name, _ in gates],
+            "reason": "MPO certification requires two completed comparable resolutions.",
+        }
     statuses = [str(gate.get("status", "not_tested")) for _, gate in gates]
     unresolved = {"not_feasible", "not_tested", "not_comparable", "unresolved_error", "numerically_unresolved"}
     if not statuses or any(status in unresolved for status in statuses):
@@ -1003,7 +1225,15 @@ def _add_baseline_quotients(results: dict[str, dict[str, object]]) -> None:
         return
     for row in results.values():
         for metric in ("energy_error", "excitation_probability", "z_rmse", "nearest_neighbor_zz_rmse"):
-            row[f"{metric}_quotient_vs_no_cd"] = float(row[metric]) / max(float(baseline[metric]), 1.0e-15)
+            value = row.get(metric)
+            reference = baseline.get(metric)
+            if value is None or reference is None:
+                row[f"{metric}_quotient_vs_no_cd"] = None
+                continue
+            try:
+                row[f"{metric}_quotient_vs_no_cd"] = float(value) / max(float(reference), 1.0e-15)
+            except (TypeError, ValueError):
+                row[f"{metric}_quotient_vs_no_cd"] = None
 
 
 def _save_progress(path: Path, payload: Mapping[str, object]) -> None:
@@ -1051,6 +1281,10 @@ def main() -> None:
         distance=str(parameters.get("distance", "1_0")),
     )
     ground_energy, ground_bitstring = _ground_reference(validation, n_qubits=n_qubits)
+    hamiltonian_identity = _hamiltonian_identity(h0, h1)
+    ground_reference_identity = _ground_reference_identity(
+        validation, ground_energy=ground_energy, ground_bitstring=ground_bitstring
+    )
 
     trained_run_raw = args.trained_run or validation.get("trained_run")
     if trained_run_raw is None:
@@ -1176,11 +1410,25 @@ def main() -> None:
                 "action_probe_seed": int(backend["action_probe_seed"]),
                 "action_probe_product_states": int(backend["action_probe_product_states"]),
                 "action_probe_random_mps": int(backend["action_probe_random_mps"]),
+                "action_probe_exact_work_cap": int(
+                    case.get("action_probe_exact_work_cap", backend["action_probe_exact_work_cap"])
+                ),
+                "action_probe_dynamic_samples": int(
+                    case.get("action_probe_dynamic_samples", backend["action_probe_dynamic_samples"])
+                ),
                 "action_error_max": float(backend["action_error_max"]),
                 "mpo_workspace_cap_bytes": int(case.get("mpo_workspace_cap_bytes", backend["mpo_workspace_cap_bytes"])),
                 "max_build_seconds": case.get("max_build_seconds", resource_caps.get("max_build_seconds")),
                 "max_peak_memory_gb": case.get("max_peak_memory_gb", resource_caps.get("max_peak_memory_gb")),
                 "checkpoint_identity": _checkpoint_identity(coefficient_path),
+                "coefficient_identity": _checkpoint_identity(coefficient_path),
+                "learned_scale": float(validation.get("learned_scale", 1.0)),
+                "hamiltonian_identity": hamiltonian_identity,
+                "ground_reference_identity": ground_reference_identity,
+                "ground_bitstring": ground_bitstring,
+                "schedule_identity": _learned_schedule_identity(
+                    learned, learned_scale=float(validation.get("learned_scale", 1.0))
+                ),
             },
             "results": {},
         }
@@ -1284,11 +1532,17 @@ def main() -> None:
         convergence=convergence,
         compression=compression,
         statevector_agreement=statevector_agreement,
-        require_convergence=len(resolution_results) >= 2,
-        require_compression=backend["name"] == "tenpy_tdvp_mpo" and not bool(resolution_results[-1]["ablation"]),
+        require_convergence=backend["name"] == "tenpy_tdvp_mpo" or len(resolution_results) >= 2,
+        require_compression=backend["name"] == "tenpy_tdvp_mpo",
         require_statevector=(
             n_qubits <= 15 and backend["name"] == "tenpy_tdvp_mpo" and not bool(resolution_results[-1]["ablation"])
         ) or bool(statevector_reference),
+        ablation=bool(resolution_results[-1]["ablation"]),
+        completed_comparable_resolutions=(
+            _completed_comparable_mpo_resolution_count(resolution_results)
+            if backend["name"] == "tenpy_tdvp_mpo"
+            else None
+        ),
     )
     _save_progress(summary_path, payload)
     images_dir.mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,6 @@
 import sys
 import unittest
+from importlib.util import find_spec
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +21,8 @@ from agp_mps_validation import (
     make_product_mps,
     pauli_rotation_matrix,
     run_mps_case,
+    run_mpo_case,
+    assess_mpo_compression,
     statevector_results_for_learned_terms,
     validation_certification,
     cached_protocol_result,
@@ -146,6 +149,11 @@ class AGPMPSValidationTests(unittest.TestCase):
             "resource_caps": {"max_build_seconds": 3600, "max_peak_memory_gb": 24},
             "qubit_order_candidates": ["native", "spectral"],
             "checkpoint_identity": {"path": "/tmp/final.pt", "size": 123, "mtime_ns": 456},
+            "learned_scale": 1.0,
+            "hamiltonian_identity": "h0h1-sha256",
+            "ground_reference_identity": "ground-sha256",
+            "ground_bitstring": "000000000000000",
+            "schedule_identity": "learned-schedule-sha256",
             "learned_terms": 32768,
         }
         previous = [{"settings": dict(settings), "results": {"learned_sparse_agp": {"final_energy": -1.0}}}]
@@ -158,6 +166,11 @@ class AGPMPSValidationTests(unittest.TestCase):
             ("steps", 48),
             ("integrator", "expm_mpo"),
             ("checkpoint_identity", {"path": "/tmp/final.pt", "size": 124, "mtime_ns": 456}),
+            ("learned_scale", 0.5),
+            ("hamiltonian_identity", "different-h0h1-sha256"),
+            ("ground_reference_identity", "different-ground-sha256"),
+            ("ground_bitstring", "100000000000000"),
+            ("schedule_identity", "different-schedule-sha256"),
         ):
             with self.subTest(key=key):
                 self.assertIsNone(
@@ -180,6 +193,147 @@ class AGPMPSValidationTests(unittest.TestCase):
 
         self.assertEqual(certification["status"], "pass")
         self.assertIn("mpo_compression", certification["required_gates"])
+
+    def test_certification_rejects_ablation_and_incomplete_mpo_resolution_ladders(self):
+        common = {
+            "convergence": {"status": "pass"},
+            "compression": {"status": "pass"},
+            "statevector_agreement": {"status": "pass"},
+            "require_convergence": True,
+            "require_compression": True,
+            "require_statevector": True,
+        }
+        self.assertEqual(
+            validation_certification(**common, ablation=True, completed_comparable_resolutions=2)["status"],
+            "not_tested",
+        )
+        self.assertEqual(
+            validation_certification(**common, ablation=False, completed_comparable_resolutions=1)["status"],
+            "not_tested",
+        )
+
+    def test_mpo_compression_uses_measured_upper_bound_and_unresolved_statuses(self):
+        base_diagnostics = {
+            "status": "ok",
+            "temporal_retained_norm": 1.0,
+            "temporal_rank": 1,
+            "static_mpo_compression": {"h0": {}},
+            "resource_statuses": {"dynamic_mpo_assembly": "ok"},
+        }
+        failed = assess_mpo_compression(
+            {
+                "learned_sparse_agp": {
+                    "mps_diagnostics": {
+                        **base_diagnostics,
+                        "mpo_action_diagnostics": {
+                            "status": "pass",
+                            "max_relative_action_error_upper_bound": 2.0e-3,
+                        },
+                    }
+                }
+            },
+            action_error_max=1.0e-3,
+        )
+        unresolved = assess_mpo_compression(
+            {
+                "learned_sparse_agp": {
+                    "mps_diagnostics": {
+                        **base_diagnostics,
+                        "mpo_action_diagnostics": {"status": "numerically_unresolved"},
+                    }
+                }
+            },
+            action_error_max=1.0e-3,
+        )
+        not_feasible = assess_mpo_compression(
+            {
+                "learned_sparse_agp": {
+                    "mps_diagnostics": {
+                        **base_diagnostics,
+                        "mpo_action_diagnostics": {"status": "not_feasible"},
+                    }
+                }
+            },
+            action_error_max=1.0e-3,
+        )
+        incomplete_evolution = assess_mpo_compression(
+            {
+                "learned_sparse_agp": {
+                    "mps_diagnostics": {
+                        **base_diagnostics,
+                        "status": "not_feasible",
+                        "mpo_action_diagnostics": {"status": "pass", "max_relative_action_error_upper_bound": 0.0},
+                    }
+                }
+            },
+            action_error_max=1.0e-3,
+        )
+
+        self.assertEqual(failed["status"], "fail")
+        self.assertEqual(unresolved["status"], "not_tested")
+        self.assertEqual(not_feasible["status"], "not_tested")
+        self.assertEqual(incomplete_evolution["status"], "not_tested")
+
+    def test_quotients_tolerate_unavailable_metrics(self):
+        import agp_mps_validation
+
+        results = {
+            "no_cd": {"energy_error": 1.0, "excitation_probability": None, "z_rmse": None, "nearest_neighbor_zz_rmse": None},
+            "learned_sparse_agp": {"energy_error": 0.5, "excitation_probability": None, "z_rmse": None, "nearest_neighbor_zz_rmse": None},
+        }
+
+        agp_mps_validation._add_baseline_quotients(results)
+
+        self.assertEqual(results["learned_sparse_agp"]["energy_error_quotient_vs_no_cd"], 0.5)
+        self.assertIsNone(results["learned_sparse_agp"]["z_rmse_quotient_vs_no_cd"])
+
+    @unittest.skipUnless(find_spec("tenpy") is not None, "TeNPy tensor-network extra is not installed")
+    def test_mpo_resolution_records_complete_metrics_and_action_probes(self):
+        h0 = SparsePauliOperator({"X": -1.0}, n_qubits=1)
+        h1 = SparsePauliOperator({"Z": -1.0}, n_qubits=1)
+        settings = {
+            "integrator": "tdvp",
+            "steps": 4,
+            "timestep": 0.25,
+            "temporal_grid_points": 5,
+            "temporal_retained_norm": 0.9999,
+            "mpo_max_bond": 8,
+            "mpo_cutoff": 1.0e-12,
+            "mps_max_bond": 8,
+            "mps_cutoff": 1.0e-12,
+            "lanczos_max": 12,
+            "mpo_workspace_cap_bytes": 8 * 1024 * 1024,
+            "action_probe_seed": 11,
+            "action_probe_product_states": 1,
+            "action_probe_random_mps": 0,
+            "action_probe_exact_work_cap": 100_000,
+            "action_error_max": 1.0e-8,
+        }
+        backend = {"qubit_order_candidates": ("native",), **settings}
+
+        result = run_mpo_case(
+            h0=h0,
+            h1=h1,
+            learned=None,
+            exact_ground_energy=-1.0,
+            ground_bitstring="0",
+            protocols=("no_cd",),
+            total_time=1.0,
+            settings=settings,
+            backend=backend,
+        )["no_cd"]
+
+        self.assertIn("excitation_probability", result)
+        self.assertIn("z_rmse", result)
+        self.assertIn("nearest_neighbor_zz_rmse", result)
+        self.assertEqual(result["z_observables_status"], "ok")
+        self.assertEqual(result["nearest_neighbor_zz_status"], "not_applicable")
+        self.assertEqual(result["mps_diagnostics"]["completed_steps"], 4)
+        self.assertIn("static_mpo_action_probes", result["mps_diagnostics"])
+        self.assertIn("dynamic_mpo_action_probes", result["mps_diagnostics"])
+        action_diagnostics = result["mps_diagnostics"]["mpo_action_diagnostics"]
+        self.assertIn("max_relative_action_error_upper_bound", action_diagnostics)
+        self.assertTrue(action_diagnostics["finite_error_intervals"])
 
     def test_tenpy_backend_is_explicit_and_learned_certification_requires_full_support(self):
         backend = resolve_validation_backend(

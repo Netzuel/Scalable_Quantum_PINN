@@ -231,8 +231,18 @@ def physical_comparison_rows(payload: Mapping[str, object]) -> list[dict[str, ob
     for key, label in PHYSICAL_TABLE_METHODS:
         source = results.get(key)
         source = source if isinstance(source, Mapping) else {}
-        final_energy = _finite_float(source.get("final_energy"))
-        energy_error = _finite_float(source.get("energy_error"))
+        diagnostics = source.get("mps_diagnostics", {})
+        diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        completed_steps = diagnostics.get("completed_steps")
+        planned_steps = diagnostics.get("steps")
+        result_is_complete = not diagnostics or (
+            str(diagnostics.get("status", "ok")) == "ok"
+            and completed_steps is not None
+            and planned_steps is not None
+            and int(completed_steps) >= int(planned_steps)
+        )
+        final_energy = _finite_float(source.get("final_energy")) if result_is_complete else None
+        energy_error = _finite_float(source.get("energy_error")) if result_is_complete else None
         if energy_error is None and final_energy is not None and ground_energy is not None:
             energy_error = abs(final_energy - ground_energy)
         rows.append(
@@ -240,7 +250,9 @@ def physical_comparison_rows(payload: Mapping[str, object]) -> list[dict[str, ob
                 "method": label,
                 "final_energy": final_energy,
                 "energy_error": energy_error,
-                "ground_state_fidelity": _finite_float(source.get("ground_state_fidelity")),
+                "ground_state_fidelity": (
+                    _finite_float(source.get("ground_state_fidelity")) if result_is_complete else None
+                ),
             }
         )
     return rows
@@ -268,18 +280,48 @@ def physical_validation_note(payload: Mapping[str, object]) -> str:
     if backend in {"quimb_mps", "quimb_product_formula"}:
         return f"MPS convergence: {status}; physical comparison is diagnostic only."
     full_terms = payload.get("full_learned_terms")
+    deployed_terms = None
+    ablation = False
     if full_terms is None:
         resolution_results = payload.get("resolution_results", [])
         if isinstance(resolution_results, Sequence) and resolution_results:
             final_resolution = resolution_results[-1]
             if isinstance(final_resolution, Mapping):
                 full_terms = final_resolution.get("full_learned_terms")
+                deployed_terms = final_resolution.get("learned_terms")
+                ablation = bool(final_resolution.get("ablation", False))
+                settings = final_resolution.get("settings", {})
+                if isinstance(settings, Mapping):
+                    deployed_terms = settings.get("learned_terms", deployed_terms)
     support = f"; full learned terms={full_terms}" if full_terms is not None else ""
+    if ablation:
+        support += f"; ablation deployed/available={deployed_terms}/{full_terms}"
+    partial_rows: list[str] = []
+    results = payload.get("results", {})
+    if isinstance(results, Mapping):
+        for protocol, row in results.items():
+            if not isinstance(row, Mapping):
+                continue
+            diagnostics = row.get("mps_diagnostics", {})
+            if not isinstance(diagnostics, Mapping):
+                continue
+            completed = diagnostics.get("completed_steps")
+            planned = diagnostics.get("steps")
+            status = str(diagnostics.get("status", "ok"))
+            if status != "ok" or (
+                completed is not None and planned is not None and int(completed) < int(planned)
+            ):
+                partial_rows.append(f"{protocol}={status}")
+    partial_note = (
+        f"; partial/not feasible final-time data ({', '.join(partial_rows)})"
+        if partial_rows
+        else ""
+    )
     if certified and status == "pass":
         return f"Backend: tenpy_tdvp_mpo{support}; convergence: pass; certification: pass."
     return (
         f"Backend: tenpy_tdvp_mpo{support}; convergence: {status}; "
-        "physical comparison is diagnostic only."
+        f"physical comparison is diagnostic only{partial_note}."
     )
 
 

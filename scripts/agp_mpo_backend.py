@@ -7,7 +7,7 @@ the optional tensor-network extra.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from itertools import combinations
 import math
@@ -93,7 +93,9 @@ class PreparedTDVPOperators:
     temporal_factorization: TemporalFactorization | None
     order: tuple[int, ...]
     diagnostics: dict[str, object]
+    h0_exact_mpo: object | None = None
     h1_exact_mpo: object | None = None
+    cd_mode_exact_mpos: list[object] = field(default_factory=list)
 
 
 def factor_direct_cd_coefficients(
@@ -1754,6 +1756,92 @@ def mpo_to_dense(mpo: Any) -> np.ndarray:
     )
 
 
+def _configured_action_probe(
+    exact_mpo: Any | None,
+    compressed_mpo: Any | None,
+    *,
+    product_state_count: int,
+    random_state_count: int,
+    seed: int,
+    exact_work_cap: int,
+    workspace_cap_bytes: int,
+) -> dict[str, object]:
+    """Run bounded deterministic action probes, preserving inconclusive outcomes."""
+
+    if exact_mpo is None or compressed_mpo is None:
+        return {"status": "not_feasible", "reason": "static MPO compression was not feasible"}
+    if int(product_state_count) == 0 and int(random_state_count) == 0:
+        return {"status": "not_tested", "reason": "action probes were not configured"}
+    generator = np.random.default_rng(int(seed))
+    product_states = tuple(
+        tuple("up" if bit == 0 else "down" for bit in generator.integers(0, 2, size=int(exact_mpo.L)))
+        for _ in range(int(product_state_count))
+    )
+    try:
+        result = probe_mpo_compression(
+            exact_mpo,
+            compressed_mpo,
+            product_states=product_states,
+            random_state_count=int(random_state_count),
+            seed=int(seed),
+            exact_work_cap=int(exact_work_cap),
+            workspace_cap_bytes=int(workspace_cap_bytes),
+        )
+    except (MemoryError, RuntimeError, ValueError) as error:
+        return {
+            "status": "unresolved_error",
+            "reason": str(error),
+            "seed": int(seed),
+            "product_state_count": int(product_state_count),
+            "random_state_count": int(random_state_count),
+            "exact_work_cap": int(exact_work_cap),
+            "workspace_cap_bytes": int(workspace_cap_bytes),
+            "finite_error_intervals": [],
+        }
+    upper_bounds: list[float] = []
+    lower_bounds: list[float] = []
+    finite_error_intervals: list[dict[str, object]] = []
+    statuses: list[str] = []
+    for probe in result["probes"]:
+        statuses.append(str(probe["status"]))
+        lower = probe.get("relative_action_error_lower_bound", probe.get("relative_action_error"))
+        upper = probe.get("relative_action_error_upper_bound", probe.get("relative_action_error"))
+        if (
+            lower is not None
+            and upper is not None
+            and np.isfinite(float(lower))
+            and np.isfinite(float(upper))
+        ):
+            lower_value = float(lower)
+            upper_value = float(upper)
+            lower_bounds.append(lower_value)
+            upper_bounds.append(upper_value)
+            finite_error_intervals.append(
+                {
+                    "name": str(probe.get("name", "unnamed")),
+                    "status": str(probe["status"]),
+                    "lower_bound": lower_value,
+                    "upper_bound": upper_value,
+                }
+            )
+    if "not_feasible" in statuses:
+        status = "not_feasible"
+    elif any(item in {"not_tested", "numerically_unresolved"} for item in statuses):
+        status = "numerically_unresolved" if "numerically_unresolved" in statuses else "not_tested"
+    elif upper_bounds:
+        status = "measured"
+    else:
+        status = "not_tested"
+    return {
+        "status": status,
+        "probe_statuses": statuses,
+        "finite_error_intervals": finite_error_intervals,
+        "max_relative_action_error_lower_bound": max(lower_bounds) if lower_bounds else None,
+        "max_relative_action_error_upper_bound": max(upper_bounds) if upper_bounds else None,
+        **result,
+    }
+
+
 def prepare_tdvp_operators(
     *,
     labels: Sequence[str],
@@ -1767,6 +1855,10 @@ def prepare_tdvp_operators(
     h1_terms: Sequence[tuple[str, complex]] | None = None,
     temporal_factorization: TemporalFactorization | None = None,
     mpo_workspace_cap_bytes: int = _DEFAULT_MPO_WORKSPACE_CAP_BYTES,
+    action_probe_product_states: int = 0,
+    action_probe_random_mps: int = 0,
+    action_probe_seed: int = 0,
+    action_probe_exact_work_cap: int = 10_000_000,
 ) -> PreparedTDVPOperators:
     """Build compressed static MPOs without dropping any declared CD mode or term."""
     n_qubits = _validate_n_qubits(n_qubits)
@@ -1789,7 +1881,8 @@ def prepare_tdvp_operators(
 
     static_compression: dict[str, object] = {"cd_modes": []}
     sites: list[object] = []
-    h0_mpo = h1_mpo = h1_exact_mpo = None
+    h0_mpo = h1_mpo = h0_exact_mpo = h1_exact_mpo = None
+    cd_mode_exact_mpos: list[object] = []
     status = "ok"
 
     def build_static(
@@ -1815,7 +1908,7 @@ def prepare_tdvp_operators(
         return exact, compressed
 
     if h0_terms is not None:
-        _, h0_mpo = build_static("h0", h0_terms)
+        h0_exact_mpo, h0_mpo = build_static("h0", h0_terms)
     if h1_terms is not None:
         h1_exact_mpo, h1_mpo = build_static("h1", h1_terms)
 
@@ -1843,6 +1936,7 @@ def prepare_tdvp_operators(
         else:
             compressed._agp_pauli_terms = exact._agp_pauli_terms
             cd_mode_mpos.append(compressed)
+        cd_mode_exact_mpos.append(exact)
 
     if not sites:
         _, _, _, MPO, _ = _require_tenpy()
@@ -1852,6 +1946,27 @@ def prepare_tdvp_operators(
         sites = list(identity.sites)
         del MPO
 
+    static_action_probes: dict[str, object] = {}
+    for index, (name, exact, compressed) in enumerate(
+        [
+            ("h0", h0_exact_mpo, h0_mpo),
+            ("h1", h1_exact_mpo, h1_mpo),
+            *[
+                (f"cd_mode_{mode}", exact, compressed)
+                for mode, (exact, compressed) in enumerate(zip(cd_mode_exact_mpos, cd_mode_mpos))
+            ],
+        ]
+    ):
+        static_action_probes[name] = _configured_action_probe(
+            exact,
+            compressed,
+            product_state_count=action_probe_product_states,
+            random_state_count=action_probe_random_mps,
+            seed=int(action_probe_seed) + index,
+            exact_work_cap=action_probe_exact_work_cap,
+            workspace_cap_bytes=mpo_workspace_cap_bytes,
+        )
+
     diagnostics: dict[str, object] = {
         "status": status,
         "learned_input_terms": len(normalized_labels),
@@ -1859,6 +1974,7 @@ def prepare_tdvp_operators(
         "support_fraction": 1.0 if normalized_labels else 0.0,
         "full_support_status": "pass" if status == "ok" else "not_feasible",
         "static_mpo_compression": static_compression,
+        "static_mpo_action_probes": static_action_probes,
         "static_mpo_bonds": {
             name: _mpo_bonds(mpo)
             for name, mpo in (("h0", h0_mpo), ("h1", h1_mpo))
@@ -1873,7 +1989,9 @@ def prepare_tdvp_operators(
         temporal_factorization=temporal_factorization,
         order=normalized_order,
         diagnostics=diagnostics,
+        h0_exact_mpo=h0_exact_mpo,
         h1_exact_mpo=h1_exact_mpo,
+        cd_mode_exact_mpos=cd_mode_exact_mpos,
     )
 
 
@@ -1896,6 +2014,11 @@ def evolve_protocol_tdvp(
     mpo_cutoff: float = 1.0e-12,
     lanczos_max: int = 20,
     mpo_workspace_cap_bytes: int = _DEFAULT_MPO_WORKSPACE_CAP_BYTES,
+    action_probe_product_states: int = 0,
+    action_probe_random_mps: int = 0,
+    action_probe_seed: int = 0,
+    action_probe_exact_work_cap: int = 10_000_000,
+    action_probe_dynamic_samples: int = 0,
 ) -> tuple[Any, dict[str, object]]:
     """Evolve the full declared MPO support with midpoint TDVP (two-site except q=1)."""
     return _evolve_protocol_mpo(
@@ -1917,6 +2040,11 @@ def evolve_protocol_tdvp(
         mpo_cutoff=mpo_cutoff,
         lanczos_max=lanczos_max,
         mpo_workspace_cap_bytes=mpo_workspace_cap_bytes,
+        action_probe_product_states=action_probe_product_states,
+        action_probe_random_mps=action_probe_random_mps,
+        action_probe_seed=action_probe_seed,
+        action_probe_exact_work_cap=action_probe_exact_work_cap,
+        action_probe_dynamic_samples=action_probe_dynamic_samples,
     )
 
 
@@ -1930,6 +2058,11 @@ def evolve_protocol_expm_mpo(**kwargs: Any) -> tuple[Any, dict[str, object]]:
     kwargs.setdefault("ground_bitstring", None)
     kwargs.setdefault("lanczos_max", 20)
     kwargs.setdefault("mpo_workspace_cap_bytes", _DEFAULT_MPO_WORKSPACE_CAP_BYTES)
+    kwargs.setdefault("action_probe_product_states", 0)
+    kwargs.setdefault("action_probe_random_mps", 0)
+    kwargs.setdefault("action_probe_seed", 0)
+    kwargs.setdefault("action_probe_exact_work_cap", 10_000_000)
+    kwargs.setdefault("action_probe_dynamic_samples", 0)
     return _evolve_protocol_mpo(integrator="expm_mpo", **kwargs)
 
 
@@ -2114,6 +2247,11 @@ def _evolve_protocol_mpo(
     mpo_cutoff: float,
     lanczos_max: int,
     mpo_workspace_cap_bytes: int,
+    action_probe_product_states: int,
+    action_probe_random_mps: int,
+    action_probe_seed: int,
+    action_probe_exact_work_cap: int,
+    action_probe_dynamic_samples: int,
 ) -> tuple[Any, dict[str, object]]:
     n_qubits = _protocol_n_qubits(h0_terms, h1_terms)
     dt = _validate_evolution_parameters(total_time, steps)
@@ -2158,6 +2296,10 @@ def _evolve_protocol_mpo(
         h1_terms=h1_terms,
         temporal_factorization=factorization,
         mpo_workspace_cap_bytes=mpo_workspace_cap_bytes,
+        action_probe_product_states=action_probe_product_states,
+        action_probe_random_mps=action_probe_random_mps,
+        action_probe_seed=action_probe_seed,
+        action_probe_exact_work_cap=action_probe_exact_work_cap,
     )
     chain_initial, original_initial = _chain_initial_state(initial_state, normalized_order)
     state = _make_product_mps(prepared.sites, chain_initial)
@@ -2180,6 +2322,8 @@ def _evolve_protocol_mpo(
         "dynamic_mpo_action_status": "not_tested",
         "dynamic_mpo_error_status": "not_tested",
         "dynamic_mpo_workspace": {"status": "not_tested"},
+        "dynamic_mpo_action_probes": [],
+        "static_mpo_action_probes": prepared.diagnostics["static_mpo_action_probes"],
         "operator_build_seconds": 0.0,
         "evolution_seconds": 0.0,
         "truncation_error": 0.0,
@@ -2212,6 +2356,13 @@ def _evolve_protocol_mpo(
     dynamic_peak_bond = 1
     midpoint_lambdas: list[float] = []
     dynamic_details: dict[str, object] = {"status": "not_tested"}
+    dynamic_action_probes: list[dict[str, object]] = []
+    dynamic_probe_steps = set()
+    if int(action_probe_dynamic_samples) > 0:
+        dynamic_probe_steps = {
+            int(round(index * (int(steps) - 1) / max(int(action_probe_dynamic_samples) - 1, 1)))
+            for index in range(min(int(action_probe_dynamic_samples), int(steps)))
+        }
     engine_name: str | None = None
     for step in range(int(steps)):
         tau = (step + 0.5) / int(steps)
@@ -2282,6 +2433,29 @@ def _evolve_protocol_mpo(
             return state, base_diagnostics
         operator_build_seconds += time.perf_counter() - build_start
         dynamic_peak_bond = max(dynamic_peak_bond, max(_mpo_bonds(dynamic_mpo), default=1))
+        if step in dynamic_probe_steps:
+            try:
+                exact_dynamic, _ = _assemble_dynamic_mpo(
+                    prepared,
+                    h0_coefficient=1.0 - lam,
+                    h1_coefficient=lam,
+                    cd_mode_coefficients=temporal_values,
+                    workspace_cap_bytes=mpo_workspace_cap_bytes,
+                    exact_components=True,
+                )
+                dynamic_action_probes.append(
+                    _configured_action_probe(
+                        exact_dynamic,
+                        dynamic_mpo,
+                        product_state_count=action_probe_product_states,
+                        random_state_count=action_probe_random_mps,
+                        seed=int(action_probe_seed) + step,
+                        exact_work_cap=action_probe_exact_work_cap,
+                        workspace_cap_bytes=mpo_workspace_cap_bytes,
+                    )
+                )
+            except (_DynamicMPOResourceError, MemoryError, ValueError) as error:
+                dynamic_action_probes.append({"status": "not_feasible", "reason": str(error)})
         if integrator == "tdvp":
             engine, engine_name = _make_tdvp_engine(
                 state,
@@ -2326,6 +2500,7 @@ def _evolve_protocol_mpo(
             "dynamic_mpo_action_status": str(dynamic_details["action_status"]),
             "dynamic_mpo_error_status": str(dynamic_details["error_status"]),
             "dynamic_mpo_workspace": dynamic_details,
+            "dynamic_mpo_action_probes": dynamic_action_probes,
             "resource_statuses": {
                 "static_mpo_compression": "ok",
                 "dynamic_mpo_assembly": "ok",
@@ -2523,8 +2698,15 @@ def _assemble_dynamic_mpo(
     cd_mode_coefficients: np.ndarray,
     workspace_cap_bytes: int,
     expm_compatible: bool = False,
+    exact_components: bool = False,
 ) -> tuple[Any, dict[str, object]]:
-    if prepared.h0_mpo is None or prepared.h1_mpo is None:
+    if exact_components:
+        if prepared.h0_exact_mpo is None or prepared.h1_exact_mpo is None:
+            raise RuntimeError("Exact dynamic action probing requires exact H_initial and H_final MPOs.")
+        components = [prepared.h0_exact_mpo, prepared.h1_exact_mpo, *prepared.cd_mode_exact_mpos]
+    else:
+        components = [prepared.h0_mpo, prepared.h1_mpo, *prepared.cd_mode_mpos]
+    if any(component is None for component in components):
         raise RuntimeError("Time-dependent evolution requires compressed H_initial and H_final MPOs.")
     if cd_mode_coefficients.shape != (len(prepared.cd_mode_mpos),):
         raise ValueError("Dynamic assembly requires one coefficient for every declared temporal mode.")
@@ -2534,9 +2716,8 @@ def _assemble_dynamic_mpo(
         or int(workspace_cap_bytes) < 1
     ):
         raise ValueError("workspace_cap_bytes must be a positive integer.")
-    components = [prepared.h0_mpo, prepared.h1_mpo, *prepared.cd_mode_mpos]
     coefficients = [h0_coefficient, h1_coefficient, *cd_mode_coefficients.tolist()]
-    if expm_compatible:
+    if expm_compatible and not exact_components:
         provenance_terms: list[Sequence[tuple[str, complex]]] = []
         for mpo in components:
             try:
@@ -2606,10 +2787,23 @@ def _assemble_dynamic_mpo(
                 block[left:next_left, right:next_right] = item
                 left, right = next_left, next_right
             tensors.append(block)
-    return _mpo_from_effective_tensors(MPO, npc, sites=prepared.sites, tensors=tensors), {
+    dynamic_mpo = _mpo_from_effective_tensors(MPO, npc, sites=prepared.sites, tensors=tensors)
+    if exact_components:
+        contributions: dict[str, complex] = {}
+        for coefficient, component in zip(coefficients, components, strict=True):
+            for label, value in component._agp_pauli_terms:
+                contributions[label] = contributions.get(label, 0.0j) + float(coefficient) * value
+        dynamic_mpo._agp_pauli_terms = tuple(
+            (label, value) for label, value in contributions.items() if value != 0.0
+        )
+    return dynamic_mpo, {
         **block_plan,
         "status": "ok",
-        "representation": "exact_block_sum_of_compressed_components",
+        "representation": (
+            "exact_block_sum_of_exact_components"
+            if exact_components
+            else "exact_block_sum_of_compressed_components"
+        ),
         "discarded_weight": 0.0,
         "action_status": "not_tested",
         "error_status": "exact_block_sum",
