@@ -18,8 +18,9 @@ import numpy as np
 _PAULI_SYMBOLS = frozenset("IXYZ")
 _SUPPORTED_ORDER_CANDIDATES = frozenset(("native", "reversed", "spectral"))
 _ENDPOINT_TOLERANCE = 1.0e-12
-_TERM_PRESERVATION_RELATIVE_ATOL = 1.0e-12
-_SPECTRAL_DEGENERACY_RELATIVE_ATOL = 1.0e-12
+_COLUMN_RETAINED_ENERGY_ATOL = 128.0 * np.finfo(np.float64).eps
+_SPECTRAL_EIGENVALUE_RELATIVE_ATOL = 128.0 * np.finfo(np.float64).eps
+_SPECTRAL_COMPONENT_ATOL_SCALE = 32.0
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,8 @@ class TemporalFactorization:
     rank_for_retained_norm: int
     rank_increased_for_term_preservation: bool
     rank_increase_reason: str | None
-    term_preservation_relative_atol: float
+    column_retained_energy_fractions: np.ndarray
+    minimum_column_retained_energy_fraction: float
 
     def reconstruct(self) -> np.ndarray:
         """Reconstruct the exact factorized direct-CD coefficient matrix."""
@@ -72,14 +74,14 @@ def factor_direct_cd_coefficients(
     *,
     retained_norm: float = 0.999999,
     endpoint_tolerance: float = _ENDPOINT_TOLERANCE,
-    term_preservation_relative_atol: float = _TERM_PRESERVATION_RELATIVE_ATOL,
 ) -> TemporalFactorization:
     """Factor every direct-CD coefficient with the smallest valid SVD rank.
 
     ``retained_norm`` is a squared-singular-value fraction. Every source
-    coefficient column with nonzero norm must retain a norm greater than
-    ``term_preservation_relative_atol * source_norm``. The rank is increased
-    beyond the global norm target when necessary and records that decision.
+    coefficient column with nonzero temporal energy must retain at least
+    ``retained_norm`` of its own squared temporal norm, within a tight
+    floating-point tolerance. The rank is increased beyond the global norm
+    target when necessary and records that decision.
 
     The direct-CD samples must use a normalized, strictly increasing time grid
     from zero to one. Endpoint coefficient rows must be zero to
@@ -99,11 +101,6 @@ def factor_direct_cd_coefficients(
         raise ValueError("retained_norm must be finite and in the interval (0, 1].")
     if not np.isfinite(endpoint_tolerance) or float(endpoint_tolerance) < 0.0:
         raise ValueError("endpoint_tolerance must be finite and nonnegative.")
-    if (
-        not np.isfinite(term_preservation_relative_atol)
-        or not 0.0 < float(term_preservation_relative_atol) < 1.0
-    ):
-        raise ValueError("term_preservation_relative_atol must be finite and in (0, 1).")
     if abs(float(tau_array[0])) > float(endpoint_tolerance):
         raise ValueError("tau must start at 0 within endpoint_tolerance.")
     if abs(float(tau_array[-1]) - 1.0) > float(endpoint_tolerance):
@@ -123,6 +120,7 @@ def factor_direct_cd_coefficients(
         static_modes = np.empty((0, coefficient_array.shape[1]), dtype=np.float64)
         retained_norm_fraction = 1.0
         rank_increase_reason = None
+        column_retained_energy_fractions = np.ones(coefficient_array.shape[1], dtype=np.float64)
     else:
         cumulative_norm_sq = np.cumsum(squared_singular_values)
         rank_for_retained_norm = int(
@@ -135,14 +133,17 @@ def factor_direct_cd_coefficients(
         ):
             rank_for_retained_norm += 1
 
-        source_norms = np.linalg.norm(coefficient_array, axis=0)
+        source_energies = np.sum(coefficient_array * coefficient_array, axis=0)
+        nonzero_columns = source_energies > 0.0
         rank = rank_for_retained_norm
         while rank < singular_values.size:
             reconstructed = left[:, :rank] @ (singular_values[:rank, None] * right[:rank, :])
-            retained_norms = np.linalg.norm(reconstructed, axis=0)
+            column_retained_energy_fractions = _column_retained_energy_fractions(
+                source_energies, reconstructed
+            )
             if np.all(
-                (source_norms == 0.0)
-                | (retained_norms > float(term_preservation_relative_atol) * source_norms)
+                column_retained_energy_fractions[nonzero_columns]
+                >= float(retained_norm) - _COLUMN_RETAINED_ENERGY_ATOL
             ):
                 break
             rank += 1
@@ -151,21 +152,25 @@ def factor_direct_cd_coefficients(
         static_modes = singular_values[:rank, None] * right[:rank, :]
         retained_norm_fraction = float(cumulative_norm_sq[rank - 1] / total_norm_sq)
         final_reconstruction = temporal_factors @ static_modes
-        final_retained_norms = np.linalg.norm(final_reconstruction, axis=0)
+        column_retained_energy_fractions = _column_retained_energy_fractions(
+            source_energies, final_reconstruction
+        )
         if not np.all(
-            (source_norms == 0.0)
-            | (final_retained_norms > float(term_preservation_relative_atol) * source_norms)
+            column_retained_energy_fractions[nonzero_columns]
+            >= float(retained_norm) - _COLUMN_RETAINED_ENERGY_ATOL
         ):
-            raise ValueError("Unable to preserve every nonzero source coefficient column.")
+            raise ValueError("Unable to retain the requested energy for every nonzero source coefficient column.")
         rank_increase_reason = (
             None
             if rank == rank_for_retained_norm
             else (
-                f"Increased rank from {rank_for_retained_norm} to {rank} to preserve nonzero "
-                f"source coefficient columns above relative norm threshold "
-                f"{float(term_preservation_relative_atol):.3e}."
+                f"Increased rank from {rank_for_retained_norm} to {rank} so every nonzero source "
+                f"coefficient column retains at least {float(retained_norm):.6g} of its squared "
+                f"temporal norm within {_COLUMN_RETAINED_ENERGY_ATOL:.3e} floating tolerance."
             )
         )
+
+    minimum_column_retained_energy_fraction = float(np.min(column_retained_energy_fractions))
 
     provisional = TemporalFactorization(
         tau=tau_array.copy(),
@@ -179,7 +184,8 @@ def factor_direct_cd_coefficients(
         rank_for_retained_norm=rank_for_retained_norm,
         rank_increased_for_term_preservation=rank > rank_for_retained_norm,
         rank_increase_reason=rank_increase_reason,
-        term_preservation_relative_atol=float(term_preservation_relative_atol),
+        column_retained_energy_fractions=column_retained_energy_fractions.copy(),
+        minimum_column_retained_energy_fraction=minimum_column_retained_energy_fraction,
     )
     reconstructed = provisional.reconstruct()
     return TemporalFactorization(
@@ -196,7 +202,8 @@ def factor_direct_cd_coefficients(
         rank_for_retained_norm=provisional.rank_for_retained_norm,
         rank_increased_for_term_preservation=provisional.rank_increased_for_term_preservation,
         rank_increase_reason=provisional.rank_increase_reason,
-        term_preservation_relative_atol=provisional.term_preservation_relative_atol,
+        column_retained_energy_fractions=provisional.column_retained_energy_fractions,
+        minimum_column_retained_energy_fraction=provisional.minimum_column_retained_energy_fraction,
     )
 
 
@@ -316,6 +323,18 @@ def _finite_weight(coefficient: complex) -> float:
     return float(abs(value))
 
 
+def _column_retained_energy_fractions(
+    source_energies: np.ndarray, reconstructed: np.ndarray
+) -> np.ndarray:
+    fractions = np.ones(source_energies.shape, dtype=np.float64)
+    nonzero_columns = source_energies > 0.0
+    reconstructed_energies = np.sum(reconstructed * reconstructed, axis=0)
+    fractions[nonzero_columns] = (
+        reconstructed_energies[nonzero_columns] / source_energies[nonzero_columns]
+    )
+    return fractions
+
+
 def _weighted_interaction_graph(
     terms: Sequence[tuple[str, float]], *, n_qubits: int
 ) -> np.ndarray:
@@ -334,14 +353,17 @@ def _spectral_order(interaction: np.ndarray) -> tuple[int, ...]:
         return (0,)
     laplacian = np.diag(np.sum(interaction, axis=1)) - interaction
     eigenvalues, eigenvectors = np.linalg.eigh(laplacian)
-    scale = max(1.0, float(np.max(np.abs(eigenvalues))))
-    degeneracy_tolerance = _SPECTRAL_DEGENERACY_RELATIVE_ATOL * scale
+    spectrum_scale = float(np.max(np.abs(eigenvalues)))
+    if spectrum_scale == 0.0:
+        return tuple(range(n_qubits))
+    degeneracy_tolerance = _SPECTRAL_EIGENVALUE_RELATIVE_ATOL * spectrum_scale
     if eigenvalues[1] <= degeneracy_tolerance or (
         n_qubits > 2 and eigenvalues[2] - eigenvalues[1] <= degeneracy_tolerance
     ):
         return tuple(range(n_qubits))
     fiedler = eigenvectors[:, 1].copy()
-    nonzero = np.flatnonzero(np.abs(fiedler) > degeneracy_tolerance)
+    component_tolerance = _SPECTRAL_COMPONENT_ATOL_SCALE * np.finfo(np.float64).eps * np.sqrt(n_qubits)
+    nonzero = np.flatnonzero(np.abs(fiedler) > component_tolerance)
     if nonzero.size and fiedler[nonzero[0]] < 0.0:
         fiedler *= -1.0
     return tuple(int(site) for site in np.lexsort((np.arange(n_qubits), fiedler)))

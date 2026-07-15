@@ -57,7 +57,7 @@ class TemporalFactorizationTests(unittest.TestCase):
         self.assertFalse(result.rank_increased_for_term_preservation)
         self.assertAlmostEqual(result.retained_norm_fraction, 1.0)
 
-    def test_factorization_increases_rank_to_preserve_every_nonzero_term(self) -> None:
+    def test_low_energy_column_forces_rank_increase_for_per_column_retained_energy(self) -> None:
         tau = np.linspace(0.0, 1.0, 5)
         direct = np.asarray([[0.0, 0.0], [10.0, 0.0], [0.0, 1.0], [0.0, 0.0], [0.0, 0.0]])
 
@@ -66,14 +66,12 @@ class TemporalFactorizationTests(unittest.TestCase):
         self.assertEqual(result.rank_for_retained_norm, 1)
         self.assertEqual(result.rank, 2)
         self.assertTrue(result.rank_increased_for_term_preservation)
-        self.assertIn("nonzero source coefficient columns", result.rank_increase_reason)
-        reconstructed = result.reconstruct()
-        for column in range(direct.shape[1]):
-            source_norm = np.linalg.norm(direct[:, column])
-            self.assertGreater(
-                np.linalg.norm(reconstructed[:, column]),
-                result.term_preservation_relative_atol * source_norm,
-            )
+        self.assertIn("squared temporal norm", result.rank_increase_reason)
+        self.assertGreaterEqual(
+            result.minimum_column_retained_energy_fraction,
+            0.99 - 1.0e-12,
+        )
+        np.testing.assert_allclose(result.column_retained_energy_fractions, np.ones(2), atol=1.0e-12)
 
     def test_factorization_preserves_zero_direct_cd_endpoints(self) -> None:
         tau = np.linspace(0.0, 1.0, 5)
@@ -186,6 +184,16 @@ class QubitOrderingTests(unittest.TestCase):
         result = select_qubit_order(terms, n_qubits=4, candidates=("spectral",))
 
         self.assertEqual(result.order, (0, 1, 2, 3))
+
+    def test_spectral_order_is_invariant_to_uniform_coefficient_rescaling(self) -> None:
+        terms = [("XIXI", 1.0), ("IIXX", 1.0), ("IXIX", 1.0)]
+        scaled_terms = [(label, coefficient * 1.0e-15) for label, coefficient in terms]
+
+        baseline = select_qubit_order(terms, n_qubits=4, candidates=("spectral",))
+        scaled = select_qubit_order(scaled_terms, n_qubits=4, candidates=("spectral",))
+
+        self.assertNotEqual(baseline.order, (0, 1, 2, 3))
+        self.assertEqual(baseline, scaled)
 
     def test_ordering_rejects_fractional_and_boolean_indices(self) -> None:
         terms = [("XII", 1.0)]
