@@ -72,10 +72,20 @@ The high-review remediation added two further RED gates:
   before invoking the MPS constructor. Cases above `exact_work_cap` or the
   workspace cap return a named `not_feasible` probe; no exact MPO action is
   formed or approximated.
-- Product probes calculate their output-amplitude difference directly and only
-  zero cancellation-scale residuals. Random-MPS probes use the corresponding
-  overlap roundoff bound. Identical actions therefore report exactly zero while
-  a relative `1e-10` perturbation remains detectable.
+- Product probes calculate their output-amplitude difference directly.
+  Random-MPS probes use the corresponding overlap roundoff bound. Identical
+  actions report exactly zero only through the source-object or exact
+  reconstruction provenance criterion, while a relative `1e-10` perturbation
+  remains detectable.
+- Cancellation handling is scale-relative: it has no unit-scale floor. A
+  subtractive norm or overlap within its roundoff bound is not reported as
+  zero. Unless the compared MPO is the source object or carries an exact
+  reconstruction provenance marker, the probe is `numerically_unresolved` with
+  `relative_action_error=None`, a conservative upper bound, and a direct
+  lower bound when on-support amplitudes already prove a nonzero error.
+- The single-site random probe creates a seeded normalized local state with
+  `MPS.from_product_state`; it never calls the no-bond random-unitary
+  evolution path.
 - Requested random bond dimension is capped at the finite-chain Schmidt bound
   and both values are reported. Exact zero action denominators remain
   `not_tested`.
@@ -92,14 +102,15 @@ conda run -n torch-mps python -m py_compile scripts/agp_mpo_backend.py tests/tes
 git diff --check
 ```
 
-Result: 35 focused tests passed, compilation passed, and the diff check was
+Result: 39 focused tests passed, compilation passed, and the diff check was
 clean. Coverage includes exact dense equivalence, duplicate combination and
 cancellation metadata, explicit arithmetic-zero tolerance, qubit-order
 equivalence, large-q construction with dense guards, compression error and
 resource limits, global Hilbert-Schmidt discarded-weight accounting,
 deterministic product/random MPS action errors, cancellation-safe zero action
-errors with a detectable small perturbation, zero-denominator status, and
-optional-import behavior.
+errors with a detectable small perturbation, scale-rescaled error probes,
+numerically-unresolved leakage bounds, single-site seeded random MPS probes,
+zero-denominator status, and optional-import behavior.
 
 The adversarial q12/512 test uses labels scrambled across the full 12-site
 Pauli address space. With `max_bond=8` and an 8 MiB cap it reports

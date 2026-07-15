@@ -494,6 +494,7 @@ def compress_mpo_hilbert_schmidt(
             core[0, 0, 0] = 1.0
             cores.append(core)
         compressed = _mpo_from_pauli_cores(MPO, npc, sites=mpo.sites, cores=cores)
+        _mark_exact_identity(compressed, pauli_terms)
         diagnostics.update(
             {
                 "peak_workspace_bytes": zero_output_required,
@@ -722,6 +723,8 @@ def compress_mpo_hilbert_schmidt(
     else:
         per_bond_discarded_weights = [0.0] * len(per_bond_discarded_squared_norms)
     discarded_weight = float(sum(per_bond_discarded_weights))
+    if not any(weight != 0.0 for weight in per_bond_discarded_coefficient_norms):
+        _mark_exact_identity(compressed, pauli_terms)
     diagnostics.update(
         {
             "peak_workspace_bytes": max(peak_workspace, final_required),
@@ -792,6 +795,11 @@ def probe_mpo_compression(
     pauli_terms = getattr(exact_mpo, "_agp_pauli_terms", None)
     if pauli_terms is None:
         raise ValueError("Exact MPO is missing Pauli-coordinate provenance.")
+    exact_identity_established = (
+        compressed_mpo is exact_mpo
+        or getattr(compressed_mpo, "_agp_exact_identity_pauli_terms", None)
+        == tuple(pauli_terms)
+    )
 
     if product_states is None:
         alternating = tuple("up" if site % 2 == 0 else "down" for site in range(exact_mpo.L))
@@ -865,9 +873,18 @@ def probe_mpo_compression(
                 exact_norm_squared=exact_norm_squared,
                 compressed_norm_squared=float(compressed_metrics["compressed_norm_squared"]),
                 cross_overlap=complex(compressed_metrics["cross_overlap"]),
-                difference_norm_squared=float(
-                    compressed_metrics["difference_norm_squared"]
+                difference_norm_squared=(
+                    float(compressed_metrics["direct_difference_norm_squared"])
+                    + float(compressed_metrics["off_support_norm_squared"])
+                    if compressed_metrics["off_support_status"] == "measured"
+                    else float(compressed_metrics["direct_difference_norm_squared"])
                 ),
+                unresolved_difference_norm_squared_upper_bound=(
+                    float(compressed_metrics["off_support_norm_squared_upper_bound"])
+                    if compressed_metrics["off_support_status"] == "numerically_unresolved"
+                    else None
+                ),
+                exact_identity_established=exact_identity_established,
                 estimated_exact_work=estimated_exact_work,
                 peak_workspace_bytes=max(
                     estimated_sparse_bytes,
@@ -914,20 +931,12 @@ def probe_mpo_compression(
                     )
                 )
                 continue
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message="unit_cell_width is a new argument.*",
-                    category=UserWarning,
-                    module=r"tenpy\.networks\.mps",
-                )
-                random_state = MPS.from_random_unitary_evolution(
-                    exact_mpo.sites,
-                    chi=effective_random_bond,
-                    p_state=["up"] * exact_mpo.L,
-                    bc="finite",
-                    dtype=np.complex128,
-                )
+            random_state = _seeded_random_mps(
+                MPS,
+                exact_mpo.sites,
+                n_qubits=exact_mpo.L,
+                random_bond=effective_random_bond,
+            )
             random_metrics = _random_mps_action_metrics(
                 pauli_terms,
                 compressed_mpo,
@@ -972,6 +981,7 @@ def probe_mpo_compression(
                         random_metrics["compressed_norm_squared"]
                     ),
                     cross_overlap=complex(random_metrics["cross_overlap"]),
+                    exact_identity_established=exact_identity_established,
                     estimated_exact_work=estimated_random_work,
                     peak_workspace_bytes=max(
                         estimated_random_workspace,
@@ -1003,6 +1013,9 @@ def probe_mpo_compression(
         "not_tested_probes": sum(probe["status"] == "not_tested" for probe in probes),
         "not_feasible_probes": sum(
             probe["status"] == "not_feasible" for probe in probes
+        ),
+        "numerically_unresolved_probes": sum(
+            probe["status"] == "numerically_unresolved" for probe in probes
         ),
         "max_relative_action_error": max(tested_errors) if tested_errors else None,
         "mean_relative_action_error": (
@@ -1104,35 +1117,33 @@ def _compressed_product_action_metrics(
     compressed_amplitudes = query[:, int(right_boundary)]
     compressed_norm_squared = float(np.real(density[int(right_boundary), int(right_boundary)]))
     compressed_norm_squared = _nonnegative_roundoff(
-        compressed_norm_squared, scale=max(abs(compressed_norm_squared), 1.0)
+        compressed_norm_squared, scale=abs(compressed_norm_squared)
     )
     queried_compressed_norm_squared = float(
         np.vdot(compressed_amplitudes, compressed_amplitudes).real
     )
-    unqueried_compressed_norm_squared = _cancellation_safe_nonnegative_difference(
-        compressed_norm_squared,
-        queried_compressed_norm_squared,
-    )
-    amplitude_scale = max(
-        float(np.max(np.abs(exact_amplitudes), initial=0.0)),
-        float(np.max(np.abs(compressed_amplitudes), initial=0.0)),
-        np.finfo(np.float64).tiny,
-    )
-    amplitude_tolerance = (
-        64.0 * max(mpo.L, 1) * np.finfo(np.float64).eps * amplitude_scale
+    unqueried_compressed_norm_squared, off_support_roundoff_bound = (
+        _cancellation_safe_nonnegative_difference(
+            compressed_norm_squared,
+            queried_compressed_norm_squared,
+        )
     )
     amplitude_differences = compressed_amplitudes - exact_amplitudes
-    amplitude_differences[np.abs(amplitude_differences) <= amplitude_tolerance] = 0.0
-    difference_norm_squared = float(
+    direct_difference_norm_squared = float(
         np.vdot(amplitude_differences, amplitude_differences).real
-        + unqueried_compressed_norm_squared
     )
     return {
         "status": "ok",
         "compressed_norm_squared": compressed_norm_squared,
         "cross_overlap": np.vdot(exact_amplitudes, compressed_amplitudes),
-        "difference_norm_squared": difference_norm_squared,
-        "amplitude_roundoff_tolerance": amplitude_tolerance,
+        "direct_difference_norm_squared": direct_difference_norm_squared,
+        "off_support_status": (
+            "numerically_unresolved"
+            if unqueried_compressed_norm_squared is None
+            else "measured"
+        ),
+        "off_support_norm_squared": unqueried_compressed_norm_squared,
+        "off_support_norm_squared_upper_bound": off_support_roundoff_bound,
         "peak_workspace_bytes": max(peak_workspace, required_workspace),
     }
 
@@ -1157,6 +1168,39 @@ def _estimate_random_mps_workspace_bytes(mpo: Any, *, random_bond: int) -> int:
         for site in range(mpo.L)
     )
     return 3 * compressed_action_bytes + 3 * state_tensor_bytes
+
+
+def _seeded_random_mps(
+    MPS: Any,
+    sites: Sequence[Any],
+    *,
+    n_qubits: int,
+    random_bond: int,
+) -> Any:
+    if n_qubits == 1:
+        local_state = np.random.normal(size=2) + 1.0j * np.random.normal(size=2)
+        local_state /= np.linalg.norm(local_state)
+        return MPS.from_product_state(
+            list(sites),
+            [local_state],
+            bc="finite",
+            dtype=np.complex128,
+            unit_cell_width=n_qubits,
+        )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="unit_cell_width is a new argument.*",
+            category=UserWarning,
+            module=r"tenpy\.networks\.mps",
+        )
+        return MPS.from_random_unitary_evolution(
+            sites,
+            chi=random_bond,
+            p_state=["up"] * n_qubits,
+            bc="finite",
+            dtype=np.complex128,
+        )
 
 
 def _random_mps_action_metrics(
@@ -1201,7 +1245,7 @@ def _random_mps_action_metrics(
             )
     exact_norm_real = _nonnegative_roundoff(
         float(np.real(exact_norm_squared)),
-        scale=max(float(abs(exact_norm_squared)), 1.0),
+        scale=float(abs(exact_norm_squared)),
     )
     if exact_norm_real == 0.0:
         return {
@@ -1239,18 +1283,69 @@ def _action_error_probe(
     estimated_exact_work: int,
     peak_workspace_bytes: int,
     difference_norm_squared: float | None = None,
+    unresolved_difference_norm_squared_upper_bound: float | None = None,
+    exact_identity_established: bool = False,
 ) -> dict[str, object]:
+    if exact_identity_established:
+        difference_norm_squared = 0.0
+        roundoff_bound = 0.0
+        error_method = "provenance_established_identity"
+    elif unresolved_difference_norm_squared_upper_bound is not None:
+        direct_difference = 0.0 if difference_norm_squared is None else difference_norm_squared
+        relative_upper_bound = float(
+            np.sqrt(
+                (direct_difference + unresolved_difference_norm_squared_upper_bound)
+                / exact_norm_squared
+            )
+        )
+        return {
+            "name": name,
+            "kind": kind,
+            "status": "numerically_unresolved",
+            "action_norm": float(np.sqrt(exact_norm_squared)),
+            "relative_action_error": None,
+            "relative_action_error_lower_bound": float(
+                np.sqrt(direct_difference / exact_norm_squared)
+            ),
+            "relative_action_error_upper_bound": relative_upper_bound,
+            "relative_action_error_numerical_floor": float(
+                np.sqrt(
+                    unresolved_difference_norm_squared_upper_bound / exact_norm_squared
+                )
+            ),
+            "action_error_method": "cancellation_limited_norm_difference",
+            "estimated_exact_work": int(estimated_exact_work),
+            "peak_workspace_bytes": int(peak_workspace_bytes),
+        }
     if difference_norm_squared is None:
         difference_norm_squared, roundoff_bound = _overlap_squared_difference(
             exact_norm_squared,
             compressed_norm_squared,
             cross_overlap,
         )
+        if difference_norm_squared is None:
+            return {
+                "name": name,
+                "kind": kind,
+                "status": "numerically_unresolved",
+                "action_norm": float(np.sqrt(exact_norm_squared)),
+                "relative_action_error": None,
+                "relative_action_error_lower_bound": 0.0,
+                "relative_action_error_upper_bound": float(
+                    np.sqrt(roundoff_bound / exact_norm_squared)
+                ),
+                "relative_action_error_numerical_floor": float(
+                    np.sqrt(roundoff_bound / exact_norm_squared)
+                ),
+                "action_error_method": "cancellation_limited_overlap",
+                "estimated_exact_work": int(estimated_exact_work),
+                "peak_workspace_bytes": int(peak_workspace_bytes),
+            }
         error_method = "overlap_with_roundoff_bound"
     else:
         difference_norm_squared = _nonnegative_roundoff(
             difference_norm_squared,
-            scale=max(exact_norm_squared, compressed_norm_squared, 1.0),
+            scale=max(exact_norm_squared, compressed_norm_squared),
         )
         roundoff_bound = 0.0
         error_method = "direct_product_amplitudes"
@@ -1345,28 +1440,33 @@ def _nonnegative_roundoff(value: float, *, scale: float) -> float:
     return value
 
 
-def _cancellation_safe_nonnegative_difference(total: float, part: float) -> float:
-    """Subtract two contraction norms without reporting cancellation noise as error."""
+def _cancellation_safe_nonnegative_difference(
+    total: float, part: float
+) -> tuple[float | None, float]:
+    """Return an off-support norm or an explicit bound when subtraction is ambiguous."""
     difference = total - part
-    scale = max(abs(total), abs(part), 1.0)
+    scale = max(abs(total), abs(part))
+    if scale == 0.0:
+        return 0.0, 0.0
     roundoff_bound = 512.0 * np.finfo(np.float64).eps * scale
     if abs(difference) <= roundoff_bound:
-        return 0.0
-    return _nonnegative_roundoff(difference, scale=scale)
+        return None, roundoff_bound
+    return _nonnegative_roundoff(difference, scale=scale), roundoff_bound
 
 
 def _overlap_squared_difference(
     exact_norm_squared: float,
     compressed_norm_squared: float,
     cross_overlap: complex,
-) -> tuple[float, float]:
+) -> tuple[float | None, float]:
     """Return an overlap-derived squared error with an explicit cancellation bound."""
     scale = max(
         abs(exact_norm_squared),
         abs(compressed_norm_squared),
         abs(cross_overlap),
-        1.0,
     )
+    if scale == 0.0:
+        return 0.0, 0.0
     roundoff_bound = 512.0 * np.finfo(np.float64).eps * scale
     difference = (
         exact_norm_squared
@@ -1374,7 +1474,7 @@ def _overlap_squared_difference(
         - 2.0 * float(np.real(cross_overlap))
     )
     if abs(difference) <= roundoff_bound:
-        return 0.0, roundoff_bound
+        return None, roundoff_bound
     return _nonnegative_roundoff(difference, scale=scale), roundoff_bound
 
 
@@ -1553,6 +1653,11 @@ def _compression_not_feasible(
     return None, diagnostics
 
 
+def _mark_exact_identity(mpo: Any, pauli_terms: Sequence[tuple[str, complex]]) -> None:
+    """Record that this MPO is an algebraically exact reconstruction of the source."""
+    mpo._agp_exact_identity_pauli_terms = tuple(pauli_terms)
+
+
 def _svd_retained_rank(
     singular_values: np.ndarray,
     *,
@@ -1604,7 +1709,7 @@ def _apply_mpo_action(mpo: Any, state: Any, npc: Any) -> Any:
 def _real_overlap(left: Any, right: Any) -> float:
     overlap = left.overlap(right, ignore_form=True)
     result = float(np.real(overlap))
-    scale = max(float(abs(overlap)), 1.0)
+    scale = float(abs(overlap))
     if result < 0.0 and abs(result) <= 256.0 * np.finfo(np.float64).eps * scale:
         return 0.0
     if result < 0.0:

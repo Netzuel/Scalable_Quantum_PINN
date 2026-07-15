@@ -544,10 +544,17 @@ class MPOCompressionTests(unittest.TestCase):
             second = probe_mpo_compression(exact, compressed, **settings)
 
         self.assertEqual(first, second)
-        self.assertEqual(first["tested_probes"], 4)
+        self.assertEqual(
+            first["tested_probes"] + first["numerically_unresolved_probes"], 4
+        )
         self.assertEqual(first["not_tested_probes"], 0)
         self.assertGreater(first["max_relative_action_error"], 0.0)
-        self.assertTrue(all(probe["status"] == "tested" for probe in first["probes"]))
+        self.assertTrue(
+            all(
+                probe["status"] in ("tested", "numerically_unresolved")
+                for probe in first["probes"]
+            )
+        )
         product = np.zeros(2**3, dtype=np.complex128)
         product[2] = 1.0  # |up, down, up> in the native computational order.
         exact_dense = mpo_to_dense(exact)
@@ -555,7 +562,14 @@ class MPOCompressionTests(unittest.TestCase):
         expected_error = np.linalg.norm((exact_dense - compressed_dense) @ product) / np.linalg.norm(
             exact_dense @ product
         )
-        self.assertAlmostEqual(first["probes"][1]["relative_action_error"], expected_error)
+        product_probe = first["probes"][1]
+        if product_probe["status"] == "tested":
+            self.assertAlmostEqual(product_probe["relative_action_error"], expected_error)
+        else:
+            self.assertIsNone(product_probe["relative_action_error"])
+            self.assertGreaterEqual(
+                product_probe["relative_action_error_upper_bound"], expected_error
+            )
         from tenpy.networks.mps import MPS
 
         random_state = np.random.get_state()
@@ -576,10 +590,17 @@ class MPOCompressionTests(unittest.TestCase):
         expected_random_error = np.linalg.norm(
             (exact_dense - compressed_dense) @ random_dense
         ) / np.linalg.norm(exact_dense @ random_dense)
-        self.assertAlmostEqual(
-            first["probes"][2]["relative_action_error"],
-            expected_random_error,
-        )
+        random_probe = first["probes"][2]
+        if random_probe["status"] == "tested":
+            self.assertAlmostEqual(
+                random_probe["relative_action_error"], expected_random_error
+            )
+        else:
+            self.assertIsNone(random_probe["relative_action_error"])
+            self.assertGreaterEqual(
+                random_probe["relative_action_error_upper_bound"],
+                expected_random_error,
+            )
 
     def test_random_probe_reports_not_feasible_above_exact_work_cap(self) -> None:
         terms = [
@@ -681,9 +702,120 @@ class MPOCompressionTests(unittest.TestCase):
             product_states=(("up", "down"),),
             random_state_count=0,
         )
-        measured = perturbed_diagnostics["probes"][0]["relative_action_error"]
-        self.assertGreater(measured, 0.0)
-        self.assertAlmostEqual(measured, relative_perturbation, delta=1.0e-13)
+        perturbed_probe = perturbed_diagnostics["probes"][0]
+        if perturbed_probe["status"] == "tested":
+            measured = perturbed_probe["relative_action_error"]
+            self.assertGreater(measured, 0.0)
+            self.assertAlmostEqual(measured, relative_perturbation, delta=1.0e-13)
+        else:
+            self.assertEqual(perturbed_probe["status"], "numerically_unresolved")
+            self.assertIsNone(perturbed_probe["relative_action_error"])
+            self.assertAlmostEqual(
+                perturbed_probe["relative_action_error_lower_bound"],
+                relative_perturbation,
+                delta=1.0e-13,
+            )
+            self.assertGreaterEqual(
+                perturbed_probe["relative_action_error_upper_bound"],
+                relative_perturbation,
+            )
+
+    def test_product_probe_keeps_unit_relative_error_after_small_scale_rescaling(self) -> None:
+        for scale in (1.0, 1.0e-10):
+            exact, _ = build_exact_pauli_mpo(
+                [("I", scale)], n_qubits=1, order=(0,)
+            )
+            perturbed, _ = build_exact_pauli_mpo(
+                [("I", scale), ("X", scale)], n_qubits=1, order=(0,)
+            )
+
+            diagnostics = probe_mpo_compression(
+                exact,
+                perturbed,
+                product_states=(("up",),),
+                random_state_count=0,
+            )
+
+            probe = diagnostics["probes"][0]
+            self.assertEqual(probe["status"], "tested")
+            self.assertAlmostEqual(probe["relative_action_error"], 1.0, places=12)
+
+    def test_product_probe_marks_cancellation_limited_leakage_unresolved(self) -> None:
+        exact, _ = build_exact_pauli_mpo([("I", 1.0)], n_qubits=1, order=(0,))
+        perturbed, _ = build_exact_pauli_mpo(
+            [("I", 1.0), ("X", 1.0e-8)], n_qubits=1, order=(0,)
+        )
+
+        diagnostics = probe_mpo_compression(
+            exact,
+            perturbed,
+            product_states=(("up",),),
+            random_state_count=0,
+        )
+
+        probe = diagnostics["probes"][0]
+        self.assertNotEqual(probe["relative_action_error"], 0.0)
+        if probe["status"] == "tested":
+            self.assertAlmostEqual(probe["relative_action_error"], 1.0e-8, places=14)
+        else:
+            self.assertEqual(probe["status"], "numerically_unresolved")
+            self.assertIsNone(probe["relative_action_error"])
+            self.assertGreaterEqual(probe["relative_action_error_upper_bound"], 1.0e-8)
+
+    def test_small_scale_random_probe_never_reports_substantial_error_as_zero(self) -> None:
+        scale = 1.0e-10
+        exact, _ = build_exact_pauli_mpo(
+            [("II", scale)], n_qubits=2, order=(0, 1)
+        )
+        perturbed, _ = build_exact_pauli_mpo(
+            [("II", scale), ("XI", scale)], n_qubits=2, order=(0, 1)
+        )
+
+        diagnostics = probe_mpo_compression(
+            exact,
+            perturbed,
+            product_states=(),
+            random_state_count=1,
+            random_bond=2,
+            seed=31,
+        )
+
+        probe = diagnostics["probes"][0]
+        self.assertNotEqual(probe["relative_action_error"], 0.0)
+        if probe["status"] == "tested":
+            self.assertGreater(probe["relative_action_error"], 0.5)
+        else:
+            self.assertEqual(probe["status"], "numerically_unresolved")
+            self.assertIsNone(probe["relative_action_error"])
+            self.assertGreater(probe["relative_action_error_upper_bound"], 0.5)
+
+    def test_single_site_random_probe_uses_seeded_local_state_without_unitary_evolution(self) -> None:
+        from tenpy.networks.mps import MPS
+
+        exact, _ = build_exact_pauli_mpo([("I", 0.7)], n_qubits=1, order=(0,))
+        identical, compression = compress_mpo_hilbert_schmidt(
+            exact, max_bond=2, cutoff=0.0
+        )
+        self.assertEqual(compression["status"], "ok")
+
+        with mock.patch.object(
+            MPS,
+            "from_random_unitary_evolution",
+            side_effect=AssertionError("single-site random-unitary evolution was called"),
+        ) as unitary_evolution:
+            diagnostics = probe_mpo_compression(
+                exact,
+                identical,
+                product_states=(),
+                random_state_count=1,
+                random_bond=4,
+                seed=23,
+            )
+
+        unitary_evolution.assert_not_called()
+        probe = diagnostics["probes"][0]
+        self.assertEqual(probe["status"], "tested")
+        self.assertEqual(probe["relative_action_error"], 0.0)
 
     def test_zero_action_denominator_is_not_tested(self) -> None:
         zero, _ = build_exact_pauli_mpo(
