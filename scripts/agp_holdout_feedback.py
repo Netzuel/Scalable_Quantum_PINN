@@ -1571,6 +1571,46 @@ def load_existing_feedback_state(
     return rows, round_rows, spectra, completed_round
 
 
+def assert_fixed_unseen_manifest_lifecycle(
+    *,
+    output_dir: Path,
+    data_dir: Path,
+    residual_top_k: int,
+    enabled: bool = True,
+) -> None:
+    """Prevent normal training from upgrading historical runs into fixed-probe runs."""
+    if not enabled:
+        return
+    manifest_path = data_dir / "fixed_unseen_probe_labels.json"
+    if manifest_path.is_file():
+        return
+
+    markers: list[Path] = []
+    summary_path = data_dir / f"holdout_feedback_summary_residual_{residual_top_k}.json"
+    if summary_path.is_file():
+        markers.append(summary_path)
+    markers.extend(output_dir.glob("rounds/round_*"))
+    markers.extend(output_dir.glob("runs/round_*"))
+    markers.extend(output_dir.glob("temporal_refinement"))
+    markers.extend(output_dir.glob("adaptive_temporal_refinement"))
+    markers.extend(output_dir.rglob("training_checkpoint.pt"))
+    markers.extend(data_dir.glob("holdout_feedback_spectrum_round_*.json"))
+    markers = sorted({path.resolve() for path in markers}, key=str)
+    if not markers:
+        return
+
+    preview = ", ".join(str(path) for path in markers[:3])
+    if len(markers) > 3:
+        preview += ", ..."
+    raise RuntimeError(
+        "Cannot create a certification-eligible fixed unseen probe manifest in "
+        f"existing run root {output_dir}: prior feedback state was found ({preview}) "
+        "but fixed_unseen_probe_labels.json is missing. Start a new run root for "
+        "normal training. An explicit diagnostics-only refresh may backfill "
+        "historical metrics, but remains certification-ineligible."
+    )
+
+
 def write_feedback_summary(
     *,
     output_dir: Path,
@@ -1842,6 +1882,12 @@ def main() -> None:
     output_root = output_root_arg if output_root_arg.is_absolute() else RUN_DIR / output_root_arg
     output_dir = output_root / f"agp_{base_agp_terms}_residual_{residual_top_k}_add_{add_residual_terms}_rounds_{rounds}"
     data_dir = output_dir / "Models_Data"
+    assert_fixed_unseen_manifest_lifecycle(
+        output_dir=output_dir,
+        data_dir=data_dir,
+        residual_top_k=residual_top_k,
+        enabled=fixed_unseen_probe_settings.enabled,
+    )
     data_dir.mkdir(parents=True, exist_ok=True)
     hamiltonian_path = Path(feedback_settings.model.hamiltonian_source)
     if not hamiltonian_path.is_absolute():

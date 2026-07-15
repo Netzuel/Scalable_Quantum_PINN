@@ -29,6 +29,7 @@ from agp_holdout_feedback import (  # noqa: E402
     fixed_unseen_probe_manifest_identity,
     fixed_unseen_probe_settings_from_feedback,
     fixed_unseen_reference_rms,
+    assert_fixed_unseen_manifest_lifecycle,
     load_existing_certification_probe_labels,
     load_or_validate_fixed_unseen_probe,
     make_adaptive_tau_grid,
@@ -130,6 +131,36 @@ class AGPSupportSwapTests(unittest.TestCase):
 
         self.assertEqual(labels, {"ZI", "IZ", "ZZ"})
         self.assertEqual(paths, sorted(manifests, key=str))
+
+    def test_normal_runner_rejects_historical_state_without_fixed_probe_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for marker_name in ("summary", "round_checkpoint", "refinement_checkpoint"):
+                with self.subTest(marker=marker_name):
+                    output_dir = root / marker_name
+                    data_dir = output_dir / "Models_Data"
+                    if marker_name == "summary":
+                        summary = data_dir / "holdout_feedback_summary_residual_2.json"
+                        summary.parent.mkdir(parents=True)
+                        summary.write_text(json.dumps({"rows": [{"feedback_round": 0}]}), encoding="utf-8")
+                    elif marker_name == "round_checkpoint":
+                        checkpoint = output_dir / "rounds" / "round_01" / "Models_Data" / "training_checkpoint.pt"
+                        checkpoint.parent.mkdir(parents=True)
+                        checkpoint.touch()
+                    else:
+                        checkpoint = output_dir / "adaptive_temporal_refinement" / "Models_Data" / "training_checkpoint.pt"
+                        checkpoint.parent.mkdir(parents=True)
+                        checkpoint.touch()
+
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "new run root.*diagnostics-only.*certification-ineligible",
+                    ):
+                        assert_fixed_unseen_manifest_lifecycle(
+                            output_dir=output_dir,
+                            data_dir=data_dir,
+                            residual_top_k=2,
+                        )
 
     def test_main_persists_fixed_unseen_lifecycle_and_resumes_with_same_manifest(self):
         row_fields = {

@@ -205,7 +205,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
                 self.assertEqual(probes["null_terms"], 4096)
                 self.assertEqual(probes["reference_rms_threshold"], 1e-12)
                 self.assertEqual(probes["seed"], 11)
-                self.assertGreaterEqual(probes["candidate_multiplier"], 1)
+                self.assertEqual(probes["candidate_multiplier"], 8)
 
     def test_q20_matches_q15_ising_lineage_for_twenty_rounds(self):
         q15_path = ISING_SCENARIO_DIR / "q15/sweep_test/config.json"

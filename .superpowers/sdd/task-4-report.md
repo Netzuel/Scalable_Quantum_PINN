@@ -63,3 +63,37 @@ All four retained JSON configs also parsed successfully.
 
 The commit contains this report and the owned Task 4 changes only. Pre-existing
 q24/MPS work, MPO work, and `pyproject.toml` changes remain unstaged.
+
+## Review Fixes
+
+The normal runner now checks the target feedback run root before creating a
+fixed-probe manifest. If fixed probes are enabled and the root already contains
+a summary, round/refinement directory, checkpoint, or feedback spectrum without
+`fixed_unseen_probe_labels.json`, it fails closed with an error requiring a new
+run root. An explicit diagnostics-only refresh remains the future path for
+backfilling historical metrics and is described as certification-ineligible.
+Existing manifests still support valid resumes, and empty roots still support
+new runs. Disabled legacy fixed-probe configurations remain compatible.
+
+The retained layout regression now requires `candidate_multiplier == 8` rather
+than only checking that it is positive. The MPO files from `dd90286` were not
+modified or removed.
+
+### Review-Fix RED
+
+The new historical-run regression initially failed during import because
+`assert_fixed_unseen_manifest_lifecycle` did not yet exist.
+
+### Review-Fix GREEN
+
+```text
+conda run -n torch-mps python -m unittest tests.test_agp_residual_probes tests.test_agp_benchmark_layout tests.test_agp_support_swap -v
+Ran 53 tests in 1.589s
+OK
+```
+
+```text
+conda run -n torch-mps python -m py_compile scripts/agp_residual_probes.py scripts/agp_holdout_feedback.py scripts/agp_holdout_study.py tests/test_agp_benchmark_layout.py tests/test_agp_support_swap.py
+```
+
+Both commands passed.
