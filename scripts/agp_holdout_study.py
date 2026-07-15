@@ -71,20 +71,15 @@ def fixed_unseen_gate(
     unseen_threshold: float,
     fixed_unseen_probe: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Classify the fixed active probe without falling back to moving diagnostics."""
+    """Classify a fixed active probe only when its persisted manifest is supplied."""
 
-    if fixed_unseen_probe is not None:
-        if "enabled" not in fixed_unseen_probe or "status" not in fixed_unseen_probe:
-            return {"status": "not_tested", "value": None, "reason": "missing_fixed_unseen_lifecycle"}
-        enabled = bool(fixed_unseen_probe["enabled"])
-        probe_status = str(fixed_unseen_probe["status"])
-        insufficiency_reason = fixed_unseen_probe.get("insufficiency_reason")
-    elif "fixed_unseen_enabled" in row and "fixed_unseen_probe_status" in row:
-        enabled = bool(row["fixed_unseen_enabled"])
-        probe_status = str(row["fixed_unseen_probe_status"])
-        insufficiency_reason = row.get("fixed_unseen_probe_reason")
-    else:
+    if fixed_unseen_probe is None:
+        return {"status": "not_tested", "value": None, "reason": "missing_fixed_unseen_manifest"}
+    if "enabled" not in fixed_unseen_probe or "status" not in fixed_unseen_probe:
         return {"status": "not_tested", "value": None, "reason": "missing_fixed_unseen_lifecycle"}
+    enabled = bool(fixed_unseen_probe["enabled"])
+    probe_status = str(fixed_unseen_probe["status"])
+    insufficiency_reason = fixed_unseen_probe.get("insufficiency_reason")
     if not enabled:
         return {"status": "not_tested", "value": None, "reason": "disabled"}
     if probe_status != "complete":

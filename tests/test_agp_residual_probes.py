@@ -102,11 +102,13 @@ class AGPResidualProbeTests(unittest.TestCase):
         self.assertIsNone(metrics["active_relative"])
         self.assertEqual(metrics["active_status"]["reason"], "zero_reference")
 
-    def test_valid_fixed_active_ratio_without_lifecycle_is_not_tested(self):
+    def test_valid_fixed_active_row_lifecycle_without_manifest_is_not_tested(self):
         row = {
             "feedback_round": 7,
             "holdout_relative_residual": 0.05,
             "unseen_relative_residual": None,
+            "fixed_unseen_enabled": True,
+            "fixed_unseen_probe_status": "complete",
             "fixed_unseen_active_relative": 0.8,
             "fixed_unseen_active_status": {"valid": True, "reason": "finite_reference"},
         }
@@ -120,7 +122,7 @@ class AGPResidualProbeTests(unittest.TestCase):
         self.assertEqual(decision["status"], "not_found_in_feedback_run")
         self.assertEqual(decision["unseen_gate_source"], "fixed_unseen_active")
         self.assertEqual(decision["unseen_gate"]["status"], "not_tested")
-        self.assertEqual(decision["unseen_gate"]["reason"], "missing_fixed_unseen_lifecycle")
+        self.assertEqual(decision["unseen_gate"]["reason"], "missing_fixed_unseen_manifest")
 
     def test_explicit_enabled_complete_manifest_allows_fixed_active_gate(self):
         row = {
@@ -155,6 +157,7 @@ class AGPResidualProbeTests(unittest.TestCase):
             [row],
             holdout_threshold=0.1,
             unseen_threshold=1.0,
+            fixed_unseen_probe={"enabled": True, "status": "insufficient_candidates"},
         )
 
         self.assertEqual(decision["status"], "not_found_in_feedback_run")
