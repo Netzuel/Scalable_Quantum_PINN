@@ -306,6 +306,22 @@ class AGPMPSValidationTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["ground_fidelity"], 1.0, places=12)
         self.assertAlmostEqual(metrics["state_norm"], 1.0, places=12)
 
+    def test_diagonal_metrics_use_configured_ground_bitstring_observable_targets(self):
+        state = make_product_mps("101")
+        terms = {"ZII": 1.0, "IZI": -1.0, "IIZ": 1.0}
+
+        metrics = diagonal_ising_mps_metrics(
+            state,
+            terms,
+            exact_ground_energy=-3.0,
+            ground_bitstring="101",
+        )
+
+        self.assertAlmostEqual(metrics["final_energy"], -3.0, places=12)
+        self.assertAlmostEqual(metrics["ground_fidelity"], 1.0, places=12)
+        self.assertAlmostEqual(metrics["z_rmse"], 0.0, places=12)
+        self.assertAlmostEqual(metrics["nearest_neighbor_zz_rmse"], 0.0, places=12)
+
 
 if __name__ == "__main__":
     unittest.main()

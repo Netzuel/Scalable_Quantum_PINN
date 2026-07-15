@@ -311,18 +311,27 @@ def evolve_protocol_mps(
     return state, diagnostics
 
 
-def diagonal_ising_mps_metrics(
+def diagonal_pauli_mps_metrics(
     state,
     final_terms: Mapping[str, float],
     *,
     exact_ground_energy: float,
     ground_bitstring: str | None = None,
 ) -> dict[str, float]:
-    """Evaluate diagonal Pauli energy and product-ground-state fidelity."""
+    """Evaluate a diagonal Pauli objective against a product ground state."""
+
+    if ground_bitstring is None:
+        ground_bitstring = "0" * state.L
+    if len(ground_bitstring) != state.L or any(bit not in "01" for bit in ground_bitstring):
+        raise ValueError(f"ground_bitstring must contain exactly {state.L} binary digits.")
+    target_z = np.asarray([1.0 if bit == "0" else -1.0 for bit in ground_bitstring])
+    target_zz = target_z[:-1] * target_z[1:]
 
     energy = 0.0
     orthogonality = {"cur_orthog": "calc"}
     for label, coefficient in final_terms.items():
+        if any(symbol not in "IZ" for symbol in label):
+            raise ValueError(f"Final Hamiltonian term {label!r} is not diagonal in the Z basis.")
         occupied = [site for site, symbol in enumerate(label) if symbol != "I"]
         if not occupied:
             energy += float(coefficient)
@@ -339,8 +348,6 @@ def diagonal_ising_mps_metrics(
             raise ValueError(f"Final Hamiltonian coefficient for {label} is not real: {coefficient}.")
         energy += float(coefficient.real) * float(np.real(expectation))
 
-    if ground_bitstring is None:
-        ground_bitstring = "0" * state.L
     fidelity = abs(complex(state.amplitude(ground_bitstring))) ** 2
     norm = float(np.real(state.norm()))
     z_values = np.asarray(
@@ -383,12 +390,16 @@ def diagonal_ising_mps_metrics(
         "ground_fidelity": fidelity,
         "ground_state_fidelity": fidelity,
         "excitation_probability": 1.0 - fidelity,
-        "z_rmse": float(np.sqrt(np.mean((z_values - 1.0) ** 2))),
+        "z_rmse": float(np.sqrt(np.mean((z_values - target_z) ** 2))),
         "nearest_neighbor_zz_rmse": (
-            float(np.sqrt(np.mean((zz_values - 1.0) ** 2))) if zz_values.size else 0.0
+            float(np.sqrt(np.mean((zz_values - target_zz) ** 2))) if zz_values.size else 0.0
         ),
         "state_norm": norm,
     }
+
+
+# Compatibility name retained for existing Ising benchmark imports.
+diagonal_ising_mps_metrics = diagonal_pauli_mps_metrics
 
 
 def run_mps_case(
@@ -425,7 +436,7 @@ def run_mps_case(
             operator_grouping=operator_grouping,
             progress=progress,
         )
-        row: dict[str, object] = diagonal_ising_mps_metrics(
+        row: dict[str, object] = diagonal_pauli_mps_metrics(
             state,
             h1.terms,
             exact_ground_energy=exact_ground_energy,

@@ -1,0 +1,1016 @@
+{
+  "basis": {
+    "alphabet": [
+      "I",
+      "X",
+      "Y",
+      "Z"
+    ],
+    "max_order": 24,
+    "ordering": "matrix tensor-product order; label character i is qubit i",
+    "size": 281474976710656
+  },
+  "coefficient_convention": {
+    "operator_expansion": "H = sum_P C_P P",
+    "spin_mapping": "s_i = eigenvalue(Z_i)",
+    "stored_terms": "Only source and transverse-driver nonzero terms are stored."
+  },
+  "distance": "run_002_hamiltonian_341",
+  "drop_tol": 1e-14,
+  "format": "pauli_hamiltonian_pair_v1",
+  "hamiltonians": {
+    "final": {
+      "role": "H_final",
+      "source_key": "tracked_spin_hubo_source_snapshot",
+      "tau": 1.0,
+      "term_count": 216,
+      "terms": {
+        "IIIIIIIIIIIIIIIIIIIIIIIZ": [
+          0.6788446038858772,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIIIIZI": [
+          0.3920870797403008,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIIIZII": [
+          0.5612400481456209,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIIIZZI": [
+          -0.017102917392978673,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIIZIII": [
+          -0.11936449548493214,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIZIIII": [
+          0.37180444301383986,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIZIZII": [
+          0.3302818805693101,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIZIIIII": [
+          -0.5593297644782531,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIZIIZII": [
+          -0.35860266228270155,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIZZIZII": [
+          0.48431720898129393,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIZIIIIII": [
+          0.11213009945266511,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIZIIIZZI": [
+          -0.4609107881766767,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIZIIZIII": [
+          -0.44485475991486423,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIZIIIIIII": [
+          -0.30107225325340903,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIZIIIIIIZ": [
+          0.06339340981998498,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIZIIZIIII": [
+          -0.35286836154070633,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIZIZIIIII": [
+          -0.02991965939721548,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIZIZZIIII": [
+          0.21942207046310597,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIZIIIIIIII": [
+          0.04736366905381086,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIZIIIIIIZZ": [
+          -0.24737197268522404,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIZIIIZIIII": [
+          -0.4588547502139568,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIZIIZIIIII": [
+          -0.3595903382424319,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIZIIIIIIIII": [
+          -0.5191119485361836,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIZIIIIZIIIZ": [
+          -0.14477180740681506,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIZIIIZIIIII": [
+          -0.6082339899582506,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIZIIZIIIIIZ": [
+          -0.05825735806107598,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIZIZIIIIZII": [
+          -0.14980793392110078,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIZIZIIIZIII": [
+          0.16044499493008413,
+          0.0
+        ],
+        "IIIIIIIIIIIIIZIIIIIIIIII": [
+          -0.44086363455997246,
+          0.0
+        ],
+        "IIIIIIIIIIIIIZIIIIIIIZII": [
+          0.07109589832778011,
+          0.0
+        ],
+        "IIIIIIIIIIIIIZIIIIZIIZII": [
+          0.22355403458583384,
+          0.0
+        ],
+        "IIIIIIIIIIIIIZIIIZIIIZII": [
+          0.5945249915348357,
+          0.0
+        ],
+        "IIIIIIIIIIIIIZIZIIIIIIII": [
+          0.4344249093520773,
+          0.0
+        ],
+        "IIIIIIIIIIIIZIIIIIIIIIII": [
+          -0.035098869408116976,
+          0.0
+        ],
+        "IIIIIIIIIIIIZIIIIIIIIIZI": [
+          -0.558574721834771,
+          0.0
+        ],
+        "IIIIIIIIIIIIZIIIIIIIIIZZ": [
+          -0.25569749982298245,
+          0.0
+        ],
+        "IIIIIIIIIIIIZIIIIIIIIZII": [
+          -0.428418583827261,
+          0.0
+        ],
+        "IIIIIIIIIIIIZIIIIZZIIIII": [
+          0.5406028295709427,
+          0.0
+        ],
+        "IIIIIIIIIIIIZIIIZIIIIIII": [
+          0.6269050109243859,
+          0.0
+        ],
+        "IIIIIIIIIIIIZIIZIIIIIIZI": [
+          0.14468007032815813,
+          0.0
+        ],
+        "IIIIIIIIIIIIZIZIIIZIIIII": [
+          0.4216847829830332,
+          0.0
+        ],
+        "IIIIIIIIIIIIZZIIIIIIIIII": [
+          -0.3034421867860321,
+          0.0
+        ],
+        "IIIIIIIIIIIIZZIIIIIIIZII": [
+          0.608219885047632,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIIIIIIIIIII": [
+          -0.4524440434449388,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIIIIIIIIIIZ": [
+          -0.4668401540480186,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIIIIIIIIZII": [
+          -0.18812118961899388,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIIIIIIIIZIZ": [
+          -0.5125991990953892,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIIIIIIIZIII": [
+          -0.544001270623235,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIIIIIIZIIII": [
+          0.4769736758740995,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIIIIIZIIIZI": [
+          0.532830033930971,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIIIZIIIIIIZ": [
+          0.6149106939083663,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIIZIIIIIIII": [
+          -0.2074104703646892,
+          0.0
+        ],
+        "IIIIIIIIIIIZIIZIIIIIIZII": [
+          -0.11599888941733745,
+          0.0
+        ],
+        "IIIIIIIIIIIZIZIIIZIIIIII": [
+          0.0980284732473418,
+          0.0
+        ],
+        "IIIIIIIIIIIZZIIIIIIIIIII": [
+          0.320068218747079,
+          0.0
+        ],
+        "IIIIIIIIIIIZZIIIIIIIIIZI": [
+          -0.1788066289243553,
+          0.0
+        ],
+        "IIIIIIIIIIIZZIIIIIIIZIII": [
+          0.08945217260468127,
+          0.0
+        ],
+        "IIIIIIIIIIZIIIIIIIIIIIII": [
+          -0.5786072736458806,
+          0.0
+        ],
+        "IIIIIIIIIIZIIIIIIIIIIIZZ": [
+          0.09065718351754262,
+          0.0
+        ],
+        "IIIIIIIIIIZIIIIIIIIZIIIZ": [
+          -0.5088251926689977,
+          0.0
+        ],
+        "IIIIIIIIIIZIIIIIZIIIIIII": [
+          0.5334160587245992,
+          0.0
+        ],
+        "IIIIIIIIIIZIIIIIZIIIZIII": [
+          -0.45772731417808293,
+          0.0
+        ],
+        "IIIIIIIIIIZIIIIZIIIIIIIZ": [
+          -0.12839672338584432,
+          0.0
+        ],
+        "IIIIIIIIIIZIIZIIIIIIIIII": [
+          -0.6196539473086324,
+          0.0
+        ],
+        "IIIIIIIIIIZZIIIIIIIIIIII": [
+          0.6056435895109252,
+          0.0
+        ],
+        "IIIIIIIIIIZZIIIIIIIIIZII": [
+          0.581307679019101,
+          0.0
+        ],
+        "IIIIIIIIIIZZIIIIIIZIIIII": [
+          0.39199593886915457,
+          0.0
+        ],
+        "IIIIIIIIIIZZIIIZIIIIIIII": [
+          0.18174414021734878,
+          0.0
+        ],
+        "IIIIIIIIIZIIIIIIIIIIIIII": [
+          -0.3939863719268919,
+          0.0
+        ],
+        "IIIIIIIIIZIIIIIIIIIIIIZI": [
+          -0.640488724046715,
+          0.0
+        ],
+        "IIIIIIIIIZIIIIIIIIIIZIII": [
+          -0.0032678155069553088,
+          0.0
+        ],
+        "IIIIIIIIIZIIIIIIIIIZIIII": [
+          0.40995146831339374,
+          0.0
+        ],
+        "IIIIIIIIIZIIIIIIIZZIIIII": [
+          0.04820585388635061,
+          0.0
+        ],
+        "IIIIIIIIIZIIIIIZIIZIIIII": [
+          -0.6347730341591126,
+          0.0
+        ],
+        "IIIIIIIIIZIIIIZIIIIIZIII": [
+          0.14674600455294148,
+          0.0
+        ],
+        "IIIIIIIIIZIIIZZIIIIIIIII": [
+          -0.23158386270596593,
+          0.0
+        ],
+        "IIIIIIIIIZIZIIIIIZIIIIII": [
+          0.5492000244150576,
+          0.0
+        ],
+        "IIIIIIIIZIIIIIIIIIIIIIII": [
+          0.5247124642476791,
+          0.0
+        ],
+        "IIIIIIIIZIIIIIIIIIIIIIIZ": [
+          0.5629906342952046,
+          0.0
+        ],
+        "IIIIIIIIZIIIIIIIIIIZIIZI": [
+          -0.4605106203890218,
+          0.0
+        ],
+        "IIIIIIIIZIIIIIIIIIZIIIZI": [
+          0.5128972519901815,
+          0.0
+        ],
+        "IIIIIIIIZIIIIIIIIZIIIIII": [
+          -0.35911322578873694,
+          0.0
+        ],
+        "IIIIIIIIZIIIIIIIIZIIIZII": [
+          -0.5297043034564547,
+          0.0
+        ],
+        "IIIIIIIIZIIIIIZIIIIIZIII": [
+          -0.549401811720356,
+          0.0
+        ],
+        "IIIIIIIIZIIIIZIIIIIZIIII": [
+          -0.6775202220646578,
+          0.0
+        ],
+        "IIIIIIIIZIZIIIIIIIIIZIII": [
+          0.562181192135625,
+          0.0
+        ],
+        "IIIIIIIIZIZIIIIIIZIIIIII": [
+          -0.647414718007894,
+          0.0
+        ],
+        "IIIIIIIZIIIIIIIIIIIIIIII": [
+          -0.2835953317648441,
+          0.0
+        ],
+        "IIIIIIIZIIIIIIIIZIIIIIII": [
+          -0.6046589255682937,
+          0.0
+        ],
+        "IIIIIIIZIIIIIIIIZIIIIIIZ": [
+          -0.637427801795263,
+          0.0
+        ],
+        "IIIIIIIZIIIIIIIZIIIIIZII": [
+          0.2566879950165756,
+          0.0
+        ],
+        "IIIIIIIZIIIIIZIIIIIIIIII": [
+          -0.5123266054051805,
+          0.0
+        ],
+        "IIIIIIIZIZIIIIIIIIIIIIZI": [
+          -0.036322830781367416,
+          0.0
+        ],
+        "IIIIIIZIIIIIIIIIIIIIIIII": [
+          0.16495759688650793,
+          0.0
+        ],
+        "IIIIIIZIIIIIIIIIIIIZIIII": [
+          -0.3939976864549413,
+          0.0
+        ],
+        "IIIIIIZIIIIIIIIIZIZIIIII": [
+          -0.4617028733923505,
+          0.0
+        ],
+        "IIIIIIZIIIIIIIIZIIIIIIIZ": [
+          -0.059312187273492266,
+          0.0
+        ],
+        "IIIIIIZIIIIIIIIZIIIIIIZI": [
+          0.349475937327496,
+          0.0
+        ],
+        "IIIIIIZIIIZIIIIIIIIZIIII": [
+          -0.21861968377453903,
+          0.0
+        ],
+        "IIIIIIZIIIZIZIIIIIIIIIII": [
+          0.5252284527823567,
+          0.0
+        ],
+        "IIIIIIZIIZIIIIIIIIIIZIII": [
+          0.5927088491685215,
+          0.0
+        ],
+        "IIIIIIZIIZIIIIZIIIIIIIII": [
+          0.4640765060912756,
+          0.0
+        ],
+        "IIIIIIZIIZZIIIIIIIIIIIII": [
+          -0.5158283026365158,
+          0.0
+        ],
+        "IIIIIIZZIIIIIIIIIIIIIIII": [
+          -0.5374746534933232,
+          0.0
+        ],
+        "IIIIIIZZIIIIZIIIIIIIIIII": [
+          -0.5506396543732219,
+          0.0
+        ],
+        "IIIIIZIIIIIIIIIIIIIIIIII": [
+          0.25372218191593576,
+          0.0
+        ],
+        "IIIIIZIIIIIIIIIIIIIIZIII": [
+          -0.4133316479639072,
+          0.0
+        ],
+        "IIIIIZIIIIIIIIIIIIIZIIII": [
+          -0.05403267118926167,
+          0.0
+        ],
+        "IIIIIZIIIIIIIIIIIIZIIIII": [
+          -0.1420963165316008,
+          0.0
+        ],
+        "IIIIIZIIIIIIIIIIIZIIIIII": [
+          -0.3048649465139481,
+          0.0
+        ],
+        "IIIIIZIIIIIIIIIZZIIIIIII": [
+          0.08793773518268401,
+          0.0
+        ],
+        "IIIIIZIIIIIIIZZIIIIIIIII": [
+          0.26162961963794906,
+          0.0
+        ],
+        "IIIIIZIIIIIIZIIIIIIIIIII": [
+          -0.5613409056256062,
+          0.0
+        ],
+        "IIIIIZIIIIIIZIIIIIIIIZII": [
+          -0.4137879970815734,
+          0.0
+        ],
+        "IIIIIZIIIIIIZIIIIIZIIIII": [
+          -0.19841314118219838,
+          0.0
+        ],
+        "IIIIIZIZIIIIIIIIIIIIIIII": [
+          -0.2020471820153927,
+          0.0
+        ],
+        "IIIIIZIZIIIIIIIIIIIIZIII": [
+          0.07877249508588326,
+          0.0
+        ],
+        "IIIIIZZIIIIIIIIIIIIIIIIZ": [
+          -0.5835024181329224,
+          0.0
+        ],
+        "IIIIZIIIIIIIIIIIIIIIIIII": [
+          0.5327671227735639,
+          0.0
+        ],
+        "IIIIZIIIIIIIIIIIIIIZIIIZ": [
+          0.132077066875899,
+          0.0
+        ],
+        "IIIIZIIIIIIIIIIIIIZIIIIZ": [
+          0.11880541129691506,
+          0.0
+        ],
+        "IIIIZIIIIIIIIIIIIZIIZIII": [
+          0.34359373923441033,
+          0.0
+        ],
+        "IIIIZIIIIIIIIZIIIIIIIIII": [
+          -0.057537716791544416,
+          0.0
+        ],
+        "IIIIZIIIIIIIIZIIIIZIIIII": [
+          -0.0882351442844676,
+          0.0
+        ],
+        "IIIIZIIIIIIIZIIIIIIIIIII": [
+          -0.405753947777879,
+          0.0
+        ],
+        "IIIIZIIIIIIZIIIIIIIIIIII": [
+          0.006365808017688764,
+          0.0
+        ],
+        "IIIIZIIIIIIZIZIIIIIIIIII": [
+          -0.48479470269642877,
+          0.0
+        ],
+        "IIIIZIIIIIZIIIIIZIIIIIII": [
+          0.47233361223519393,
+          0.0
+        ],
+        "IIIIZIIIZIIIIIIIIIZIIIII": [
+          0.5818075804561323,
+          0.0
+        ],
+        "IIIIZIIZIIIIIIIIIIIIIIII": [
+          -0.22494056041319732,
+          0.0
+        ],
+        "IIIIZIZIIIIIIIIIIIIIIIII": [
+          0.22359321444243838,
+          0.0
+        ],
+        "IIIIZZIIIIIIIIIIIIZIIIII": [
+          -0.10953522750995687,
+          0.0
+        ],
+        "IIIIZZIIIIIIZIIIIIIIIIII": [
+          0.09673060042606857,
+          0.0
+        ],
+        "IIIIZZIIIZIIIIIIIIIIIIII": [
+          -0.5005119800640737,
+          0.0
+        ],
+        "IIIZIIIIIIIIIIIIIIIIIIII": [
+          -0.00044506528362965505,
+          0.0
+        ],
+        "IIIZIIIIIIIIIIIIIIIIIIZZ": [
+          0.33284272433849654,
+          0.0
+        ],
+        "IIIZIIIIIIIIIIIIIIIIIZII": [
+          0.514996238145019,
+          0.0
+        ],
+        "IIIZIIIIIIIIIIIIIIZIIIII": [
+          -0.2462941946915796,
+          0.0
+        ],
+        "IIIZIIIIIIIIIIIIIZIIIIII": [
+          -0.5671548360432664,
+          0.0
+        ],
+        "IIIZIIIIIIIIIIIIZIIIIIII": [
+          0.11035567672020181,
+          0.0
+        ],
+        "IIIZIIIIIIIIIIIZIIIIIIII": [
+          -0.06529304241497522,
+          0.0
+        ],
+        "IIIZIIIIIIIIZIIIIIIIIIII": [
+          0.5987430969001272,
+          0.0
+        ],
+        "IIIZIIIIIIIZIIIZIIIIIIII": [
+          -0.6161730469221405,
+          0.0
+        ],
+        "IIIZIIIIIZIIIIIIIIIIIIZI": [
+          -0.2223959400626967,
+          0.0
+        ],
+        "IIIZIIIIIZIIIIIIZIIIIIII": [
+          -0.04325884501805795,
+          0.0
+        ],
+        "IIIZIIIIIZIIIIIZIIIIIIII": [
+          0.559140195977802,
+          0.0
+        ],
+        "IIIZIIIIIZIIIZIIIIIIIIII": [
+          0.48070232289527953,
+          0.0
+        ],
+        "IIIZIIIIZZIIIIIIIIIIIIII": [
+          0.19429405051926996,
+          0.0
+        ],
+        "IIIZIIIZIIIIIIIIIIIIIIII": [
+          -0.524210088704916,
+          0.0
+        ],
+        "IIIZIIIZIIIIIZIIIIIIIIII": [
+          -0.03956121197404437,
+          0.0
+        ],
+        "IIIZIIZIIIIIIIIIIIIIIIII": [
+          0.1549047153064428,
+          0.0
+        ],
+        "IIIZIZIIIIIIIIIZIIIIIIII": [
+          0.03592995206210568,
+          0.0
+        ],
+        "IIIZIZIZIIIIIIIIIIIIIIII": [
+          0.17394161124859148,
+          0.0
+        ],
+        "IIIZZIIIIIIIIIIIIIIIIIII": [
+          0.3672107883467547,
+          0.0
+        ],
+        "IIIZZIIIIIIIIIIIIIIIZIII": [
+          -0.34160693064878234,
+          0.0
+        ],
+        "IIZIIIIIIIIIIIIIIIIIIIII": [
+          -0.167035669117421,
+          0.0
+        ],
+        "IIZIIIIIIIIIIIIIIIIZIIII": [
+          0.20759011622008836,
+          0.0
+        ],
+        "IIZIIIIIIIIIIIIIIIZIIIII": [
+          -0.5349541749463179,
+          0.0
+        ],
+        "IIZIIIIIIIIIIIIZIIIIIIII": [
+          0.6306902325753798,
+          0.0
+        ],
+        "IIZIIIIIIIIIIIIZIIIIZIII": [
+          -0.11255908975638511,
+          0.0
+        ],
+        "IIZIIIIIIIIIIIZIIIIIIIII": [
+          -0.3017057468715353,
+          0.0
+        ],
+        "IIZIIIIIIIIIIIZIIIIZIIII": [
+          0.5516555030026056,
+          0.0
+        ],
+        "IIZIIIIIIIIIIIZIIZIIIIII": [
+          -0.31682395129186275,
+          0.0
+        ],
+        "IIZIIIIIIIIIIZIIIIIZIIII": [
+          -0.1238256555116009,
+          0.0
+        ],
+        "IIZIIIIIIIIIZIIIIIIIIIII": [
+          0.6220327480825951,
+          0.0
+        ],
+        "IIZIIIIIIIZIIIIIIIIIIZII": [
+          0.29099759592787605,
+          0.0
+        ],
+        "IIZIIIIIIZIIIIIIIIIIIIII": [
+          0.5873697368704058,
+          0.0
+        ],
+        "IIZIIIIIZIIIIIIIIIIIZIII": [
+          0.5622078119341658,
+          0.0
+        ],
+        "IIZIIIIZIIIIIZIIIIIIIIII": [
+          0.5833122320059009,
+          0.0
+        ],
+        "IIZZIIIIIIZIIIIIIIIIIIII": [
+          -0.32815383558833566,
+          0.0
+        ],
+        "IZIIIIIIIIIIIIIIIIIIIIII": [
+          0.5087346985768948,
+          0.0
+        ],
+        "IZIIIIIIIIIIIIIIIIIIIIZI": [
+          0.5378222014781951,
+          0.0
+        ],
+        "IZIIIIIIIIIIIIIIIIIIZIIZ": [
+          0.11794765589563018,
+          0.0
+        ],
+        "IZIIIIIIIIIIIIIIIIIZIIII": [
+          0.3874636675581572,
+          0.0
+        ],
+        "IZIIIIIIIIIIIIIIIIIZIIZI": [
+          -0.3005771742723329,
+          0.0
+        ],
+        "IZIIIIIIIIIIIIIIIIZZIIII": [
+          0.44135039991725833,
+          0.0
+        ],
+        "IZIIIIIIIIIIIIIIIZIIIIII": [
+          0.18349526826493065,
+          0.0
+        ],
+        "IZIIIIIIIIIIIIIIZZIIIIII": [
+          0.32258960155230376,
+          0.0
+        ],
+        "IZIIIIIIIIIIIIIZIIIIIIIZ": [
+          -0.40705206049971876,
+          0.0
+        ],
+        "IZIIIIIIIIIIZIIIIIIIIIII": [
+          0.5705735684010529,
+          0.0
+        ],
+        "IZIIIIIIIIIIZIIIIZIIIIII": [
+          0.6042880005323787,
+          0.0
+        ],
+        "IZIIIIIIIIIZIZIIIIIIIIII": [
+          -0.0049319543496943235,
+          0.0
+        ],
+        "IZIIIIIIIZIIIIIIIIIIIIIZ": [
+          -0.4713761855773506,
+          0.0
+        ],
+        "IZIIIIIIZIIIIIIIIIIIZIII": [
+          -0.055305687190541915,
+          0.0
+        ],
+        "IZIIIIIIZIIIIIIIIIZIIIII": [
+          -0.19800017266121986,
+          0.0
+        ],
+        "IZIIIIIZIIIIIIIIIIIIIIII": [
+          -0.3647737764438077,
+          0.0
+        ],
+        "IZIIIIZIIIIIIIIIIIIIIIII": [
+          -0.22025554472405623,
+          0.0
+        ],
+        "IZIIIZIIIIIIIIIIIIIIIIII": [
+          0.5832300417836855,
+          0.0
+        ],
+        "IZIIZIIIIIIIIIIIIIIIZIII": [
+          -0.6264849702325845,
+          0.0
+        ],
+        "IZIIZIIIIIIIIIIZIIIIIIII": [
+          0.042263561258257046,
+          0.0
+        ],
+        "IZIZIIIIIIIIIIIIIIZIIIII": [
+          -0.32653725378965814,
+          0.0
+        ],
+        "IZIZIIIIIIIIIZIIIIIIIIII": [
+          0.260854315060511,
+          0.0
+        ],
+        "IZZIIZIIIIIIIIIIIIIIIIII": [
+          0.615425606047611,
+          0.0
+        ],
+        "ZIIIIIIIIIIIIIIIIIIIIIII": [
+          -0.2749594436632028,
+          0.0
+        ],
+        "ZIIIIIIIIIIIIIIIIIIIIZZI": [
+          0.6123995105839013,
+          0.0
+        ],
+        "ZIIIIIIIIIIIIIIIIIIIZIIZ": [
+          -0.08456376905279898,
+          0.0
+        ],
+        "ZIIIIIIIIIIIIIIIIIIZIIII": [
+          0.0063123613047855655,
+          0.0
+        ],
+        "ZIIIIIIIIIIIIIIIIIZIIIII": [
+          0.3508172145704464,
+          0.0
+        ],
+        "ZIIIIIIIIIIIIIIIZZIIIIII": [
+          -0.5446965261222577,
+          0.0
+        ],
+        "ZIIIIIIIIIIIIZIIIIIIIIII": [
+          -0.30084931425325273,
+          0.0
+        ],
+        "ZIIIIIIIIIIZIIIZIIIIIIII": [
+          0.5479493416867984,
+          0.0
+        ],
+        "ZIIIIIIIIIIZIZIIIIIIIIII": [
+          -0.5035861454851627,
+          0.0
+        ],
+        "ZIIIIIIIIIZIIIIIIIIIIIII": [
+          0.3022325800629242,
+          0.0
+        ],
+        "ZIIIIIIIIIZIIIIIIIIIIIZI": [
+          0.059512027011662506,
+          0.0
+        ],
+        "ZIIIIIIIIIZIZIIIIIIIIIII": [
+          0.6105401272213608,
+          0.0
+        ],
+        "ZIIIIIIIIZIIIIIZIIIIIIII": [
+          -0.6696273670465321,
+          0.0
+        ],
+        "ZIIIIIIIIZIIIZIIIIIIIIII": [
+          0.15193199186915646,
+          0.0
+        ],
+        "ZIIIIIIIZIIZIIIIIIIIIIII": [
+          -0.5551818963657215,
+          0.0
+        ],
+        "ZIIIIIZIIIIIIIIIZIIIIIII": [
+          0.2267047194496664,
+          0.0
+        ],
+        "ZIIIIIZIIIIIZIIIIIIIIIII": [
+          0.2378642850046715,
+          0.0
+        ],
+        "ZIIIIZIIIIIIIZIIIIIIIIII": [
+          -0.5970358347782946,
+          0.0
+        ],
+        "ZIIIZIIIIIIIIIIIIIZIIIII": [
+          0.532093589650562,
+          0.0
+        ],
+        "ZIIIZIZIIIIIIIIIIIIIIIII": [
+          -0.27892945925618273,
+          0.0
+        ],
+        "ZIZIIIIIIIIIIIIIIIIIIIII": [
+          -0.1749547237932726,
+          0.0
+        ],
+        "ZZIIIIIIIZIIIIIIIIIIIIII": [
+          -0.5339125555773254,
+          0.0
+        ],
+        "ZZIIIIIIZIIIIIIIIIIIIIII": [
+          0.2782749135212281,
+          0.0
+        ]
+      },
+      "terms_by_order": {
+        "1": 24,
+        "2": 72,
+        "3": 120
+      }
+    },
+    "initial": {
+      "role": "H_initial",
+      "source_key": "analytic_transverse_driver_sparse_pauli",
+      "tau": 0.0,
+      "term_count": 24,
+      "terms": {
+        "IIIIIIIIIIIIIIIIIIIIIIIX": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIIIIXI": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIIIXII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIIXIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIIXIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIIXIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIIXIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIIXIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIIXIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIIXIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIIXIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIIXIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIIXIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIIXIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIIXIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIIXIIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIIXIIIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIIXIIIIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIIXIIIIIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIIXIIIIIIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIIXIIIIIIIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IIXIIIIIIIIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "IXIIIIIIIIIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ],
+        "XIIIIIIIIIIIIIIIIIIIIIII": [
+          -1.0,
+          0.0
+        ]
+      },
+      "terms_by_order": {
+        "1": 24
+      }
+    }
+  },
+  "n_qubits": 24,
+  "source": {
+    "backend": "spin_hubo_json_to_sparse_pauli",
+    "dense_usage": "None; sparse Pauli labels are exported directly.",
+    "generator": "tests/sparse_agp_curriculum/scripts/spin_hubo_benchmark.py",
+    "source_manifest": "problem_data/source_manifest.json",
+    "source_poly_sha256": "eb1d85e16ecb029883d4a83fd95db2fcf1edb84a5f7f934e74e107cbc765fc82"
+  },
+  "system": "TransverseFieldSpinHUBO"
+}

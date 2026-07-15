@@ -1,0 +1,17 @@
+{
+  "description": "Exact exhaustive computational-basis reference via Walsh-Hadamard evaluation.",
+  "format": "diagonal_spin_ground_reference_v1",
+  "solutions": [
+    {
+      "exact": true,
+      "ground_bitstrings": [
+        "000011100010110000010010"
+      ],
+      "ground_bitstrings_truncated": false,
+      "ground_energy": -28.101465646808336,
+      "ground_state_degeneracy": 1,
+      "method": "exact_walsh_hadamard_enumeration",
+      "q": 24
+    }
+  ]
+}

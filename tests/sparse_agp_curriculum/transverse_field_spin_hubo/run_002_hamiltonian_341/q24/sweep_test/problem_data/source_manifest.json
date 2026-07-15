@@ -1,0 +1,20 @@
+{
+  "conversion": "s_i maps directly to the Z_i eigenvalue; +1 maps to |0> and -1 maps to |1>",
+  "format": "spin_hubo_source_manifest_v1",
+  "n_qubits": 24,
+  "n_terms": 216,
+  "source_bitstring_convention": "spin_pm1",
+  "source_energy_convention": "spin_pm1",
+  "source_hamiltonian_convention": "spin_pm1",
+  "source_instance": "/Users/antonio.ferrer/Repositories/GitLab/bitstrings_operator/datasets/HAMILTONIANS_SPIN/run_002/hamiltonian_341",
+  "source_name": "hamiltonian_341",
+  "source_poly_sha256": "eb1d85e16ecb029883d4a83fd95db2fcf1edb84a5f7f934e74e107cbc765fc82",
+  "source_reported_min_energy": -28.101465646808354,
+  "source_reported_minimum_matches_exact": true,
+  "source_run": "/Users/antonio.ferrer/Repositories/GitLab/bitstrings_operator/datasets/HAMILTONIANS/run_002",
+  "terms_by_order": {
+    "1": 24,
+    "2": 72,
+    "3": 120
+  }
+}

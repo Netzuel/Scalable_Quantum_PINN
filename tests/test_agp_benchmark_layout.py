@@ -12,6 +12,9 @@ FRAMEWORK_SCRIPTS_DIR = ROOT / "tests" / "sparse_agp_curriculum" / "scripts"
 ISING_SCENARIO_DIR = (
     ROOT / "tests" / "sparse_agp_curriculum" / "transverse_field_diagonal_ising"
 )
+SPIN_HUBO_SCENARIO_DIR = (
+    ROOT / "tests" / "sparse_agp_curriculum" / "transverse_field_spin_hubo"
+)
 for path in (SCRIPTS_DIR, FRAMEWORK_SCRIPTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -87,6 +90,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "agp_qubit_grid_benchmark.py",
             "build_driver_problem_hamiltonian.py",
             "agp_regenerate_hcd_summaries.py",
+            "spin_hubo_benchmark.py",
         }
 
         self.assertTrue(SCRIPTS_DIR.is_dir())
@@ -107,11 +111,13 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "tests/test_agp_support_swap.py",
             "tests/test_qiskit_hamiltonian_generator.py",
             "tests/test_sparse_pauli.py",
+            "tests/test_spin_hubo_benchmark.py",
             "tests/sparse_agp_curriculum/scripts/agp_physical_validation.py",
             "tests/sparse_agp_curriculum/scripts/agp_mps_validation.py",
             "tests/sparse_agp_curriculum/scripts/agp_qubit_grid_benchmark.py",
             "tests/sparse_agp_curriculum/scripts/agp_regenerate_hcd_summaries.py",
             "tests/sparse_agp_curriculum/scripts/build_driver_problem_hamiltonian.py",
+            "tests/sparse_agp_curriculum/scripts/spin_hubo_benchmark.py",
         }
         python_files = {
             path.relative_to(ROOT).as_posix()
@@ -235,6 +241,58 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         )
         self.assertNotIn("scalable_validation", q20)
         self.assertNotIn("hydrogen_energy_validation", q20)
+
+    def test_q24_spin_hubo_matches_q20_training_methodology(self):
+        q20_path = ISING_SCENARIO_DIR / "q20/sweep_test/config.json"
+        q24_path = (
+            SPIN_HUBO_SCENARIO_DIR
+            / "run_002_hamiltonian_341/q24/sweep_test/config.json"
+        )
+        q20 = json.loads(q20_path.read_text(encoding="utf-8"))
+        q24 = json.loads(q24_path.read_text(encoding="utf-8"))
+
+        physical = q24["physical"]["parameters"]
+        self.assertEqual(physical["system"], "TransverseFieldSpinHUBO")
+        self.assertEqual(physical["num_qubits"], 24)
+        self.assertEqual(q24["default_pipeline"]["agp_terms"], 32768)
+        self.assertEqual(q24["holdout_feedback"]["base_agp_terms"], 32768)
+        self.assertEqual(q24["holdout_feedback"]["holdout_residual_top_k"], 81920)
+        self.assertEqual(q24["holdout_feedback"]["iterations"], 20)
+        self.assertEqual(q24["holdout_feedback"]["add_residual_terms_per_iteration"], 3072)
+
+        for key in (
+            "neural",
+            "support_sweep",
+            "agp_calibration",
+            "training",
+            "schedule_optimization",
+        ):
+            self.assertEqual(q24[key], q20[key])
+        for key in (
+            "support_swap",
+            "temporal_refinement",
+            "adaptive_temporal_refinement",
+        ):
+            q20_section = {
+                name: value
+                for name, value in q20["holdout_feedback"][key].items()
+                if name != "description"
+            }
+            q24_section = {
+                name: value
+                for name, value in q24["holdout_feedback"][key].items()
+                if name != "description"
+            }
+            self.assertEqual(q24_section, q20_section)
+
+        tensor_validation = q24["tensor_network_validation"]
+        self.assertTrue(tensor_validation["enabled"])
+        self.assertEqual(tensor_validation["operator_grouping"], "support")
+        self.assertEqual(tensor_validation["coefficient_threshold"], 0.0)
+        self.assertEqual(
+            [case["learned_terms"] for case in tensor_validation["resolutions"]],
+            [32768, 32768],
+        )
 
     def test_q156_config_uses_scalable_twenty_round_curriculum(self):
         config_path = ISING_SCENARIO_DIR / "q156/sweep_test/config.json"
