@@ -83,3 +83,8 @@ conda run -n torch-mps python -m unittest \
   support, all 23 null rows are finite, the empty active partition is covered by
   manifest `status=insufficient_candidates`, and the PDF remains nonempty at
   18,550 bytes.
+- Final low-review regression coverage verifies the certification gate returns
+  `not_tested/invalid_fixed_unseen_manifest_hash` for a tampered current-schema
+  manifest and `not_tested/legacy_fixed_unseen_manifest` for schema 1. Focused
+  residual tests: 14 passed in 0.688 seconds under `torch-mps`; no q24 command
+  was rerun.

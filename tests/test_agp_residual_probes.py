@@ -89,6 +89,54 @@ class AGPResidualProbeTests(unittest.TestCase):
         self.assertEqual(decision["unseen_gate"]["status"], "not_tested")
         self.assertEqual(decision["unseen_gate"]["reason"], "invalid_fixed_unseen_provenance")
 
+    def test_current_manifest_gate_fails_closed_on_invalid_hash_and_legacy_schema(self):
+        row = {
+            "feedback_round": 1,
+            "holdout_relative_residual": 0.01,
+            "fixed_unseen_active_relative": 0.2,
+            "fixed_unseen_active_status": {"valid": True, "reason": "finite_reference"},
+        }
+        current_manifest = build_fixed_unseen_probe_manifest(
+            {
+                "schema_version": 2,
+                "enabled": True,
+                "status": "complete",
+                "active_labels": ["XI"],
+                "null_labels": ["YI"],
+                "reference_rms_metadata": {"selected": {}},
+            },
+            certification_eligible=True,
+            provenance="pre_training_fixed_probe",
+        )
+        current_manifest["manifest_sha256"] = "tampered"
+
+        invalid_hash = feedback_threshold_decision(
+            [row],
+            holdout_threshold=0.1,
+            unseen_threshold=1.0,
+            fixed_unseen_probe=current_manifest,
+        )
+        self.assertEqual(invalid_hash["unseen_gate"]["status"], "not_tested")
+        self.assertEqual(
+            invalid_hash["unseen_gate"]["reason"],
+            "invalid_fixed_unseen_manifest_hash",
+        )
+
+        legacy = feedback_threshold_decision(
+            [row],
+            holdout_threshold=0.1,
+            unseen_threshold=1.0,
+            fixed_unseen_probe={
+                "schema_version": 1,
+                "enabled": True,
+                "status": "complete",
+                "certification_eligible": True,
+                "provenance": "pre_training_fixed_probe",
+            },
+        )
+        self.assertEqual(legacy["unseen_gate"]["status"], "not_tested")
+        self.assertEqual(legacy["unseen_gate"]["reason"], "legacy_fixed_unseen_manifest")
+
     def test_fixed_unseen_selection_is_disjoint_and_deterministic(self):
         labels = ["XIII", "YIII", "ZIII", "IXII", "IYII", "IZII"]
         rms = np.asarray([2.0, 0.0, 1.0, 1.0e-15, 3.0, 0.0])
