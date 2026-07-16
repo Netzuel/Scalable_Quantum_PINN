@@ -1352,6 +1352,29 @@ def _save_progress(path: Path, payload: Mapping[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def select_validation_cases(
+    configured_cases: object,
+    *,
+    preflight_only: bool,
+) -> list[dict[str, object]]:
+    """Separate diagnostic preflights from the certifiable resolution ladder."""
+
+    cases = (
+        [dict(case) for case in configured_cases if isinstance(case, Mapping)]
+        if isinstance(configured_cases, list)
+        else []
+    )
+    if not cases:
+        if preflight_only:
+            raise ValueError("--preflight-only requires a resolution with preflight_only=true.")
+        return [{}]
+    selected = [case for case in cases if bool(case.get("preflight_only", False)) == preflight_only]
+    if not selected:
+        mode = "preflight_only=true" if preflight_only else "preflight_only=false"
+        raise ValueError(f"No tensor-network validation resolution is configured with {mode}.")
+    return selected
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scalable MPS validation of sparse counterdiabatic protocols.")
     parser.add_argument("--config", type=Path, required=True)
@@ -1364,6 +1387,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--coefficient-threshold", type=float, default=None)
     parser.add_argument("--operator-grouping", choices=("pauli_term", "support"), default=None)
     parser.add_argument("--protocols", type=str, default=None)
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Run only resolutions marked preflight_only=true; never certify them.",
+    )
     return parser.parse_args()
 
 
@@ -1405,9 +1433,10 @@ def main() -> None:
     if not coefficient_path.is_file():
         raise FileNotFoundError(f"Missing trained AGP coefficients: {coefficient_path}")
 
-    configured_cases = validation.get("resolutions", [])
-    if not isinstance(configured_cases, list) or not configured_cases:
-        configured_cases = [{}]
+    configured_cases = select_validation_cases(
+        validation.get("resolutions", []),
+        preflight_only=bool(args.preflight_only),
+    )
     if any(value is not None for value in (args.steps, args.max_bond, args.learned_terms, args.cutoff)):
         configured_cases = [{}]
     protocols_raw = args.protocols or validation.get(
@@ -1454,6 +1483,7 @@ def main() -> None:
         "ground_bitstring": ground_bitstring,
         "protocols": list(protocols),
         "resolution_results": [],
+        "execution_mode": "preflight_only" if args.preflight_only else "validation",
         "certification": {"status": "not_tested"},
     }
 
@@ -1708,6 +1738,12 @@ def main() -> None:
             else None
         ),
     )
+    if args.preflight_only:
+        payload["certification"] = {
+            "status": "not_tested",
+            "reason": "Diagnostic preflight cannot certify physical dynamics.",
+            "required_gates": [],
+        }
     _save_progress(summary_path, payload)
     images_dir.mkdir(parents=True, exist_ok=True)
     plot_physical_comparison_table(images_dir, payload)

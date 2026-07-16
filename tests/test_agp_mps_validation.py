@@ -11,6 +11,7 @@ FRAMEWORK_SCRIPTS_DIR = ROOT / "tests" / "sparse_agp_curriculum" / "scripts"
 if str(FRAMEWORK_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(FRAMEWORK_SCRIPTS_DIR))
 
+import agp_mps_validation as validation_module
 from agp_mps_validation import (
     apply_grouped_hamiltonian_rotation_mps,
     assess_mps_convergence,
@@ -34,6 +35,33 @@ from utils import SparsePauliOperator
 
 
 class AGPMPSValidationTests(unittest.TestCase):
+    def test_preflight_cli_selects_only_named_preflight_cases(self):
+        configured = [
+            {"name": "speed_preflight", "preflight_only": True, "steps": 1},
+            {"name": "coarse", "steps": 24},
+        ]
+
+        selected = validation_module.select_validation_cases(
+            configured,
+            preflight_only=True,
+        )
+
+        self.assertEqual(selected, [configured[0]])
+
+    def test_preflight_cli_rejects_config_without_preflight_case(self):
+        with self.assertRaisesRegex(ValueError, "preflight_only"):
+            validation_module.select_validation_cases(
+                [{"name": "coarse", "steps": 24}],
+                preflight_only=True,
+            )
+
+    def test_parse_args_accepts_preflight_only(self):
+        argv = ["agp_mps_validation.py", "--config", "config.json", "--preflight-only"]
+        with patch.object(sys, "argv", argv):
+            args = validation_module.parse_args()
+
+        self.assertTrue(args.preflight_only)
+
     def test_group_hamiltonian_terms_preserves_every_pauli_coefficient(self):
         grouped = group_hamiltonian_terms_by_support(
             [("XI", 0.25), ("YI", -0.5), ("XZ", 0.75)]
