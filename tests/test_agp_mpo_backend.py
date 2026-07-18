@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -22,7 +23,12 @@ except ModuleNotFoundError:  # Python 3.10 in the required torch-mps environment
     from pip._vendor import tomli as tomllib
 
 from scripts.agp_mpo_backend import (
+    assert_full_support_identity,
+    build_direct_time_mpo,
     build_exact_pauli_mpo,
+    build_full_support_identity,
+    build_time_pauli_tensor_train,
+    combine_instantaneous_full_support_terms,
     compress_mpo_hilbert_schmidt,
     dense_pauli_sum,
     factor_direct_cd_coefficients,
@@ -30,6 +36,7 @@ from scripts.agp_mpo_backend import (
     permute_pauli_label,
     probe_mpo_compression,
     select_qubit_order,
+    slice_time_pauli_mpo,
     unpermute_pauli_label,
 )
 
@@ -217,6 +224,99 @@ class OptionalDependencyTests(unittest.TestCase):
         )
 
 
+class FullSupportProvenanceTests(unittest.TestCase):
+    def test_identity_covers_every_ordered_label_and_coefficient(self) -> None:
+        labels = ("XI", "YZ", "ZZ")
+        coefficients = np.asarray(
+            [[0.0, 0.0, 0.0], [0.2, -0.4, 0.7], [0.0, 0.0, 0.0]],
+            dtype=np.float64,
+        )
+
+        identity = build_full_support_identity(labels, coefficients)
+
+        self.assertEqual(identity.source_terms, 3)
+        self.assertEqual(identity.n_qubits, 2)
+        self.assertEqual(identity.coefficient_shape, (3, 3))
+        self.assertEqual(
+            assert_full_support_identity(identity, labels, coefficients).sha256,
+            identity.sha256,
+        )
+
+    def test_identity_rejects_removed_reordered_or_changed_terms(self) -> None:
+        labels = ("XI", "YZ", "ZZ")
+        coefficients = np.asarray([[0.2, -0.4, 0.7]], dtype=np.float64)
+        identity = build_full_support_identity(labels, coefficients)
+
+        with self.assertRaisesRegex(ValueError, "full-support identity"):
+            assert_full_support_identity(identity, labels[:-1], coefficients[:, :-1])
+        with self.assertRaisesRegex(ValueError, "full-support identity"):
+            assert_full_support_identity(
+                identity,
+                ("YZ", "XI", "ZZ"),
+                coefficients[:, [1, 0, 2]],
+            )
+        changed = coefficients.copy()
+        changed[0, 2] += 1.0e-12
+        with self.assertRaisesRegex(ValueError, "full-support identity"):
+            assert_full_support_identity(identity, labels, changed)
+
+    def test_identity_rejects_duplicate_labels_and_nonfinite_coefficients(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unique"):
+            build_full_support_identity(("XI", "XI"), np.zeros((2, 2)))
+        with self.assertRaisesRegex(ValueError, "finite"):
+            build_full_support_identity(("XI", "YZ"), np.asarray([[0.0, np.nan]]))
+
+    def test_instantaneous_combination_accounts_for_all_k_before_cancellation(self) -> None:
+        labels = ("XI", "YZ", "ZZ")
+        direct = np.asarray([0.25, -0.5, 0.75])
+        identity = build_full_support_identity(labels, direct[None, :])
+
+        terms, metadata = combine_instantaneous_full_support_terms(
+            h0_terms=(("XI", -1.0), ("IX", -1.0)),
+            h1_terms=(("ZZ", -2.0),),
+            learned_labels=labels,
+            direct_cd_coefficients=direct,
+            lam=0.25,
+            full_support_identity=identity,
+            identity_coefficient_samples=direct[None, :],
+        )
+
+        self.assertEqual(metadata["learned_source_terms"], 3)
+        self.assertEqual(metadata["learned_terms_accounted"], 3)
+        self.assertEqual(metadata["full_support_sha256"], identity.sha256)
+        combined = dict(terms)
+        self.assertAlmostEqual(combined["XI"], -0.5)
+        self.assertAlmostEqual(combined["IX"], -0.75)
+        self.assertAlmostEqual(combined["YZ"], -0.5)
+        self.assertAlmostEqual(combined["ZZ"], 0.25)
+
+    def test_instantaneous_structure_is_invariant_to_global_coefficient_scale(self) -> None:
+        labels = ("XI", "YZ", "ZZ")
+        direct = np.asarray([1.0e-8, -2.0e-8, 4.0e-8])
+
+        baseline, baseline_metadata = combine_instantaneous_full_support_terms(
+            h0_terms=(),
+            h1_terms=(),
+            learned_labels=labels,
+            direct_cd_coefficients=direct,
+            lam=0.3,
+        )
+        scaled, scaled_metadata = combine_instantaneous_full_support_terms(
+            h0_terms=(),
+            h1_terms=(),
+            learned_labels=labels,
+            direct_cd_coefficients=direct * 1.0e16,
+            lam=0.3,
+        )
+
+        self.assertEqual([label for label, _ in baseline], [label for label, _ in scaled])
+        self.assertEqual(baseline_metadata["combined_nonzero_terms"], 3)
+        self.assertEqual(scaled_metadata["combined_nonzero_terms"], 3)
+        np.testing.assert_allclose(
+            [coefficient * 1.0e16 for _, coefficient in baseline],
+            [coefficient for _, coefficient in scaled],
+        )
+
 class TemporalFactorizationTests(unittest.TestCase):
     def test_temporal_factorization_uses_all_terms_and_meets_norm_target(self) -> None:
         tau = np.linspace(0.0, 1.0, 9)
@@ -285,6 +385,23 @@ class TemporalFactorizationTests(unittest.TestCase):
         self.assertTrue(np.isfinite(result.retained_norm_fraction))
         self.assertTrue(np.all(np.isfinite(result.column_retained_energy_fractions)))
         self.assertGreaterEqual(result.minimum_column_retained_energy_fraction, 0.99 - 1.0e-12)
+
+    def test_full_rank_factorization_accepts_dimension_scaled_svd_roundoff(self) -> None:
+        tau = np.linspace(0.0, 1.0, 5)
+        temporal_profile = np.asarray([0.0, 0.5625, 1.0, 0.5625, 0.0])
+        spatial_profile = np.linspace(0.1118669920153378, 0.4136258528298205, 466)
+        direct = np.outer(temporal_profile, spatial_profile)
+        generator = np.random.default_rng(156)
+        direct[1:-1] += 1.0e-16 * generator.standard_normal((3, 466))
+
+        result = factor_direct_cd_coefficients(tau, direct, retained_norm=1.0)
+
+        np.testing.assert_allclose(result.reconstruct(), direct, rtol=0.0, atol=1.0e-13)
+        backward_error_tolerance = 16.0 * np.finfo(np.float64).eps * max(direct.shape)
+        self.assertGreaterEqual(
+            result.minimum_column_retained_energy_fraction,
+            1.0 - backward_error_tolerance,
+        )
 
     def test_factorization_preserves_zero_direct_cd_endpoints(self) -> None:
         tau = np.linspace(0.0, 1.0, 5)
@@ -421,6 +538,372 @@ class QubitOrderingTests(unittest.TestCase):
 
 @unittest.skipUnless(_TENPY_AVAILABLE, "TeNPy tensor-network extra is not installed")
 class ExactPauliMPOTests(unittest.TestCase):
+    def test_time_pauli_tensor_train_slices_complete_instantaneous_hamiltonians(self) -> None:
+        labels = ("YI", "IY", "YZ")
+        direct = np.asarray(((0.3, -0.2, 0.45), (-0.1, 0.25, 0.05)))
+        lambdas = np.asarray((0.2, 0.8))
+        identity = build_full_support_identity(labels, direct)
+        train, diagnostics = build_time_pauli_tensor_train(
+            h0_terms=(("XI", -1.0), ("IX", -1.0)),
+            h1_terms=(("ZI", -0.5), ("ZZ", -1.25)),
+            learned_labels=labels,
+            direct_cd_coefficients=direct,
+            lambda_samples=lambdas,
+            n_qubits=2,
+            order=(0, 1),
+            max_bond=32,
+            cutoff=0.0,
+            workspace_cap_bytes=64 * 1024**2,
+            full_support_identity=identity,
+            identity_coefficient_samples=direct,
+        )
+
+        self.assertIsNotNone(train)
+        self.assertEqual(diagnostics["source_completeness_status"], "pass")
+        self.assertEqual(diagnostics["learned_source_terms"], len(labels))
+        self.assertEqual(diagnostics["learned_terms_accounted"], len(labels))
+        self.assertEqual(diagnostics["full_support_sha256"], identity.sha256)
+        for sample, lam in enumerate(lambdas):
+            mpo = slice_time_pauli_mpo(train, sample)
+            expected, _ = combine_instantaneous_full_support_terms(
+                h0_terms=(("XI", -1.0), ("IX", -1.0)),
+                h1_terms=(("ZI", -0.5), ("ZZ", -1.25)),
+                learned_labels=labels,
+                direct_cd_coefficients=direct[sample],
+                lam=float(lam),
+            )
+            np.testing.assert_allclose(
+                mpo_to_dense(mpo), dense_pauli_sum(expected), atol=2.0e-12
+            )
+
+    def test_time_pauli_tensor_train_supports_more_than_32_qubits(self) -> None:
+        n_qubits = 40
+        labels = (
+            "X" + "I" * (n_qubits - 1),
+            "I" * 19 + "Y" + "I" * 20,
+            "I" * (n_qubits - 1) + "Z",
+        )
+        direct = np.asarray(((0.2, -0.1, 0.3), (0.4, 0.05, -0.2)))
+        train, diagnostics = build_time_pauli_tensor_train(
+            h0_terms=(("I" * 5 + "X" + "I" * 34, -1.0),),
+            h1_terms=(("I" * 30 + "Z" + "I" * 9, 0.75),),
+            learned_labels=labels,
+            direct_cd_coefficients=direct,
+            lambda_samples=np.asarray((0.25, 0.75)),
+            n_qubits=n_qubits,
+            order=tuple(range(n_qubits)),
+            max_bond=16,
+            cutoff=0.0,
+            workspace_cap_bytes=64 * 1024**2,
+            full_support_identity=build_full_support_identity(labels, direct),
+            identity_coefficient_samples=direct,
+        )
+
+        self.assertIsNotNone(train)
+        self.assertEqual(slice_time_pauli_mpo(train, 0).L, n_qubits)
+        self.assertEqual(diagnostics["source_completeness_status"], "pass")
+        self.assertEqual(diagnostics["pauli_encoding"], "python_arbitrary_precision_int")
+
+    def test_time_pauli_tensor_train_supports_temporal_rank_above_int8(self) -> None:
+        labels = tuple(_base4_pauli_label(index, 3) for index in range(64))
+        generator = np.random.default_rng(731)
+        direct = generator.normal(size=(40, len(labels)))
+        train, diagnostics = build_time_pauli_tensor_train(
+            h0_terms=(),
+            h1_terms=(),
+            learned_labels=labels,
+            direct_cd_coefficients=direct,
+            lambda_samples=np.linspace(0.0, 1.0, direct.shape[0]),
+            n_qubits=3,
+            order=(0, 1, 2),
+            max_bond=64,
+            cutoff=0.0,
+            workspace_cap_bytes=64 * 1024**2,
+            full_support_identity=build_full_support_identity(labels, direct),
+            identity_coefficient_samples=direct,
+        )
+
+        self.assertIsNotNone(train)
+        self.assertEqual(diagnostics["compression"]["retained_ranks"][0], 40)
+        self.assertEqual(diagnostics["status"], "ok")
+
+    def test_time_pauli_tensor_train_counts_spatial_rank_cap_discard(self) -> None:
+        labels = ("XX", "ZZ")
+        direct = np.asarray(((1.0, 0.7),))
+        _, diagnostics = build_time_pauli_tensor_train(
+            h0_terms=(),
+            h1_terms=(),
+            learned_labels=labels,
+            direct_cd_coefficients=direct,
+            lambda_samples=np.asarray((0.5,)),
+            n_qubits=2,
+            order=(0, 1),
+            max_bond=1,
+            cutoff=0.0,
+            workspace_cap_bytes=64 * 1024**2,
+            full_support_identity=build_full_support_identity(labels, direct),
+            identity_coefficient_samples=direct,
+        )
+
+        compression = diagnostics["compression"]
+        self.assertGreater(compression["total_discarded_squared_norm"], 0.0)
+        self.assertEqual(compression["exact_identity_status"], "not_established")
+
+    def test_time_pauli_tdvp_matches_dense_full_support_evolution(self) -> None:
+        tau = np.linspace(0.0, 1.0, 65)
+        direct = np.column_stack(
+            (
+                0.35 * np.sin(np.pi * tau),
+                -0.2 * np.sin(np.pi * tau),
+                0.15 * np.sin(2.0 * np.pi * tau),
+            )
+        )
+        labels = ("YI", "IY", "YZ")
+        h0_terms = [("XI", -1.0), ("IX", -1.0)]
+        h1_terms = [("ZI", -0.7), ("IZ", -1.1), ("ZZ", -0.4)]
+        state, diagnostics = mpo_backend.evolve_protocol_time_tensor_tdvp(
+            h0_terms=h0_terms,
+            h1_terms=h1_terms,
+            learned_tau=tau,
+            learned_direct_cd_coefficients=direct,
+            learned_labels=labels,
+            full_support_identity=build_full_support_identity(labels, direct),
+            total_time=0.7,
+            steps=48,
+            order=(0, 1),
+            initial_state=("+", "+"),
+            ground_bitstring="00",
+            mps_max_bond=8,
+            mps_cutoff=1.0e-13,
+            mpo_max_bond=32,
+            mpo_cutoff=0.0,
+            lanczos_max=30,
+            mpo_workspace_cap_bytes=64 * 1024**2,
+            coefficient_error_max=1.0e-10,
+            action_error_max=1.0e-10,
+            action_probe_product_states=2,
+            action_probe_time_samples=3,
+            action_probe_seed=29,
+        )
+        reference = _test_dense_midpoint_oracle(
+            h0_terms=h0_terms,
+            h1_terms=h1_terms,
+            total_time=0.7,
+            steps=48,
+            order=(0, 1),
+            initial_state=("+", "+"),
+            protocol="learned",
+            cd_labels=labels,
+            factorization=factor_direct_cd_coefficients(tau, direct, retained_norm=1.0),
+        )
+
+        self.assertEqual(diagnostics["status"], "ok")
+        self.assertEqual(diagnostics["representation"], "joint_time_full_support")
+        self.assertEqual(diagnostics["evaluated_cd_terms"], len(labels))
+        self.assertEqual(diagnostics["operator_gate_status"], "pass")
+        self.assertEqual(diagnostics["completed_steps"], 48)
+        self.assertGreater(
+            abs(np.vdot(_test_mps_vector(state), reference)) ** 2,
+            1.0 - 2.0e-7,
+        )
+
+    def test_time_pauli_tdvp_aborts_before_metrics_when_operator_gate_fails(self) -> None:
+        tau = np.asarray((0.0, 0.5, 1.0))
+        labels = ("XX", "ZZ", "YY")
+        direct = np.asarray(((0.0, 0.0, 0.0), (1.0, 0.7, -0.4), (0.0, 0.0, 0.0)))
+        _, diagnostics = mpo_backend.evolve_protocol_time_tensor_tdvp(
+            h0_terms=(("XI", -1.0), ("IX", -1.0)),
+            h1_terms=(("ZI", -1.0), ("IZ", -1.0)),
+            learned_tau=tau,
+            learned_direct_cd_coefficients=direct,
+            learned_labels=labels,
+            full_support_identity=build_full_support_identity(labels, direct),
+            steps=4,
+            mpo_max_bond=1,
+            mpo_cutoff=0.0,
+            mps_max_bond=4,
+            mps_cutoff=1.0e-12,
+            mpo_workspace_cap_bytes=64 * 1024**2,
+            coefficient_error_max=1.0e-12,
+            action_error_max=1.0e-12,
+            action_probe_product_states=2,
+            action_probe_time_samples=2,
+        )
+
+        self.assertEqual(diagnostics["status"], "not_feasible")
+        self.assertEqual(diagnostics["operator_gate_status"], "fail")
+        self.assertEqual(diagnostics["completed_steps"], 0)
+        self.assertIsNone(diagnostics["final_energy"])
+        self.assertIsNone(diagnostics["ground_fidelity"])
+
+    def test_time_pauli_tdvp_splits_failed_joint_window_without_dropping_terms(self) -> None:
+        tau = np.asarray((0.0, 0.25, 0.75, 1.0))
+        labels = ("XX", "ZZ")
+        direct = np.asarray(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0)))
+        _, diagnostics = mpo_backend.evolve_protocol_time_tensor_tdvp(
+            h0_terms=(("II", 0.0),),
+            h1_terms=(("II", 0.0),),
+            learned_tau=tau,
+            learned_direct_cd_coefficients=direct,
+            learned_labels=labels,
+            full_support_identity=build_full_support_identity(labels, direct),
+            steps=2,
+            mpo_max_bond=1,
+            mpo_cutoff=0.0,
+            mps_max_bond=4,
+            mps_cutoff=1.0e-12,
+            mpo_workspace_cap_bytes=64 * 1024**2,
+            coefficient_error_max=1.0e-10,
+            action_error_max=1.0e-10,
+            action_probe_product_states=1,
+            action_probe_time_samples=1,
+            time_window_size=2,
+            adaptive_time_windows=True,
+        )
+
+        self.assertEqual(diagnostics["status"], "ok")
+        self.assertEqual(diagnostics["completed_steps"], 2)
+        self.assertEqual(diagnostics["operator_gate_status"], "pass")
+        self.assertEqual(diagnostics["operator_certificate"]["accepted_windows"], 2)
+        self.assertEqual(diagnostics["operator_certificate"]["split_attempts"], 1)
+        self.assertTrue(
+            all(
+                row["learned_terms_accounted"] == len(labels)
+                for row in diagnostics["operator_certificate"]["windows"]
+                if row["status"] == "pass"
+            )
+        )
+
+    def test_time_pauli_tdvp_reports_window_and_step_progress(self) -> None:
+        tau = np.asarray((0.0, 0.5, 1.0))
+        labels = ("YI", "IY")
+        direct = np.asarray(((0.0, 0.0), (0.2, -0.1), (0.0, 0.0)))
+        events: list[dict[str, object]] = []
+
+        _, diagnostics = mpo_backend.evolve_protocol_time_tensor_tdvp(
+            h0_terms=(("XI", -1.0), ("IX", -1.0)),
+            h1_terms=(("ZI", -0.7), ("IZ", -0.8)),
+            learned_tau=tau,
+            learned_direct_cd_coefficients=direct,
+            learned_labels=labels,
+            full_support_identity=build_full_support_identity(labels, direct),
+            steps=2,
+            mpo_max_bond=8,
+            mpo_cutoff=0.0,
+            mps_max_bond=4,
+            mps_cutoff=1.0e-12,
+            mpo_workspace_cap_bytes=64 * 1024**2,
+            coefficient_error_max=1.0e-10,
+            action_error_max=1.0e-10,
+            action_probe_product_states=1,
+            action_probe_time_samples=1,
+            time_window_size=1,
+            progress_callback=lambda event: events.append(dict(event)),
+        )
+
+        self.assertEqual(diagnostics["status"], "ok")
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["operator_window", "tdvp_step", "operator_window", "tdvp_step"],
+        )
+        self.assertEqual(events[-1]["completed_steps"], 2)
+        self.assertEqual(events[-1]["total_steps"], 2)
+        self.assertTrue(
+            all(event["learned_terms"] == len(labels) for event in events)
+        )
+
+    def test_zero_cutoff_does_not_retain_floating_null_singular_directions(self) -> None:
+        n_qubits = 8
+        h0_terms = tuple(
+            ("I" * site + "X" + "I" * (n_qubits - site - 1), -1.0)
+            for site in range(n_qubits)
+        )
+
+        mpo, diagnostics = build_direct_time_mpo(
+            h0_terms=h0_terms,
+            h1_terms=(),
+            learned_labels=("Y" + "I" * (n_qubits - 1),),
+            direct_cd_coefficients=np.asarray([0.0]),
+            lam=0.5,
+            n_qubits=n_qubits,
+            order=tuple(range(n_qubits)),
+            max_bond=1024,
+            cutoff=0.0,
+            workspace_cap_bytes=256 * 1024**2,
+            action_probe_product_states=2,
+        )
+
+        self.assertIsNotNone(mpo)
+        self.assertLessEqual(max(diagnostics["post_bonds"]), 2)
+        self.assertEqual(diagnostics["operator_gate_status"], "pass")
+
+    def test_direct_time_mpo_matches_complete_instantaneous_hamiltonian(self) -> None:
+        labels = ("YI", "IY", "YZ")
+        direct = np.asarray([0.3, -0.2, 0.45])
+        identity_samples = np.stack([np.zeros(3), direct, np.zeros(3)])
+        identity = build_full_support_identity(labels, identity_samples)
+
+        mpo, diagnostics = build_direct_time_mpo(
+            h0_terms=(("XI", -1.0), ("IX", -1.0)),
+            h1_terms=(("ZI", -0.5), ("ZZ", -1.25)),
+            learned_labels=labels,
+            direct_cd_coefficients=direct,
+            lam=0.4,
+            n_qubits=2,
+            order=(0, 1),
+            max_bond=16,
+            cutoff=0.0,
+            workspace_cap_bytes=64 * 1024**2,
+            full_support_identity=identity,
+            identity_coefficient_samples=identity_samples,
+        )
+
+        expected_terms, _ = combine_instantaneous_full_support_terms(
+            h0_terms=(("XI", -1.0), ("IX", -1.0)),
+            h1_terms=(("ZI", -0.5), ("ZZ", -1.25)),
+            learned_labels=labels,
+            direct_cd_coefficients=direct,
+            lam=0.4,
+        )
+        self.assertIsNotNone(mpo)
+        np.testing.assert_allclose(
+            mpo_to_dense(mpo), dense_pauli_sum(expected_terms), atol=1.0e-12
+        )
+        self.assertEqual(diagnostics["source_completeness_status"], "pass")
+        self.assertEqual(diagnostics["learned_source_terms"], 3)
+        self.assertEqual(diagnostics["learned_terms_accounted"], 3)
+        self.assertEqual(diagnostics["full_support_sha256"], identity.sha256)
+        self.assertEqual(diagnostics["exact_identity_status"], "verified")
+
+    def test_direct_time_mpo_rank_and_relative_error_are_global_scale_invariant(self) -> None:
+        labels = ("XI", "IY", "ZZ", "YX")
+        direct = np.asarray([1.0, -2.0, 0.75, 0.125])
+        diagnostics_by_scale = []
+        dense_by_scale = []
+        for scale in (1.0e-120, 1.0, 1.0e120):
+            mpo, diagnostics = build_direct_time_mpo(
+                h0_terms=(),
+                h1_terms=(),
+                learned_labels=labels,
+                direct_cd_coefficients=direct * scale,
+                lam=0.5,
+                n_qubits=2,
+                order=(0, 1),
+                max_bond=16,
+                cutoff=0.0,
+                workspace_cap_bytes=64 * 1024**2,
+            )
+            self.assertIsNotNone(mpo)
+            diagnostics_by_scale.append(diagnostics)
+            dense_by_scale.append(mpo_to_dense(mpo) / scale)
+
+        self.assertEqual(
+            [row["compression"]["post_bonds"] for row in diagnostics_by_scale],
+            [diagnostics_by_scale[0]["compression"]["post_bonds"]] * 3,
+        )
+        for dense in dense_by_scale[1:]:
+            np.testing.assert_allclose(dense, dense_by_scale[0], rtol=1.0e-12, atol=1.0e-12)
+
     def test_exact_pauli_mpo_contains_every_nonzero_combined_label(self) -> None:
         terms = [("XI", 0.3), ("YZ", -0.7), ("ZZ", 0.2), ("II", 0.1)]
 
@@ -500,6 +983,47 @@ class ExactPauliMPOTests(unittest.TestCase):
 
 @unittest.skipUnless(_TENPY_AVAILABLE, "TeNPy tensor-network extra is not installed")
 class MPOCompressionTests(unittest.TestCase):
+    def test_static_pauli_compression_supports_arbitrary_length_labels(self) -> None:
+        n_qubits = 156
+        terms = (
+            ("X" + "I" * (n_qubits - 1), 0.5),
+            ("I" * (n_qubits // 2) + "Y" + "I" * (n_qubits // 2 - 1), -0.25),
+            ("I" * (n_qubits - 1) + "Z", 0.75),
+        )
+        source, _ = mpo_backend.build_pauli_coordinate_source(
+            terms,
+            n_qubits=n_qubits,
+            order=tuple(range(n_qubits)),
+        )
+
+        compressed, diagnostics = compress_mpo_hilbert_schmidt(
+            source,
+            max_bond=4,
+            cutoff=0.0,
+            workspace_cap_bytes=64 * 1024**2,
+        )
+
+        self.assertIsNotNone(compressed)
+        self.assertEqual(diagnostics["status"], "ok")
+        self.assertEqual(diagnostics["pauli_encoding"], "python_arbitrary_precision_int")
+        self.assertEqual(diagnostics["input_terms"], len(terms))
+        self.assertEqual(diagnostics["exact_identity_status"], "verified")
+        self.assertEqual(
+            compressed._agp_exact_identity_certificate["pauli_terms"],
+            tuple(sorted(terms)),
+        )
+        self.assertTrue(all(bond <= 4 for bond in compressed.chi))
+        action = probe_mpo_compression(
+            source,
+            compressed,
+            product_states=(("up",) * n_qubits,),
+            random_state_count=0,
+            exact_work_cap=10_000,
+            workspace_cap_bytes=64 * 1024**2,
+        )
+        self.assertEqual(action["tested_probes"], 1)
+        self.assertEqual(action["probes"][0]["relative_action_error"], 0.0)
+
     def test_q24_compression_owns_retained_cores_within_hard_traced_cap(self) -> None:
         from tenpy.networks.site import SpinHalfSite
 
@@ -1180,6 +1704,19 @@ class MPOCompressionTests(unittest.TestCase):
 
 @unittest.skipUnless(_TENPY_AVAILABLE, "TeNPy tensor-network extra is not installed")
 class TDVPEvolutionTests(unittest.TestCase):
+    def test_static_q24_mpo_model_is_a_one_dimensional_chain(self) -> None:
+        n_qubits = 24
+        mpo, _ = build_exact_pauli_mpo(
+            [("X" + "I" * (n_qubits - 1), -1.0)],
+            n_qubits=n_qubits,
+            order=tuple(range(n_qubits)),
+        )
+
+        model = mpo_backend._static_mpo_model(mpo)
+
+        self.assertEqual(model.lat.N_sites, n_qubits)
+        self.assertEqual(model.lat.N_sites_per_ring, 1)
+
     def _single_qubit_settings(self) -> dict[str, object]:
         return {
             "h0_terms": [("X", -1.0)],
@@ -1221,12 +1758,110 @@ class TDVPEvolutionTests(unittest.TestCase):
             "peak_mps_bond",
             "final_mps_bond",
             "static_mpo_bonds",
+            "static_mpo_compression",
             "dynamic_mpo_peak_bond",
             "operator_build_seconds",
             "evolution_seconds",
             "resource_statuses",
         ):
             self.assertIn(key, diagnostics)
+        json.dumps(diagnostics["static_mpo_compression"])
+
+    def test_direct_full_support_tdvp_matches_dense_learned_evolution(self) -> None:
+        tau = np.linspace(0.0, 1.0, 17)
+        direct = np.column_stack(
+            (
+                0.35 * np.sin(np.pi * tau),
+                -0.2 * np.sin(np.pi * tau),
+                0.15 * np.sin(2.0 * np.pi * tau),
+            )
+        )
+        labels = ("YI", "IY", "YZ")
+        identity = build_full_support_identity(labels, direct)
+        h0_terms = [("XI", -1.0), ("IX", -1.0)]
+        h1_terms = [("ZI", -0.7), ("IZ", -1.1), ("ZZ", -0.4)]
+
+        state, diagnostics = mpo_backend.evolve_protocol_direct_tdvp(
+            h0_terms=h0_terms,
+            h1_terms=h1_terms,
+            learned_tau=tau,
+            learned_direct_cd_coefficients=direct,
+            learned_labels=labels,
+            full_support_identity=identity,
+            schedule=None,
+            total_time=0.7,
+            steps=48,
+            order=(0, 1),
+            initial_state=("+", "+"),
+            ground_bitstring="00",
+            mps_max_bond=8,
+            mps_cutoff=1.0e-13,
+            mpo_max_bond=16,
+            mpo_cutoff=0.0,
+            lanczos_max=30,
+            mpo_workspace_cap_bytes=64 * 1024**2,
+            action_error_max=1.0e-10,
+            action_probe_product_states=3,
+            action_probe_seed=19,
+        )
+        factorization = factor_direct_cd_coefficients(tau, direct, retained_norm=1.0)
+        reference = _test_dense_midpoint_oracle(
+            h0_terms=h0_terms,
+            h1_terms=h1_terms,
+            total_time=0.7,
+            steps=48,
+            order=(0, 1),
+            initial_state=("+", "+"),
+            protocol="learned",
+            cd_labels=labels,
+            factorization=factorization,
+        )
+
+        self.assertEqual(diagnostics["status"], "ok")
+        self.assertEqual(diagnostics["representation"], "direct_time_full_support")
+        self.assertEqual(diagnostics["evaluated_cd_terms"], 3)
+        self.assertEqual(diagnostics["full_support_sha256"], identity.sha256)
+        self.assertEqual(diagnostics["operator_gate_status"], "pass")
+        self.assertEqual(diagnostics["completed_steps"], 48)
+        self.assertGreater(
+            abs(np.vdot(_test_mps_vector(state), reference)) ** 2,
+            1.0 - 2.0e-7,
+        )
+
+    def test_direct_full_support_tdvp_aborts_on_operator_action_failure(self) -> None:
+        tau = np.asarray([0.0, 0.5, 1.0])
+        labels = ("XX", "ZZ", "YY")
+        direct = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.7, -0.4], [0.0, 0.0, 0.0]])
+
+        _, diagnostics = mpo_backend.evolve_protocol_direct_tdvp(
+            h0_terms=(("XI", -1.0), ("IX", -1.0)),
+            h1_terms=(("ZI", -1.0), ("IZ", -1.0)),
+            learned_tau=tau,
+            learned_direct_cd_coefficients=direct,
+            learned_labels=labels,
+            full_support_identity=build_full_support_identity(labels, direct),
+            schedule=None,
+            total_time=1.0,
+            steps=2,
+            order=(0, 1),
+            initial_state=("+", "+"),
+            ground_bitstring="00",
+            mps_max_bond=4,
+            mps_cutoff=1.0e-12,
+            mpo_max_bond=1,
+            mpo_cutoff=0.0,
+            lanczos_max=10,
+            mpo_workspace_cap_bytes=64 * 1024**2,
+            action_error_max=1.0e-12,
+            action_probe_product_states=4,
+            action_probe_seed=23,
+        )
+
+        self.assertEqual(diagnostics["status"], "not_feasible")
+        self.assertEqual(diagnostics["operator_gate_status"], "fail")
+        self.assertEqual(diagnostics["completed_steps"], 0)
+        self.assertIsNone(diagnostics["final_energy"])
+        self.assertIsNone(diagnostics["ground_fidelity"])
 
     def test_prepare_tdvp_operators_includes_every_mode_and_term(self) -> None:
         result = mpo_backend.prepare_tdvp_operators(
@@ -1254,6 +1889,48 @@ class TDVPEvolutionTests(unittest.TestCase):
                 for item in result.diagnostics["static_mpo_compression"]["cd_modes"]
             )
         )
+
+    def test_prepare_tdvp_operators_bypasses_generic_exact_mpo_graph(self) -> None:
+        with mock.patch.object(
+            mpo_backend,
+            "build_exact_pauli_mpo",
+            side_effect=AssertionError("generic exact MPO graph must not be materialized"),
+        ):
+            result = mpo_backend.prepare_tdvp_operators(
+                labels=("XI", "YZ", "ZZ"),
+                static_modes=np.asarray([[0.3, -0.7, 0.2]]),
+                temporal_factors=np.ones((3, 1)),
+                n_qubits=2,
+                order=(0, 1),
+                mpo_max_bond=16,
+                mpo_cutoff=1.0e-13,
+                h0_terms=(("XI", -1.0), ("IX", -1.0)),
+                h1_terms=(("ZI", -0.5), ("IZ", -0.75), ("ZZ", 0.1)),
+            )
+
+        np.testing.assert_allclose(
+            mpo_to_dense(result.cd_mode_mpos[0]),
+            dense_pauli_sum([("XI", 0.3), ("YZ", -0.7), ("ZZ", 0.2)]),
+            atol=1.0e-11,
+        )
+        self.assertEqual(
+            result.diagnostics["static_mpo_compression"]["cd_modes"][0]["build"]["included_terms"],
+            3,
+        )
+
+    def test_single_step_nested_l1_factorization_samples_the_midpoint(self) -> None:
+        factorization, labels = mpo_backend._factor_nested_l1_direct_cd(
+            [("X", -1.0)],
+            [("Z", -1.0)],
+            total_time=1.0,
+            steps=1,
+            schedule=None,
+        )
+
+        self.assertIsNotNone(factorization)
+        self.assertTrue(labels)
+        self.assertEqual(factorization.tau.tolist(), [0.0, 0.5, 1.0])
+        self.assertGreater(float(np.linalg.norm(factorization.reconstruct()[1])), 0.1)
 
     def test_expm_mpo_matches_tdvp_only_when_operator_equivalence_is_lossless(self) -> None:
         cases = (
@@ -1486,7 +2163,7 @@ class TDVPEvolutionTests(unittest.TestCase):
             "mps_cutoff": 1.0e-13,
             "mpo_max_bond": 16,
             "mpo_cutoff": 0.0,
-            "mpo_workspace_cap_bytes": 2 * 1024 * 1024,
+            "mpo_workspace_cap_bytes": 1536 * 1024,
         }
         for evolve in (mpo_backend.evolve_protocol_tdvp, mpo_backend.evolve_protocol_expm_mpo):
             with self.subTest(integrator=evolve.__name__):
@@ -1502,6 +2179,29 @@ class TDVPEvolutionTests(unittest.TestCase):
                 else:
                     self.assertIn("worst_case_virtual_dimension", plan)
                     self.assertIn("copy_and_conversion_bytes", plan)
+
+    def test_exact_dynamic_action_source_respects_workspace_cap(self) -> None:
+        prepared = mpo_backend.prepare_tdvp_operators(
+            labels=("Y",),
+            static_modes=np.asarray([[1.0]]),
+            temporal_factors=np.asarray([[0.0], [1.0], [0.0]]),
+            n_qubits=1,
+            order=(0,),
+            mpo_max_bond=4,
+            mpo_cutoff=0.0,
+            h0_terms=(("X", -1.0),),
+            h1_terms=(("Z", -1.0),),
+        )
+
+        with self.assertRaises(mpo_backend._DynamicMPOResourceError):
+            mpo_backend._assemble_dynamic_mpo(
+                prepared,
+                h0_coefficient=0.5,
+                h1_coefficient=0.5,
+                cd_mode_coefficients=np.asarray([1.0]),
+                workspace_cap_bytes=1,
+                exact_components=True,
+            )
 
     def test_per_step_truncation_and_physical_norm_drift_are_reported(self) -> None:
         settings = {

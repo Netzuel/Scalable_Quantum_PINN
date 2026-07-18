@@ -13,6 +13,10 @@ Core workflow:
 - `agp_restart.py`: remove generated artifacts for one configured study.
 - `agp_support.py`: support-selection helpers.
 - `agp_plot_annotations.py`: shared physical-metric footer annotations for HCD summary plots.
+- `agp_mpo_backend.py`: full-support Pauli-coordinate MPO construction,
+  positioned time-Pauli tensor trains, operator certificates, and TeNPy TDVP.
+- `agp_tn_router.py`: fail-closed backend selection from measured rank and
+  workspace profiles; it never authorizes learned-support truncation.
 
 Exact numerical validation:
 

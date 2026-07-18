@@ -573,10 +573,10 @@ or attribution controls without using benchmark-only ground-truth targets.
 
 ## Scalable MPS Dynamical Validation
 
-Large-q final-state metrics are evaluated with the optional quimb MPS backend
-instead of a dense `2**q` statevector. This validation layer does not alter AGP
-training. It deploys the exported learned schedule and counterdiabatic
-coefficients after training and compares:
+Large-q final-state metrics are evaluated with a fail-closed tensor-network
+backend instead of a dense `2**q` statevector. This post-training layer does
+not alter AGP learning. It deploys the exported schedule and coefficients and
+compares:
 
 ```text
 no_cd
@@ -584,41 +584,59 @@ kipu_dqfm_l1
 learned_sparse_agp
 ```
 
-The canonical PINN row must use all terms exported by the retained learned AGP
-checkpoint. Coefficient-ranked top-term deployments are support ablations only;
-they may diagnose cost or sensitivity but cannot replace the full learned-
-support physical evaluation. If all learned terms cannot be evolved at two or
-more converged MPS resolutions, the full-model physical-validation gate is
-`not tested`.
+The canonical PINN row uses every ordered term exported by the retained
+checkpoint. A mutation-sensitive hash covers all labels and sampled coefficient
+rows. Coefficient-ranked top-term deployments remain ablations and cannot
+replace full-support validation.
 
-Time evolution starts from `|+>**q` and uses a symmetric second-order product
-formula. The scalable full-support path groups Pauli strings only when they
-share the same occupied-qubit support, sums their complete coefficients into a
-local Hermitian Hamiltonian, exponentiates that group, and applies the resulting
-gate as an MPO followed by bounded-bond MPS compression. This changes the
-Trotter partition but does not prune any learned term; timestep convergence
-controls the resulting splitting error. The legacy per-Pauli path remains
-available for small-system cross-checks. For a diagonal final Ising
-Hamiltonian, final energy is computed from local `Z_i` and `Z_i Z_{i+1}`
-contractions. Ground fidelity is the squared MPS amplitude of the exact product
-ground bitstring.
+The preferred learned path constructs the complete sampled coefficient tensor
 
-Every reported large-q result records the time steps, cutoff, maximum and peak
-bond, deployed learned-term count, retained coefficient RMS norm, gate count,
-Pauli-term application count, grouping policy, runtime, state norm, and final
-observables. A large-q dynamical claim requires successive-resolution
-agreement; merely finishing one MPS run is not a pass.
+```text
+C[r, p_1, ..., p_q] = coefficient of P(p_1,...,p_q) in H_CD(t_r)
+```
 
-The backend is calibrated at q15 against the matching retained 1024-term
-statevector variant. At 96 steps, bond 128, and cutoff `1e-12`, learned-protocol
-differences are:
+and factorizes it as a workspace-bounded tensor train. The finite time axis may
+be inserted at a measured position along the Pauli chain; selecting one time
+index then produces an ordinary MPO for one TDVP midpoint. This placement can
+reduce temporal rank inflation but never changes `K`. If a multi-time window
+fails, adaptive execution may split it into smaller contiguous windows. Every
+accepted window still contains all learned terms.
+
+An operator is evolvable only after it passes all of:
+
+```text
+full-K source and hash completeness,
+finite Hermitian coefficients,
+conservative coefficient-space error bound,
+full-source sparse-action error upper bound,
+and workspace/bond limits.
+```
+
+A cancellation-limited action estimate may pass when its finite conservative
+upper bound is below tolerance. Missing, nonfinite, or unbounded evidence is
+`not tested`. Two-site TeNPy TDVP is then used so the MPS bond can grow. The
+legacy quimb product-formula path remains a diagnostic/historical backend, not
+the canonical fallback after an MPO gate failure.
+
+Every reported large-q result records the time steps, MPS/MPO cutoffs and bonds,
+time-axis position and windows, deployed learned-term count and hash, operator
+error bounds, workspace, runtime, state norm, truncation error, and final
+observables. Timestep and MPS convergence use independent named pairs: the time
+pair fixes MPS/MPO settings, while the state pair fixes timestep/MPO settings.
+Changing both in one comparison is `not comparable`. Merely finishing one MPS
+run is not a pass.
+
+The legacy grouped product-formula backend was calibrated at q15 against the
+matching retained 1024-term statevector variant. At 96 steps, bond 128, and
+cutoff `1e-12`, learned-protocol differences were:
 
 ```text
 final-energy difference = 1.401e-4
 ground-fidelity difference = 2.658e-5
 ```
 
-The retained q20 validation deploys all 32,768 learned terms from the completed
+The retained q20 grouped product-formula validation deploys all 32,768 learned
+terms from the completed
 `Q=81,920` adaptive-temporal checkpoint. These map to 1,828 occupied-qubit
 support groups, with no coefficient threshold. Its 24-step/bond-32/cutoff-
 `1e-9` and 48-step/bond-64/cutoff-`1e-10` results pass the configured

@@ -17,13 +17,32 @@ physical validation without making those exact targets part of the PINN loss.
 ## Studies
 
 - `q15/sweep_test/`: retained curriculum with exact statevector validation and
-  tensor-network calibration.
+  tensor-network calibration plus a full-support TN diagnostic.
 - `q20/sweep_test/`: retained curriculum with canonical full-support MPS
   validation.
-- `q156/sweep_test/`: retained large-system curriculum and scalable MPS
-  validation status.
+- `q156/sweep_test/`: retained large-system curriculum with canonical
+  full-support tensor-network validation.
 
 Each `sweep_test/` keeps its `config.json`, local documentation, and ignored
 `runs/` tree together. Reusable training code remains in the repository-level
 `scripts/` directory; benchmark-family validation entrypoints remain in
 `tests/sparse_agp_curriculum/scripts/`.
+
+## Tensor-Network Validation Examples
+
+All three retained TN rows use the joint-time MPO/TDVP backend. The canonical
+PINN deployment always includes all `K=32768` learned AGP terms.
+
+| q | Exact `E_0` | PINN `E(T)` | Energy error | PINN ground fidelity | TN status |
+|---:|---:|---:|---:|---:|---|
+| 15 | -19.25 | -19.1097006 | 0.1402994 | 0.9646510 | timestep/bond/MPO pass; full-support exact check not tested |
+| 20 | -26.0 | -25.6478383 | 0.3521617 | 0.9377128 | certified pass |
+| 156 | -209.6 | -201.3901459 | 8.2098541 | 0.2394617 | certified pass |
+
+At q15, an additional matching-support 2,048-term ablation compares TN and
+exact statevector propagation directly. The learned-protocol differences are
+`9.15015e-5` in final energy and `1.49043e-5` in fidelity, validating the
+propagator without mislabeling that reduced-support check as canonical. At q20
+and q156, exact time evolution is unavailable under the project threshold, so
+the physical rows are accepted only after independent timestep, state-bond,
+MPO-action, and learned-source-completeness gates pass.

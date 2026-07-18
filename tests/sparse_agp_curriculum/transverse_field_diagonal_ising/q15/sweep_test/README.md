@@ -137,7 +137,7 @@ Kipu/DQFM l=1 rows use the fixed reference `sin^2(pi t / 2T)` schedule.
 The statevector code is intentionally kept as a script-level diagnostic because
 it is not a scalable library path.
 
-## MPS Calibration
+## Tensor-Network Validation And Calibration
 
 The tensor-network backend is calibrated against the retained q15 statevector
 before it is used at larger q:
@@ -148,9 +148,27 @@ conda run --no-capture-output -n torch-mps python -u \
   --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
 ```
 
-The calibration uses the matching retained 1024-term deployment variant,
-96 time steps, bond cap 128, and cutoff `1e-12`. The MPS result agrees with the
-statevector to `1.41e-4` in final energy and `2.66e-5` in ground fidelity for
-the learned protocol. The no-CD and nested-l1 differences are also below the
-configured tolerances. This validates the MPS propagator at q15; it does not
-replace the 2048-term statevector row used for the primary q15 benchmark.
+The canonical tensor-network ladder deploys all 32,768 retained AGP terms with
+a joint-time full-support MPO and two-site TDVP. It independently compares 24
+versus 48 steps at MPS bond 64 and bonds 32 versus 64 at 48 steps. Its fine
+results are:
+
+| Method | Final energy | Energy error | Ground fidelity |
+| --- | ---: | ---: | ---: |
+| no CD | -2.3932406 | 16.8567594 | 2.87405e-4 |
+| nested commutator l=1 | -9.0861275 | 10.1638725 | 0.0259134 |
+| learned sparse AGP | -19.1097006 | 0.1402994 | 0.9646510 |
+
+For the PINN row, the timestep deltas are `0.00221499` in energy and
+`2.72992e-4` in fidelity; the state-bond deltas are `3.44413e-5` and
+`2.39938e-6`. MPO compression and all 32,768-term source-completeness checks
+also pass.
+
+A separate, explicitly noncanonical 2,048-term run calibrates the same TN
+propagator against the exact q15 statevector at matching support and 96 time
+steps. The learned-protocol TN/statevector differences are `9.15015e-5` in
+final energy and `1.49043e-5` in ground fidelity; no-CD and nested-l1 also pass
+the configured agreement tolerances. This validates the propagator and
+observable contractions. It does not certify the 32,768-term trajectory
+against a full-support exact-statevector oracle, so that canonical q15
+comparison remains explicitly diagnostic under the `q <= 15` validation rule.

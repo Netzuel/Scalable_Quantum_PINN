@@ -19,6 +19,10 @@ PHYSICAL_TABLE_METHODS: tuple[tuple[str, str], ...] = (
     ("learned_sparse_agp", "PINN sparse AGP"),
 )
 
+_TENSOR_NETWORK_BACKENDS = frozenset(
+    ("quimb_mps", "quimb_product_formula", "tenpy_tdvp_mpo")
+)
+
 
 def _physical_method_result(results: Mapping[str, object], method: str) -> Mapping[str, object]:
     candidates = ("kipu_dqfm_l1", "nested_l1") if method == "kipu_dqfm_l1" else (method,)
@@ -27,6 +31,136 @@ def _physical_method_result(results: Mapping[str, object], method: str) -> Mappi
         if isinstance(row, Mapping):
             return row
     return {}
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _learned_support_counts(payload: Mapping[str, object]) -> tuple[int | None, int | None]:
+    """Return the deployed and available learned-term counts for a validation row."""
+
+    candidates: list[Mapping[str, object]] = []
+    certification_resolution = payload.get("certification_resolution", {})
+    if isinstance(certification_resolution, Mapping):
+        identity = certification_resolution.get("validation_identity", {})
+        if isinstance(identity, Mapping):
+            candidates.append(identity)
+    resolution_results = payload.get("resolution_results", [])
+    if isinstance(resolution_results, Sequence) and resolution_results:
+        final_resolution = resolution_results[-1]
+        if isinstance(final_resolution, Mapping):
+            settings = final_resolution.get("settings", {})
+            if isinstance(settings, Mapping):
+                candidates.append(settings)
+            candidates.append(final_resolution)
+    validation_identity = payload.get("validation_identity", {})
+    if isinstance(validation_identity, Mapping):
+        candidates.append(validation_identity)
+    truncation = payload.get("learned_agp_truncation", {})
+    if isinstance(truncation, Mapping):
+        candidates.append(
+            {
+                "learned_terms": truncation.get("selected_terms"),
+                "full_learned_terms": truncation.get("available_terms"),
+            }
+        )
+
+    for candidate in candidates:
+        selected = _positive_int(candidate.get("learned_terms"))
+        available = _positive_int(candidate.get("full_learned_terms"))
+        if selected is not None and available is not None:
+            return selected, available
+    return None, _positive_int(payload.get("full_learned_terms"))
+
+
+def _learned_support_status(payload: Mapping[str, object]) -> str:
+    selected, available = _learned_support_counts(payload)
+    if selected is None or available is None:
+        return "unknown"
+    return "full" if selected == available else "truncated"
+
+
+def _complete_tn_protocol_rows(payload: Mapping[str, object]) -> bool:
+    results = payload.get("results", {})
+    if not isinstance(results, Mapping):
+        return False
+    for method, _label in PHYSICAL_TABLE_METHODS:
+        row = _physical_method_result(results, method)
+        diagnostics = row.get("mps_diagnostics", {})
+        if not isinstance(diagnostics, Mapping) or diagnostics.get("status") != "ok":
+            return False
+        completed = _positive_int(diagnostics.get("completed_steps"))
+        planned = _positive_int(diagnostics.get("steps"))
+        if completed is None or planned is None or completed < planned:
+            return False
+    return True
+
+
+def _converged_full_support_tn(payload: Mapping[str, object]) -> bool:
+    if str(payload.get("backend", "")) not in _TENSOR_NETWORK_BACKENDS:
+        return False
+    if payload.get("execution_mode") == "preflight_only":
+        return False
+    convergence = payload.get("convergence", {})
+    compression = payload.get("compression", {})
+    return (
+        _learned_support_status(payload) == "full"
+        and isinstance(convergence, Mapping)
+        and convergence.get("status") == "pass"
+        and isinstance(compression, Mapping)
+        and compression.get("status") == "pass"
+        and _complete_tn_protocol_rows(payload)
+    )
+
+
+def _certified_hcd_results(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """Expose only complete canonical or explicitly qualified TN rows in HCD plots."""
+
+    results = payload.get("results", {})
+    results = results if isinstance(results, Mapping) else {}
+    if payload.get("execution_mode") == "preflight_only":
+        return {}
+    if str(payload.get("backend", "")) not in _TENSOR_NETWORK_BACKENDS:
+        return results
+    certification = payload.get("certification", {})
+    certification = certification if isinstance(certification, Mapping) else {}
+    certified_full_support = (
+        certification.get("status") == "pass"
+        and _learned_support_status(payload) == "full"
+    )
+    if not certified_full_support and not _converged_full_support_tn(payload):
+        return {}
+    return results
+
+
+def _summary_claim_priority(payload: Mapping[str, object]) -> int:
+    """Rank saved summaries by physical claim strength, not filename alone."""
+
+    if payload.get("execution_mode") == "preflight_only":
+        return 0
+    certification = payload.get("certification", {})
+    certification = certification if isinstance(certification, Mapping) else {}
+    support_status = _learned_support_status(payload)
+    if certification.get("status") == "pass":
+        if support_status == "full":
+            return 6
+        if support_status == "unknown":
+            return 4
+    if _converged_full_support_tn(payload):
+        return 5
+    if str(payload.get("backend", "")) not in _TENSOR_NETWORK_BACKENDS:
+        if support_status == "full":
+            return 5
+        if support_status == "unknown":
+            return 3
+    if payload.get("execution_mode") == "validation_status":
+        return 1
+    return 2
 
 
 def _finite_float(value: object) -> float | None:
@@ -96,7 +230,7 @@ def find_physical_summary_for_images_dir(images_dir: Path) -> Path | None:
             break
     if not candidates:
         return None
-    existing: list[tuple[int, float, Path]] = []
+    existing: list[tuple[int, int, float, Path]] = []
     for candidate in candidates:
         try:
             summary_priority = {
@@ -104,12 +238,16 @@ def find_physical_summary_for_images_dir(images_dir: Path) -> Path | None:
                 "hydrogen_physical_validation_summary.json": 2,
                 "physical_validation_summary.json": 3,
             }.get(candidate.name, 0)
-            existing.append((summary_priority, candidate.stat().st_mtime, candidate))
+            payload = _load_mapping(candidate) or {}
+            claim_priority = _summary_claim_priority(payload)
+            existing.append(
+                (claim_priority, summary_priority, candidate.stat().st_mtime, candidate)
+            )
         except OSError:
             continue
     if not existing:
         return None
-    return max(existing, key=lambda item: (item[0], item[1]))[2]
+    return max(existing, key=lambda item: (item[0], item[1], item[2]))[3]
 
 
 def _load_mapping(path: Path) -> dict[str, object] | None:
@@ -439,9 +577,7 @@ def physical_footer_lines_from_summary(summary_path: Path) -> list[str]:
 
 
 def physical_footer_lines(payload: Mapping[str, object]) -> list[str]:
-    results = payload.get("results", {})
-    if not isinstance(results, Mapping):
-        return []
+    results = _certified_hcd_results(payload)
 
     ground_energy = _format_number(payload.get("ground_energy"))
     if ground_energy is None:
@@ -497,10 +633,43 @@ def _hamiltonian_context_lines(system: str | None, n_qubits: int | None) -> list
             ),
             r"$H_{\mathrm{final}}=\sum_{P\in\mathcal{S}_{H_2}}c_P P$",
         ]
+    if system == "TransverseFieldSpinHUBO":
+        upper = str(q) if q is not None else "q"
+        return [
+            rf"$H_{{\mathrm{{initial}}}}=-\sum_{{i=1}}^{{{upper}}}X_i$",
+            r"$H_{\mathrm{final}}=\sum_{S\in\mathcal{S}_{\mathrm{HUBO}}}c_S"
+            r"\prod_{i\in S}Z_i$",
+        ]
     return [
         r"$H_{\mathrm{initial}}=\sum_P c_P^{(0)}P$",
         r"$H_{\mathrm{final}}=\sum_P c_P^{(1)}P$",
     ]
+
+
+def _tn_hcd_validation_line(payload: Mapping[str, object]) -> str | None:
+    if str(payload.get("backend", "")) not in _TENSOR_NETWORK_BACKENDS:
+        return None
+    if payload.get("execution_mode") == "preflight_only":
+        return "TN validation: preflight only; final-time metrics not certified."
+
+    selected, available = _learned_support_counts(payload)
+    support = available if selected == available else None
+    support_text = f"full K={support}" if support is not None else "support not certified"
+    certification = payload.get("certification", {})
+    certification = certification if isinstance(certification, Mapping) else {}
+    if certification.get("status") == "pass" and support is not None:
+        return f"TN validation: {support_text}; timestep/bond/MPO gates pass; certified."
+    if certification.get("status") == "pass":
+        return "TN validation: support not certified; reduced/unknown-support metrics omitted."
+    if _converged_full_support_tn(payload):
+        statevector = payload.get("statevector_agreement", {})
+        statevector = statevector if isinstance(statevector, Mapping) else {}
+        if statevector.get("status") != "pass":
+            return (
+                f"TN validation: {support_text}; timestep/bond/MPO gates pass; "
+                "exact full-support check not tested."
+            )
+    return f"TN validation: {support_text}; final-time metrics not certified."
 
 
 def hcd_context_lines_for_images_dir(images_dir: Path) -> list[str]:
@@ -521,8 +690,7 @@ def hcd_context_lines_for_images_dir(images_dir: Path) -> list[str]:
 
     payload = physical_comparison_payload_for_images_dir(images_dir)
     ground_energy = _format_number(payload.get("ground_energy"))
-    results = payload.get("results", {})
-    results = results if isinstance(results, Mapping) else {}
+    results = _certified_hcd_results(payload)
     ground_line = (
         rf"$E_0(H_{{\mathrm{{final}}}})={ground_energy}$"
         if ground_energy is not None
@@ -533,9 +701,11 @@ def hcd_context_lines_for_images_dir(images_dir: Path) -> list[str]:
         row = _physical_method_result(results, key)
         energy = _format_number(row.get("final_energy"))
         fidelity = _format_number(row.get("ground_state_fidelity"))
-        energy_text = energy if energy is not None else "not computed"
-        fidelity_text = fidelity if fidelity is not None else "not computed"
-        return rf"{label}: $E(T)={energy_text}$, $F_0(T)={fidelity_text}$"
+        energy_text = rf"$E(T)={energy}$" if energy is not None else r"$E(T)$=not computed"
+        fidelity_text = (
+            rf"$F_0(T)={fidelity}$" if fidelity is not None else r"$F_0(T)$=not computed"
+        )
+        return f"{label}: {energy_text}, {fidelity_text}"
 
     baseline_line = " | ".join(
         (
@@ -545,12 +715,16 @@ def hcd_context_lines_for_images_dir(images_dir: Path) -> list[str]:
     )
     pinn_line = method_text("learned_sparse_agp", "PINN AGP")
 
-    return [
+    lines = [
         *_hamiltonian_context_lines(system, n_qubits),
         ground_line,
         baseline_line,
         pinn_line,
     ]
+    tn_validation_line = _tn_hcd_validation_line(payload)
+    if tn_validation_line is not None:
+        lines.append(tn_validation_line)
+    return lines
 
 
 def _run_metadata_for_images_dir(images_dir: Path) -> tuple[str | None, int | None]:

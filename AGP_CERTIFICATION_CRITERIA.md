@@ -440,6 +440,15 @@ state norm and peak bond,
 and final observable differences across the numerical ladder.
 ```
 
+For a compressed full-support MPO, also require source/hash completeness, a
+finite coefficient-space error bound, and a full-source action-error upper
+bound. A numerically unresolved cancellation is acceptable only when its
+conservative finite upper bound lies below the declared action tolerance.
+
+Timestep and state-bond convergence must use separate, explicitly named pairs:
+the timestep pair fixes all MPS/MPO settings, while the state pair fixes the
+timestep and MPO settings. Confounded pairs are `not comparable`.
+
 The canonical MPS validation must use every term in the retained learned AGP
 checkpoint. A top-term or pruned deployment is an ablation and cannot satisfy
 this physical-validation gate on behalf of the full trained model. If the full

@@ -132,6 +132,48 @@ class AGPPhysicalValidationTests(unittest.TestCase):
             self.assertIn("not computed", q20_lines[3])
             self.assertIn("not computed", q20_lines[4])
 
+            q24_study = root / "q24" / "sweep_test"
+            q24_images = q24_study / "runs" / "retained" / "Images"
+            q24_data = q24_images.parent / "Models_Data"
+            q24_images.mkdir(parents=True)
+            q24_data.mkdir(parents=True)
+            (q24_study / "config.json").write_text(
+                json.dumps(
+                    {
+                        "physical": {
+                            "parameters": {
+                                "system": "TransverseFieldSpinHUBO",
+                                "num_qubits": 24,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (q24_data / "mps_physical_validation_summary.json").write_text(
+                json.dumps(
+                    {
+                        "execution_mode": "preflight_only",
+                        "ground_energy": -28.1,
+                        "certification": {"status": "not_tested"},
+                        "results": {
+                            "learned_sparse_agp": {
+                                "final_energy": -2.6,
+                                "ground_state_fidelity": 1.0e-8,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            q24_lines = hcd_context_lines_for_images_dir(q24_images)
+
+            self.assertIn(r"H_{\mathrm{initial}}=-\sum", q24_lines[0])
+            self.assertIn(r"\prod_{i\in S}Z_i", q24_lines[1])
+            self.assertIn("not computed", q24_lines[4])
+            self.assertNotIn("-2.6", q24_lines[4])
+
     def test_plot_payload_uses_tracked_scalable_pinn_energy_fallback(self):
         with TemporaryDirectory() as tmp:
             study_dir = Path(tmp) / "q20" / "sweep_test"
@@ -209,6 +251,175 @@ class AGPPhysicalValidationTests(unittest.TestCase):
             payload = physical_comparison_payload_for_images_dir(images_dir)
 
             self.assertEqual(payload["results"]["learned_sparse_agp"]["final_energy"], -188.15)
+
+    def test_certified_canonical_summary_outranks_newer_preflight(self):
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            images_dir = run_dir / "Images"
+            canonical = (
+                run_dir / "mpo_validation" / "Models_Data" / "mps_physical_validation_summary.json"
+            )
+            preflight = (
+                run_dir
+                / "mpo_validation"
+                / "preflight"
+                / "Models_Data"
+                / "mps_physical_validation_summary.json"
+            )
+            images_dir.mkdir(parents=True)
+            canonical.parent.mkdir(parents=True)
+            preflight.parent.mkdir(parents=True)
+            canonical.write_text(
+                json.dumps(
+                    {
+                        "execution_mode": "validation",
+                        "certification": {"status": "pass"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            preflight.write_text(
+                json.dumps(
+                    {
+                        "execution_mode": "preflight_only",
+                        "certification": {"status": "not_tested"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.utime(preflight, (canonical.stat().st_mtime + 10, canonical.stat().st_mtime + 10))
+
+            selected = find_physical_summary_for_images_dir(images_dir)
+
+            self.assertEqual(selected, canonical)
+
+    def test_converged_full_support_tn_outranks_truncated_statevector_for_hcd(self):
+        with TemporaryDirectory() as tmp:
+            study_dir = Path(tmp) / "q15" / "sweep_test"
+            run_dir = study_dir / "runs" / "retained"
+            images_dir = run_dir / "Images"
+            statevector = run_dir / "Models_Data" / "physical_validation_summary.json"
+            tensor_network = (
+                run_dir
+                / "mpo_validation"
+                / "Models_Data"
+                / "mps_physical_validation_summary.json"
+            )
+            legacy_reduced_mps = (
+                run_dir
+                / "mps_validation"
+                / "Models_Data"
+                / "mps_physical_validation_summary.json"
+            )
+            images_dir.mkdir(parents=True)
+            statevector.parent.mkdir(parents=True)
+            tensor_network.parent.mkdir(parents=True)
+            legacy_reduced_mps.parent.mkdir(parents=True)
+            (study_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "physical": {
+                            "parameters": {
+                                "system": "TransverseIsingDriverProblem",
+                                "num_qubits": 15,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            statevector.write_text(
+                json.dumps(
+                    {
+                        "ground_energy": -19.25,
+                        "validation_identity": {
+                            "learned_terms": 2048,
+                            "full_learned_terms": 32768,
+                        },
+                        "results": {
+                            "learned_sparse_agp": {
+                                "final_energy": -19.06,
+                                "ground_state_fidelity": 0.96,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            complete = {
+                "mps_diagnostics": {
+                    "status": "ok",
+                    "steps": 48,
+                    "completed_steps": 48,
+                }
+            }
+            tensor_network.write_text(
+                json.dumps(
+                    {
+                        "backend": "tenpy_tdvp_mpo",
+                        "execution_mode": "validation",
+                        "ground_energy": -19.25,
+                        "full_learned_terms": 32768,
+                        "convergence": {"status": "pass"},
+                        "compression": {"status": "pass"},
+                        "certification": {"status": "not_tested"},
+                        "resolution_results": [
+                            {
+                                "ablation": False,
+                                "full_learned_terms": 32768,
+                                "settings": {
+                                    "learned_terms": 32768,
+                                    "full_learned_terms": 32768,
+                                },
+                            }
+                        ],
+                        "results": {
+                            "no_cd": {
+                                **complete,
+                                "final_energy": -2.39,
+                                "ground_state_fidelity": 2.87e-4,
+                            },
+                            "kipu_dqfm_l1": {
+                                **complete,
+                                "final_energy": -9.09,
+                                "ground_state_fidelity": 0.0259,
+                            },
+                            "learned_sparse_agp": {
+                                **complete,
+                                "final_energy": -19.11,
+                                "ground_state_fidelity": 0.9647,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            legacy_reduced_mps.write_text(
+                json.dumps(
+                    {
+                        "backend": "quimb_mps",
+                        "certification": {"status": "pass"},
+                        "convergence": {"status": "not_tested"},
+                        "resolution_results": [
+                            {"settings": {"learned_terms": 1024}}
+                        ],
+                        "results": {
+                            "learned_sparse_agp": {
+                                "final_energy": -18.99,
+                                "ground_state_fidelity": 0.946,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            selected = find_physical_summary_for_images_dir(images_dir)
+            lines = hcd_context_lines_for_images_dir(images_dir)
+
+            self.assertEqual(selected, tensor_network)
+            self.assertTrue(any("-19.11" in line and "0.9647" in line for line in lines))
+            self.assertTrue(any("exact full-support check not tested" in line for line in lines))
 
     def test_plot_payload_discovers_hydrogen_physical_summary(self):
         with TemporaryDirectory() as tmp:

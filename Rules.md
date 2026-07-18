@@ -153,6 +153,10 @@ For `q <= 15`:
 For `q > 15`:
 
 - use an MPS, MPO, or other appropriate tensor-network representation;
+- route from measured operator rank, cut width, workspace, and state complexity,
+  not from `q`, term density, or coefficient count alone;
+- prefer the full-support joint time-Pauli MPO/TDVP path when it passes its
+  coefficient and action gates;
 - use the exact `H_final` ground reference if it is independently available;
 - otherwise use a separately converged approximate ground reference and label
   it accordingly;
@@ -204,6 +208,13 @@ The following restrictions apply:
   occupied-qubit support into one local Hamiltonian exponential, provided every
   learned coefficient is included, the grouping policy is recorded and fixed
   across the convergence ladder, and timestep convergence is demonstrated.
+- A joint time-Pauli tensor train may move the finite time axis along the Pauli
+  chain to reduce rank. Slicing must reconstruct every learned coefficient at
+  every requested midpoint; changing the time-axis position must change the
+  cache/implementation identity.
+- A failed multi-time window may be split into smaller contiguous windows, but
+  no split may reduce `K`. Every accepted window must independently pass source
+  completeness, coefficient-error, action-error, and workspace gates.
 - Reduced-support runs are allowed only as explicitly labelled pruning,
   sensitivity, cost, or support-size ablations.
 - A reduced-support ablation must never replace the full learned-support row in
@@ -262,10 +273,22 @@ For tensor-network evolution, report and test:
 - small-`q` agreement with exact statevector evolution using the same full
   learned support and protocol.
 
+The operator and state approximations are separate. A represented MPO must
+pass a declared coefficient-space bound and a full-source action bound before
+it is evolved. A cancellation-limited probe may pass when its finite,
+conservative action-error upper bound is below the configured threshold; an
+unbounded or nonfinite interval is `not tested`.
+
 At least two numerical resolutions are required for a tensor-network pass.
 The full learned support must remain fixed across the convergence ladder.
 Changing support size and numerical resolution simultaneously does not isolate
 either source of error.
+
+Timestep and MPS convergence must be assessed on independent pairs. The
+timestep pair keeps MPS and MPO settings fixed; the state pair keeps timestep
+and MPO settings fixed while increasing bond capacity and/or tightening the
+cutoff. A pair that changes both axes is `not comparable`, even if its final
+metrics happen to agree.
 
 Tensor-network geometry must be justified. MPS is not automatically reliable
 for highly nonlocal interactions or volume-law entanglement. A low peak bond is

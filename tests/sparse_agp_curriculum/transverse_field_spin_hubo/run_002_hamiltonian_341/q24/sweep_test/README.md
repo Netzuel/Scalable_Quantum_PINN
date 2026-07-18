@@ -53,13 +53,19 @@ conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.p
   --config tests/sparse_agp_curriculum/transverse_field_spin_hubo/run_002_hamiltonian_341/q24/sweep_test/config.json
 
 conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_mps_validation.py \
+  --config tests/sparse_agp_curriculum/transverse_field_spin_hubo/run_002_hamiltonian_341/q24/sweep_test/config.json \
+  --preflight-only
+
+conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_mps_validation.py \
   --config tests/sparse_agp_curriculum/transverse_field_spin_hubo/run_002_hamiltonian_341/q24/sweep_test/config.json
 ```
 
 For q=24, canonical dynamical validation requires the exact diagonal ground
-reference and a two-resolution quimb MPS ladder. Every one of the 32,768
+reference and independent TeNPy TDVP timestep/state ladders. Every one of the 32,768
 learned AGP terms must be deployed in the PINN row. A reduced-term deployment
-is an ablation and cannot satisfy the physical-validation gate.
+is an ablation and cannot satisfy the physical-validation gate. The isolated
+one-step preflight establishes operator accuracy before the named `8 -> 12`
+timestep pair and bond `16 -> 32` state pair are considered.
 
 ## Current Status
 
@@ -81,30 +87,51 @@ Fixed probes, K/Q plateaus, cross-seed stability, pruning, and proposal
 exhaustion were not tested. The claim level is therefore **projected sparse AGP
 experiment**, not a certified sparse AGP.
 
-## Full-Support MPS Cost Diagnostic
+## Full-Support TDVP Preflight
 
-The full learned support contains 15,025 occupied-support groups; 11,025 are
-single-Pauli groups. One symmetric time step at bond 8 still requires 30,058
-group applications and took 2,502.7 seconds on the reference machine. The
-configured 24/48-step, bond-32/64 ladder was therefore not completed.
+The TDVP backend feeds exact Pauli-coordinate provenance into a positioned,
+workspace-bounded time-Pauli TT-SVD while retaining all 32,768 learned terms.
+The spectral qubit order is used and the finite time axis is inserted at chain
+position 12. A measured window ladder established that MPO bond 1024 cannot
+share multiple q24 midpoint operators under the configured error tolerance:
 
-The following equal-resolution numbers use one time step, bond 8, cutoff
-`1e-6`, and all 32,768 learned terms. They are a computational diagnostic only:
+```text
+window samples   coefficient bound   workspace      result
+8                2.6288e-1           14.68 GB       fail
+2                1.6245e-2            4.37 GB       fail
+1                3.2261e-7            2.61 GB       pass
+```
+
+The accepted one-slice preflight also passes the exact sparse full-source
+action gate:
+
+```text
+learned terms accounted                = 32768 / 32768
+full-support SHA-256                    = c1eda30e...09136f4
+MPO action-error upper bound            = 0.00448206
+configured action-error maximum         = 0.01
+operator build time                     = 496.14 s
+norm drift                              = 3.55e-15
+```
+
+The following one-step values remain a computational diagnostic only:
 
 | Method | Final energy | Energy error | Ground fidelity |
 | --- | ---: | ---: | ---: |
-| No CD | -4.879474 | 23.221991 | 2.421700e-6 |
-| Nested commutator l=1 | -6.508609 | 21.592857 | 1.294986e-5 |
-| Learned sparse AGP | -3.856186 | 24.245280 | 1.235953e-11 |
+| No CD | -4.437531 | 23.663935 | 2.117314e-6 |
+| Nested commutator l=1 | -6.729172 | 21.372293 | 9.195138e-6 |
+| Learned sparse AGP | -1.425268 | 26.676197 | 1.053858e-6 |
 
-These values do not establish that l=1 outperforms the learned AGP, because
-time-step, bond-dimension, and cutoff convergence were not demonstrated. The
-physical-validation certification gate is `not tested`.
+These values do not compare physical performance because one midpoint is
+intentionally too coarse. Unlike the superseded temporal-mode block-sum result,
+the represented operator is controlled; physical promotion now depends on the
+independent multi-resolution dynamics gates.
 
 Generated checkpoints and diagnostics remain in the ignored local `runs/`
-tree. The consolidated diagnostic is under the adaptive checkpoint at
-`mps_validation_diagnostic/`, including
-`Images/physical_method_comparison_table.pdf` and the corresponding JSON.
+tree. The diagnostic is isolated under the adaptive checkpoint at
+`mpo_validation/preflight/`. The canonical `mpo_validation/` status contains
+the exact ground reference, suppresses diagnostic method values, and records
+physical validation as `not tested` until that ladder completes.
 
 ## Certification Summary
 
@@ -118,6 +145,6 @@ K/Q plateau gates             = not tested
 support stability gates       = not tested
 proposal exhaustion           = fail (swaps active in round 20)
 prune-and-retest               = not tested
-physical MPS validation       = not tested (no convergence ladder)
+physical TDVP validation      = not tested (independent dynamics ladder pending)
 claim level                   = projected sparse AGP experiment
 ```

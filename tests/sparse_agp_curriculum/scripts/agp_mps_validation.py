@@ -57,6 +57,7 @@ _PAULI = {
 }
 _CANONICAL_MPO_PROTOCOLS = ("no_cd", "nested_l1", "learned_sparse_agp")
 _MPO_PROTOCOL_ALIASES = {"kipu_dqfm_l1": "nested_l1", "nested_l1": "nested_l1"}
+_MPO_OPERATOR_IMPLEMENTATION_VERSION = "positioned-adaptive-joint-time-pauli-tt-v5"
 _ELIGIBLE_MPO_IDENTITY_KEYS = (
     "backend",
     "integrator",
@@ -96,9 +97,32 @@ def resolve_validation_backend(validation: Mapping[str, object]) -> dict[str, ob
     integrator = str(raw.get("integrator", "tdvp"))
     if integrator not in {"tdvp", "expm_mpo"}:
         raise ValueError("mpo_backend.integrator must be 'tdvp' or 'expm_mpo'.")
+    representation = str(raw.get("representation", "temporal_mode_block_sum"))
+    if representation not in {
+        "temporal_mode_block_sum",
+        "direct_time_full_support",
+        "joint_time_full_support",
+    }:
+        raise ValueError(
+            "mpo_backend.representation must be 'temporal_mode_block_sum', "
+            "'direct_time_full_support', or 'joint_time_full_support'."
+        )
+    raw_window_size = raw.get("time_window_size")
+    if raw_window_size is not None and (
+        isinstance(raw_window_size, bool) or int(raw_window_size) < 1
+    ):
+        raise ValueError("mpo_backend.time_window_size must be a positive integer or null.")
+    raw_time_axis_position = raw.get("time_axis_position", 0)
+    if (
+        isinstance(raw_time_axis_position, bool)
+        or not isinstance(raw_time_axis_position, (int, np.integer))
+        or int(raw_time_axis_position) < 0
+    ):
+        raise ValueError("mpo_backend.time_axis_position must be a nonnegative integer.")
     return {
         "name": name,
         "integrator": integrator,
+        "representation": representation,
         "qubit_order_candidates": tuple(str(item) for item in candidates),
         "temporal_grid_points": int(raw.get("temporal_grid_points", 257)),
         "temporal_retained_norm": float(raw.get("temporal_retained_norm", 0.9999)),
@@ -107,7 +131,13 @@ def resolve_validation_backend(validation: Mapping[str, object]) -> dict[str, ob
         "action_probe_random_mps": int(raw.get("action_probe_random_mps", 2)),
         "action_probe_exact_work_cap": int(raw.get("action_probe_exact_work_cap", 10_000_000)),
         "action_probe_dynamic_samples": int(raw.get("action_probe_dynamic_samples", 3)),
+        "coefficient_error_max": float(raw.get("coefficient_error_max", 1.0e-3)),
         "action_error_max": float(raw.get("action_error_max", 1.0e-3)),
+        "time_window_size": (
+            None if raw_window_size is None else int(raw_window_size)
+        ),
+        "adaptive_time_windows": bool(raw.get("adaptive_time_windows", True)),
+        "time_axis_position": int(raw_time_axis_position),
         "resource_caps": dict(resource_caps),
         "mpo_workspace_cap_bytes": int(
             raw.get(
@@ -131,6 +161,14 @@ def require_full_learned_support(*, selected_terms: int, available_terms: int, a
         "tenpy_tdvp_mpo certifiable learned validation requires full learned support; "
         "mark reduced support as ablation explicitly."
     )
+
+
+def resolve_case_ablation(
+    *, cli_ablation: bool, case_ablation: object, backend_ablation: object
+) -> bool:
+    """Make a command-line reduced-support calibration explicitly noncanonical."""
+
+    return bool(cli_ablation or case_ablation or backend_ablation)
 
 
 def _checkpoint_identity(path: Path) -> dict[str, object]:
@@ -732,6 +770,21 @@ def _canonical_mpo_results(results: Mapping[str, object]) -> dict[str, Mapping[s
     return canonical
 
 
+def statevector_comparison_results(
+    *,
+    gate_resolution: Mapping[str, object] | None,
+    final_results: Mapping[str, object],
+) -> dict[str, Mapping[str, object]]:
+    """Select a canonical gate row or an explicitly noncanonical calibration row."""
+
+    source = (
+        gate_resolution.get("results", {})
+        if gate_resolution is not None
+        else final_results
+    )
+    return _canonical_mpo_results(source if isinstance(source, Mapping) else {})
+
+
 def _eligible_mpo_resolution_identity(case: Mapping[str, object]) -> tuple[object, ...] | None:
     """Return the shared physical identity for a completed canonical MPO resolution."""
 
@@ -756,7 +809,18 @@ def _eligible_mpo_resolution_identity(case: Mapping[str, object]) -> tuple[objec
         for row in canonical.values()
     ):
         return None
-    return tuple(_canonical_cache_value(settings[key]) for key in _ELIGIBLE_MPO_IDENTITY_KEYS)
+    return (
+        *(
+            _canonical_cache_value(settings[key])
+            for key in _ELIGIBLE_MPO_IDENTITY_KEYS
+        ),
+        _canonical_cache_value(
+            settings.get("operator_representation", "temporal_mode_block_sum")
+        ),
+        _canonical_cache_value(
+            settings.get("operator_implementation_version", "legacy")
+        ),
+    )
 
 
 def eligible_mpo_resolution_ladder(
@@ -829,7 +893,10 @@ def run_mpo_case(
     """Run the full-support TeNPy MPO backend and retain its diagnostics verbatim."""
 
     from scripts.agp_mpo_backend import (
+        build_full_support_identity,
+        evolve_protocol_direct_tdvp,
         evolve_protocol_expm_mpo,
+        evolve_protocol_time_tensor_tdvp,
         evolve_protocol_tdvp,
         select_qubit_order,
     )
@@ -841,16 +908,28 @@ def run_mpo_case(
         try:
             factorization = None
             labels: tuple[str, ...] = ()
+            direct_coefficients: np.ndarray | None = None
+            direct_identity = None
             if protocol == "learned_sparse_agp":
                 if learned is None:
                     raise ValueError("learned payload is required for learned_sparse_agp.")
-                factorization = _learned_mpo_factorization(
-                    learned,
-                    learned_scale=learned_scale,
-                    retained_norm=float(settings["temporal_retained_norm"]),
-                    temporal_grid_points=int(settings["temporal_grid_points"]),
-                )
                 labels = tuple(str(label) for label in learned["labels"])
+                direct_coefficients = float(learned_scale) * np.asarray(
+                    learned["coefficients"], dtype=np.float64
+                )
+                direct_identity = build_full_support_identity(labels, direct_coefficients)
+                if str(
+                    settings.get(
+                        "operator_representation",
+                        backend.get("representation", "temporal_mode_block_sum"),
+                    )
+                ) == "temporal_mode_block_sum":
+                    factorization = _learned_mpo_factorization(
+                        learned,
+                        learned_scale=learned_scale,
+                        retained_norm=float(settings["temporal_retained_norm"]),
+                        temporal_grid_points=int(settings["temporal_grid_points"]),
+                    )
             support_terms = [*h0_terms, *h1_terms]
             if learned is not None:
                 rms = np.sqrt(np.mean(np.asarray(learned["coefficients"], dtype=np.float64) ** 2, axis=0))
@@ -859,6 +938,26 @@ def run_mpo_case(
                 support_terms,
                 n_qubits=h0.n_qubits,
                 candidates=tuple(backend["qubit_order_candidates"]),
+            )
+            direct_learned = (
+                protocol == "learned_sparse_agp"
+                and str(
+                    settings.get(
+                        "operator_representation",
+                        backend.get("representation", "temporal_mode_block_sum"),
+                    )
+                )
+                == "direct_time_full_support"
+            )
+            joint_learned = (
+                protocol == "learned_sparse_agp"
+                and str(
+                    settings.get(
+                        "operator_representation",
+                        backend.get("representation", "temporal_mode_block_sum"),
+                    )
+                )
+                == "joint_time_full_support"
             )
             engine = evolve_protocol_tdvp if str(settings["integrator"]) == "tdvp" else evolve_protocol_expm_mpo
             mapped_protocol = {
@@ -870,31 +969,101 @@ def run_mpo_case(
             if mapped_protocol is None:
                 raise ValueError(f"Unsupported protocol: {protocol!r}.")
             start = time.perf_counter()
-            state, diagnostics = engine(
-                h0_terms=h0_terms,
-                h1_terms=h1_terms,
-                cd_factorization=factorization,
-                cd_labels=labels,
-                protocol=mapped_protocol,
-                schedule=_mpo_schedule(learned if protocol == "learned_sparse_agp" else None),
-                total_time=total_time,
-                steps=int(settings["steps"]),
-                order=order.order,
-                ground_bitstring=ground_bitstring,
-                mps_max_bond=int(settings["mps_max_bond"]),
-                mps_cutoff=float(settings["mps_cutoff"]),
-                mpo_max_bond=int(settings["mpo_max_bond"]),
-                mpo_cutoff=float(settings["mpo_cutoff"]),
-                lanczos_max=int(settings["lanczos_max"]),
-                mpo_workspace_cap_bytes=int(settings["mpo_workspace_cap_bytes"]),
-                action_probe_product_states=int(settings.get("action_probe_product_states", 0)),
-                action_probe_random_mps=int(settings.get("action_probe_random_mps", 0)),
-                action_probe_seed=int(settings.get("action_probe_seed", 0)),
-                action_probe_exact_work_cap=int(settings.get("action_probe_exact_work_cap", 10_000_000)),
-                action_probe_dynamic_samples=int(
-                    settings.get("action_probe_dynamic_samples", 1 if int(settings.get("action_probe_product_states", 0)) or int(settings.get("action_probe_random_mps", 0)) else 0)
+            common_evolution = {
+                "h0_terms": h0_terms,
+                "h1_terms": h1_terms,
+                "schedule": _mpo_schedule(
+                    learned if protocol == "learned_sparse_agp" else None
                 ),
-            )
+                "total_time": total_time,
+                "steps": int(settings["steps"]),
+                "order": order.order,
+                "ground_bitstring": ground_bitstring,
+                "mps_max_bond": int(settings["mps_max_bond"]),
+                "mps_cutoff": float(settings["mps_cutoff"]),
+                "mpo_max_bond": int(settings["mpo_max_bond"]),
+                "mpo_cutoff": float(settings["mpo_cutoff"]),
+                "lanczos_max": int(settings["lanczos_max"]),
+                "mpo_workspace_cap_bytes": int(settings["mpo_workspace_cap_bytes"]),
+                "action_probe_product_states": int(
+                    settings.get("action_probe_product_states", 0)
+                ),
+                "action_probe_seed": int(settings.get("action_probe_seed", 0)),
+                "action_probe_exact_work_cap": int(
+                    settings.get("action_probe_exact_work_cap", 10_000_000)
+                ),
+            }
+            if direct_learned:
+                if str(settings["integrator"]) != "tdvp":
+                    raise ValueError(
+                        "direct_time_full_support currently requires the TDVP integrator."
+                    )
+                assert learned is not None and direct_coefficients is not None
+                assert direct_identity is not None
+                state, diagnostics = evolve_protocol_direct_tdvp(
+                    **common_evolution,
+                    learned_tau=np.asarray(learned["tau"], dtype=np.float64),
+                    learned_direct_cd_coefficients=direct_coefficients,
+                    learned_labels=labels,
+                    full_support_identity=direct_identity,
+                    action_error_max=float(backend["action_error_max"]),
+                )
+            elif joint_learned:
+                if str(settings["integrator"]) != "tdvp":
+                    raise ValueError(
+                        "joint_time_full_support currently requires the TDVP integrator."
+                    )
+                assert learned is not None and direct_coefficients is not None
+                assert direct_identity is not None
+
+                def report_joint_progress(event: Mapping[str, object]) -> None:
+                    print(
+                        "mps_progress="
+                        + json.dumps(
+                            {"protocol": protocol, **dict(event)},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        flush=True,
+                    )
+
+                state, diagnostics = evolve_protocol_time_tensor_tdvp(
+                    **common_evolution,
+                    learned_tau=np.asarray(learned["tau"], dtype=np.float64),
+                    learned_direct_cd_coefficients=direct_coefficients,
+                    learned_labels=labels,
+                    full_support_identity=direct_identity,
+                    coefficient_error_max=float(backend["coefficient_error_max"]),
+                    action_error_max=float(backend["action_error_max"]),
+                    action_probe_time_samples=int(
+                        settings.get("action_probe_dynamic_samples", 3)
+                    ),
+                    time_window_size=settings.get("time_window_size"),
+                    adaptive_time_windows=bool(
+                        settings.get("adaptive_time_windows", True)
+                    ),
+                    time_axis_position=int(settings.get("time_axis_position", 0)),
+                    progress_callback=report_joint_progress,
+                )
+            else:
+                state, diagnostics = engine(
+                    **common_evolution,
+                    cd_factorization=factorization,
+                    cd_labels=labels,
+                    protocol=mapped_protocol,
+                    action_probe_random_mps=int(
+                        settings.get("action_probe_random_mps", 0)
+                    ),
+                    action_probe_dynamic_samples=int(
+                        settings.get(
+                            "action_probe_dynamic_samples",
+                            1
+                            if int(settings.get("action_probe_product_states", 0))
+                            or int(settings.get("action_probe_random_mps", 0))
+                            else 0,
+                        )
+                    ),
+                )
             diagnostics["runtime_seconds"] = time.perf_counter() - start
             max_build_seconds = settings.get("max_build_seconds")
             if max_build_seconds is not None and diagnostics["runtime_seconds"] > float(max_build_seconds):
@@ -902,21 +1071,68 @@ def run_mpo_case(
                 diagnostics["resource_reason"] = "runtime exceeded configured max_build_seconds"
             diagnostics["qubit_order_candidate"] = order.candidate
             diagnostics["qubit_order"] = list(order.order)
-            diagnostics["temporal_retained_norm"] = (
-                None if factorization is None else float(factorization.retained_norm_fraction)
-            )
-            diagnostics["temporal_reconstruction_error"] = (
-                None if factorization is None else float(factorization.max_abs_error)
-            )
-            static_max_bond, static_discarded_weight = _static_mpo_compression_summary(
-                diagnostics.get("static_mpo_compression")
-            )
-            diagnostics["static_mpo_max_bond"] = static_max_bond
-            diagnostics["static_mpo_discarded_weight"] = static_discarded_weight
+            if direct_learned or joint_learned:
+                diagnostics["temporal_retained_norm"] = None
+                diagnostics["temporal_reconstruction_error"] = (
+                    diagnostics.get("operator_certificate", {}).get(
+                        "max_relative_coefficient_error_upper_bound"
+                    )
+                    if joint_learned
+                    else 0.0
+                )
+                diagnostics["static_mpo_max_bond"] = None
+                diagnostics["static_mpo_discarded_weight"] = None
+                if joint_learned:
+                    operator_certificate = diagnostics.get("operator_certificate", {})
+                    operator_certificate = (
+                        operator_certificate
+                        if isinstance(operator_certificate, Mapping)
+                        else {}
+                    )
+                    diagnostics["mpo_action_error"] = operator_certificate.get(
+                        "max_relative_action_error_upper_bound"
+                    )
+                    diagnostics["mpo_action_status"] = operator_certificate.get(
+                        "action_status", "not_tested"
+                    )
+                else:
+                    errors = [
+                        float(row["max_relative_action_error_upper_bound"])
+                        for row in diagnostics.get("operator_certificates", [])
+                        if row.get("max_relative_action_error_upper_bound") is not None
+                    ]
+                    diagnostics["mpo_action_error"] = max(errors) if errors else None
+                    diagnostics["mpo_action_status"] = diagnostics.get(
+                        "operator_gate_status", "not_tested"
+                    )
+                diagnostics["mpo_action_diagnostics"] = {
+                    "status": diagnostics["mpo_action_status"],
+                    "max_relative_action_error_upper_bound": diagnostics["mpo_action_error"],
+                }
+            else:
+                diagnostics["temporal_retained_norm"] = (
+                    None
+                    if factorization is None
+                    else float(factorization.retained_norm_fraction)
+                )
+                diagnostics["temporal_reconstruction_error"] = (
+                    None if factorization is None else float(factorization.max_abs_error)
+                )
+                static_max_bond, static_discarded_weight = _static_mpo_compression_summary(
+                    diagnostics.get("static_mpo_compression")
+                )
+                diagnostics["static_mpo_max_bond"] = static_max_bond
+                diagnostics["static_mpo_discarded_weight"] = static_discarded_weight
+                diagnostics["mpo_action_diagnostics"] = _aggregate_mpo_action_probes(
+                    diagnostics
+                )
+                diagnostics["mpo_action_error"] = diagnostics[
+                    "mpo_action_diagnostics"
+                ]["max_relative_action_error_upper_bound"]
+                diagnostics["mpo_action_status"] = diagnostics[
+                    "mpo_action_diagnostics"
+                ]["status"]
             diagnostics["dynamic_mpo_max_bond"] = diagnostics.get("dynamic_mpo_peak_bond")
-            diagnostics["mpo_action_diagnostics"] = _aggregate_mpo_action_probes(diagnostics)
-            diagnostics["mpo_action_error"] = diagnostics["mpo_action_diagnostics"]["max_relative_action_error_upper_bound"]
-            diagnostics["mpo_action_status"] = diagnostics["mpo_action_diagnostics"]["status"]
             diagnostics["mps_max_bond"] = int(settings["mps_max_bond"])
             diagnostics["mps_cutoff"] = float(settings["mps_cutoff"])
             diagnostics["timestep"] = float(settings["timestep"])
@@ -1031,6 +1247,165 @@ def assess_timestep_convergence(
     }
 
 
+def assess_independent_mpo_convergence(
+    resolutions: Sequence[Mapping[str, object]],
+    *,
+    convergence_pairs: Mapping[str, Sequence[str]],
+    energy_atol: float,
+    fidelity_atol: float,
+) -> dict[str, object]:
+    """Assess timestep and MPS refinement on explicit, unconfounded pairs."""
+
+    by_name = {
+        str(case.get("name")): case
+        for case in resolutions
+        if isinstance(case, Mapping) and case.get("name") is not None
+    }
+    operator_keys = (
+        "mpo_max_bond",
+        "mpo_cutoff",
+        "time_window_size",
+        "time_axis_position",
+        "operator_representation",
+        "operator_implementation_version",
+        "lanczos_max",
+        "coefficient_error_max",
+        "action_error_max",
+        "adaptive_time_windows",
+        "mpo_workspace_cap_bytes",
+    )
+    state_keys = ("mps_max_bond", "mps_cutoff")
+
+    def pair(axis: str) -> tuple[Mapping[str, object], Mapping[str, object]] | None:
+        names = convergence_pairs.get(axis)
+        if (
+            not isinstance(names, Sequence)
+            or isinstance(names, (str, bytes))
+            or len(names) != 2
+        ):
+            return None
+        coarse = by_name.get(str(names[0]))
+        fine = by_name.get(str(names[1]))
+        return (coarse, fine) if coarse is not None and fine is not None else None
+
+    def same(settings_a: Mapping[str, object], settings_b: Mapping[str, object], keys: Sequence[str]) -> bool:
+        return all(
+            (
+                key not in settings_a
+                and key not in settings_b
+            )
+            or (
+                key in settings_a
+                and key in settings_b
+                and _canonical_cache_value(settings_a[key])
+                == _canonical_cache_value(settings_b[key])
+            )
+            for key in keys
+        )
+
+    def metrics(
+        coarse: Mapping[str, object], fine: Mapping[str, object]
+    ) -> dict[str, object]:
+        coarse_results = coarse.get("results", {})
+        fine_results = fine.get("results", {})
+        if not isinstance(coarse_results, Mapping) or not isinstance(fine_results, Mapping):
+            return {"status": "not_tested", "reason": "Resolution results are unavailable."}
+        return assess_mps_convergence(
+            _canonical_mpo_results(coarse_results),
+            _canonical_mpo_results(fine_results),
+            energy_atol=float(energy_atol),
+            fidelity_atol=float(fidelity_atol),
+            required_protocols=_CANONICAL_MPO_PROTOCOLS,
+        )
+
+    timestep_pair = pair("timestep")
+    if timestep_pair is None:
+        timestep: dict[str, object] = {
+            "status": "not_tested",
+            "reason": "The named timestep convergence pair is unavailable.",
+        }
+    else:
+        coarse, fine = timestep_pair
+        coarse_settings = coarse.get("settings", {})
+        fine_settings = fine.get("settings", {})
+        if not isinstance(coarse_settings, Mapping) or not isinstance(fine_settings, Mapping):
+            timestep = {"status": "not_tested", "reason": "Resolution settings are unavailable."}
+        elif not same(coarse_settings, fine_settings, (*operator_keys, *state_keys)):
+            timestep = {
+                "status": "not_comparable",
+                "reason": "The timestep pair also changes an MPO or MPS setting.",
+            }
+        else:
+            refinement = assess_timestep_convergence(coarse, fine)
+            comparison = metrics(coarse, fine)
+            timestep = {
+                **comparison,
+                "axis_refinement": refinement,
+                "status": (
+                    str(comparison.get("status"))
+                    if refinement.get("status") == "pass"
+                    else "not_comparable"
+                ),
+                "coarse": coarse.get("name"),
+                "fine": fine.get("name"),
+            }
+
+    state_pair = pair("state")
+    if state_pair is None:
+        state: dict[str, object] = {
+            "status": "not_tested",
+            "reason": "The named state convergence pair is unavailable.",
+        }
+    else:
+        coarse, fine = state_pair
+        coarse_settings = coarse.get("settings", {})
+        fine_settings = fine.get("settings", {})
+        fixed_keys = (*operator_keys, "steps", "timestep")
+        if not isinstance(coarse_settings, Mapping) or not isinstance(fine_settings, Mapping):
+            state = {"status": "not_tested", "reason": "Resolution settings are unavailable."}
+        elif not same(coarse_settings, fine_settings, fixed_keys):
+            state = {
+                "status": "not_comparable",
+                "reason": "The state pair also changes a timestep or MPO setting.",
+            }
+        else:
+            try:
+                coarse_bond = int(coarse_settings["mps_max_bond"])
+                fine_bond = int(fine_settings["mps_max_bond"])
+                coarse_cutoff = float(coarse_settings["mps_cutoff"])
+                fine_cutoff = float(fine_settings["mps_cutoff"])
+                refined = (
+                    fine_bond >= coarse_bond
+                    and fine_cutoff <= coarse_cutoff
+                    and (fine_bond > coarse_bond or fine_cutoff < coarse_cutoff)
+                )
+            except (KeyError, TypeError, ValueError):
+                refined = False
+            comparison = metrics(coarse, fine)
+            state = {
+                **comparison,
+                "axis_refinement": {
+                    "status": "pass" if refined else "not_comparable",
+                    "coarse_mps_max_bond": coarse_settings.get("mps_max_bond"),
+                    "fine_mps_max_bond": fine_settings.get("mps_max_bond"),
+                    "coarse_mps_cutoff": coarse_settings.get("mps_cutoff"),
+                    "fine_mps_cutoff": fine_settings.get("mps_cutoff"),
+                },
+                "status": str(comparison.get("status")) if refined else "not_comparable",
+                "coarse": coarse.get("name"),
+                "fine": fine.get("name"),
+            }
+
+    statuses = (str(timestep.get("status")), str(state.get("status")))
+    if all(status == "pass" for status in statuses):
+        status = "pass"
+    elif any(status in {"not_tested", "not_comparable"} for status in statuses):
+        status = "not_tested"
+    else:
+        status = "fail"
+    return {"status": status, "timestep": timestep, "state": state}
+
+
 def assess_statevector_agreement(
     mps_results: Mapping[str, Mapping[str, object]],
     statevector_results: Mapping[str, Mapping[str, object]],
@@ -1088,43 +1463,107 @@ def assess_mpo_compression(
     for protocol, row in results.items():
         diagnostics = row.get("mps_diagnostics", {})
         diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        representation = str(
+            diagnostics.get("representation", "temporal_mode_block_sum")
+        )
+        direct_full_support = representation in {
+            "direct_time_full_support",
+            "joint_time_full_support",
+        }
+        joint_full_support = representation == "joint_time_full_support"
         evolution_status = str(diagnostics.get("status", "unresolved_error"))
         temporal_status = "pass"
         if protocol == "learned_sparse_agp":
-            retained = diagnostics.get("temporal_retained_norm")
-            rank = diagnostics.get("temporal_rank")
-            temporal_status = (
+            if direct_full_support:
+                temporal_status = "not_applicable"
+            else:
+                retained = diagnostics.get("temporal_retained_norm")
+                rank = diagnostics.get("temporal_rank")
+                temporal_status = (
+                    "pass"
+                    if retained is not None and float(retained) > 0.0 and int(rank or 0) > 0
+                    else "not_tested"
+                )
+        static_status = (
+            "not_applicable"
+            if direct_full_support
+            else ("pass" if diagnostics.get("static_mpo_compression") else "not_tested")
+        )
+        if protocol != "learned_sparse_agp" or not direct_full_support:
+            source_status = "not_applicable"
+        elif diagnostics.get("source_completeness_status") is not None:
+            source_status = str(diagnostics["source_completeness_status"])
+        else:
+            certificates = diagnostics.get("operator_certificates", [])
+            certificates = (
+                certificates
+                if isinstance(certificates, Sequence)
+                and not isinstance(certificates, (str, bytes))
+                else []
+            )
+            source_status = (
                 "pass"
-                if retained is not None and float(retained) > 0.0 and int(rank or 0) > 0
+                if certificates
+                and all(
+                    isinstance(certificate, Mapping)
+                    and certificate.get("source_completeness_status") == "pass"
+                    for certificate in certificates
+                )
                 else "not_tested"
             )
-        static_status = "pass" if diagnostics.get("static_mpo_compression") else "not_tested"
-        dynamic_status = (
-            "pass"
-            if str(diagnostics.get("resource_statuses", {}).get("dynamic_mpo_assembly", "not_tested")) == "ok"
-            else str(diagnostics.get("resource_statuses", {}).get("dynamic_mpo_assembly", "not_tested"))
+        dynamic_resource_key = (
+            "dynamic_mpo_slicing" if joint_full_support else "dynamic_mpo_assembly"
         )
-        action_diagnostics = diagnostics.get("mpo_action_diagnostics", {})
+        dynamic_value = str(
+            diagnostics.get("resource_statuses", {}).get(
+                dynamic_resource_key, "not_tested"
+            )
+        )
+        dynamic_status = "pass" if dynamic_value == "ok" else dynamic_value
+        action_diagnostics = (
+            diagnostics.get("operator_certificate", {})
+            if joint_full_support
+            else diagnostics.get("mpo_action_diagnostics", {})
+        )
         action_diagnostics = action_diagnostics if isinstance(action_diagnostics, Mapping) else {}
         action_error = action_diagnostics.get(
             "max_relative_action_error_upper_bound", diagnostics.get("mpo_action_error")
         )
-        measured_status = str(action_diagnostics.get("status", diagnostics.get("mpo_action_status", "not_tested")))
-        if measured_status in {"not_feasible", "not_tested", "not_comparable", "numerically_unresolved", "unresolved_error"}:
+        measured_status = str(
+            action_diagnostics.get(
+                "action_status" if joint_full_support else "status",
+                diagnostics.get("mpo_action_status", "not_tested"),
+            )
+        )
+        if measured_status in {
+            "not_feasible",
+            "not_tested",
+            "not_comparable",
+            "unresolved_error",
+        }:
             action_status = "not_tested"
-        elif action_error is None:
+        elif measured_status == "fail":
+            action_status = "fail"
+        elif action_error is None or not np.isfinite(float(action_error)):
             action_status = "not_tested"
         elif float(action_error) > float(action_error_max):
             action_status = "fail"
         else:
             action_status = "pass"
-        gate_statuses = [evolution_status, temporal_status, static_status, dynamic_status, action_status]
+        gate_statuses = [
+            evolution_status,
+            temporal_status,
+            static_status,
+            dynamic_status,
+            action_status,
+            source_status,
+        ]
         if any(
             item in {"not_feasible", "not_tested", "not_comparable", "unresolved_error", "numerically_unresolved"}
             for item in gate_statuses
         ):
             status = "not_tested"
-        elif all(item == "pass" or item == "ok" for item in gate_statuses):
+        elif all(item in {"pass", "ok", "not_applicable"} for item in gate_statuses):
             status = "pass"
         else:
             status = "fail"
@@ -1135,6 +1574,8 @@ def assess_mpo_compression(
             "dynamic_mpo": dynamic_status,
             "mpo_action": action_status,
             "mpo_action_error": action_error,
+            "source_completeness": source_status,
+            "representation": representation,
         }
         statuses.append(status)
     if not statuses:
@@ -1215,6 +1656,8 @@ def validation_certification(
     require_compression: bool = False,
     timestep_convergence: Mapping[str, object] | None = None,
     require_timestep: bool = False,
+    state_convergence: Mapping[str, object] | None = None,
+    require_state_convergence: bool = False,
     ablation: bool = False,
     completed_comparable_resolutions: int | None = None,
 ) -> dict[str, object]:
@@ -1225,6 +1668,8 @@ def validation_certification(
         gates.append(("mpo_compression", compression or {"status": "not_tested"}))
     if require_timestep:
         gates.append(("timestep_convergence", timestep_convergence or {"status": "not_tested"}))
+    if require_state_convergence:
+        gates.append(("state_convergence", state_convergence or {"status": "not_tested"}))
     if require_statevector:
         gates.append(("statevector_agreement", statevector_agreement))
     if ablation:
@@ -1271,7 +1716,38 @@ def cached_protocol_result(
             continue
         results = case.get("results", {})
         if isinstance(results, dict) and isinstance(results.get(protocol), dict):
-            return dict(results[protocol])
+            result = dict(results[protocol])
+            diagnostics_key = (
+                "mps_diagnostics"
+                if isinstance(result.get("mps_diagnostics"), Mapping)
+                else "diagnostics"
+            )
+            diagnostics_value = result.get(diagnostics_key)
+            if not isinstance(diagnostics_value, Mapping):
+                return result
+            diagnostics = dict(diagnostics_value)
+            if diagnostics.get("representation") != "joint_time_full_support":
+                return result
+            certificate_value = diagnostics.get("operator_certificate")
+            if not isinstance(certificate_value, Mapping):
+                return result
+            action_status = certificate_value.get("action_status")
+            if action_status is None and certificate_value.get("status") == "pass":
+                action_status = "pass"
+            if action_status not in {"pass", "fail"}:
+                return result
+            action_error = certificate_value.get(
+                "max_relative_action_error_upper_bound"
+            )
+            diagnostics["mpo_action_status"] = action_status
+            diagnostics["mpo_action_error"] = action_error
+            diagnostics["mpo_action_diagnostics"] = {
+                "status": action_status,
+                "method": "adaptive_windowed_joint_time_pauli_tt",
+                "max_relative_action_error_upper_bound": action_error,
+            }
+            result[diagnostics_key] = diagnostics
+            return result
     return None
 
 
@@ -1364,15 +1840,152 @@ def select_validation_cases(
         if isinstance(configured_cases, list)
         else []
     )
+    for case in cases:
+        marker = case.get("preflight_only", False)
+        if not isinstance(marker, bool):
+            raise ValueError("resolution preflight_only must be a Boolean.")
     if not cases:
         if preflight_only:
             raise ValueError("--preflight-only requires a resolution with preflight_only=true.")
         return [{}]
-    selected = [case for case in cases if bool(case.get("preflight_only", False)) == preflight_only]
+    selected = [
+        case
+        for case in cases
+        if case.get("preflight_only", False) is preflight_only
+    ]
     if not selected:
         mode = "preflight_only=true" if preflight_only else "preflight_only=false"
         raise ValueError(f"No tensor-network validation resolution is configured with {mode}.")
     return selected
+
+
+def apply_case_override_mode(
+    configured_cases: list[dict[str, object]],
+    *,
+    preflight_only: bool,
+    override_requested: bool,
+) -> list[dict[str, object]]:
+    """Keep preflight safety limits while preserving legacy validation overrides."""
+
+    if override_requested and not preflight_only:
+        return [{}]
+    return configured_cases
+
+
+def execution_output_dir(output_dir: Path, *, preflight_only: bool) -> Path:
+    """Isolate diagnostic preflight artifacts from canonical validation outputs."""
+
+    return output_dir / "preflight" if preflight_only else output_dir
+
+
+def preflight_gate_status_payload(
+    payload: Mapping[str, object],
+    *,
+    action_error_max: float,
+    preflight_summary_path: Path,
+) -> dict[str, object]:
+    """Publish a canonical not-tested record without promoting preflight metrics."""
+
+    results = payload.get("results", {})
+    results = results if isinstance(results, Mapping) else {}
+    learned = results.get("learned_sparse_agp", {})
+    learned = learned if isinstance(learned, Mapping) else {}
+    diagnostics = learned.get("mps_diagnostics", {})
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    raw_error = diagnostics.get("mpo_action_error")
+    try:
+        action_error = float(raw_error) if raw_error is not None else None
+    except (TypeError, ValueError):
+        action_error = None
+    action_status = str(diagnostics.get("mpo_action_status", "not_tested"))
+    if action_error is not None and np.isfinite(action_error) and action_error > action_error_max:
+        gate_status = "fail"
+        reason = (
+            "Canonical full-support TDVP validation was not run because the diagnostic "
+            f"preflight MPO action error was {action_error:.6g}, above the "
+            f"configured {action_error_max:.6g} limit."
+        )
+    elif (
+        action_error is not None
+        and np.isfinite(action_error)
+        and action_error <= action_error_max
+        and action_status in {"measured", "pass", "ok"}
+    ):
+        gate_status = "pass"
+        reason = (
+            "The diagnostic full-support TDVP preflight passed the MPO action-error "
+            "gate; canonical multi-resolution dynamics have not yet been run."
+        )
+    else:
+        gate_status = "not_tested"
+        reason = (
+            "Canonical full-support TDVP validation was not run because the diagnostic "
+            "preflight did not establish the MPO action-error gate."
+        )
+
+    retained_keys = (
+        "description",
+        "backend",
+        "backend_configuration",
+        "n_qubits",
+        "total_time",
+        "trained_run",
+        "coefficient_path",
+        "ground_energy",
+        "ground_bitstring",
+        "protocols",
+        "full_learned_terms",
+    )
+    status_payload = {key: payload[key] for key in retained_keys if key in payload}
+    status_payload.update(
+        {
+            "execution_mode": "validation_status",
+            "results": {},
+            "resolution_results": [],
+            "availability_note": reason,
+            "preflight_gate": {
+                "status": gate_status,
+                "mpo_action_error": action_error,
+                "mpo_action_error_max": float(action_error_max),
+                "mpo_action_status": action_status,
+                "summary_path": str(preflight_summary_path),
+            },
+            "certification": {
+                "status": "not_tested",
+                "reason": reason,
+            },
+        }
+    )
+    return status_payload
+
+
+def should_publish_preflight_status(summary_path: Path) -> bool:
+    """Never replace an existing canonical validation with a diagnostic status."""
+
+    summary_path = Path(summary_path)
+    if not summary_path.is_file():
+        return True
+    try:
+        payload = _load_json(summary_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return payload.get("execution_mode") == "validation_status"
+
+
+def previous_payload_matches_execution(
+    payload: Mapping[str, object],
+    *,
+    n_qubits: int,
+    coefficient_path: Path,
+    execution_mode: str,
+) -> bool:
+    """Require immutable execution provenance before reusing cached protocols."""
+
+    return (
+        int(payload.get("n_qubits", -1)) == int(n_qubits)
+        and str(payload.get("coefficient_path", "")) == str(coefficient_path)
+        and payload.get("execution_mode") == execution_mode
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -1382,11 +1995,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--max-bond", type=int, default=None)
+    parser.add_argument("--mpo-max-bond", type=int, default=None)
+    parser.add_argument("--mps-max-bond", type=int, default=None)
     parser.add_argument("--learned-terms", type=int, default=None)
     parser.add_argument("--cutoff", type=float, default=None)
+    parser.add_argument("--mpo-cutoff", type=float, default=None)
+    parser.add_argument("--mps-cutoff", type=float, default=None)
     parser.add_argument("--coefficient-threshold", type=float, default=None)
     parser.add_argument("--operator-grouping", choices=("pauli_term", "support"), default=None)
     parser.add_argument("--protocols", type=str, default=None)
+    parser.add_argument(
+        "--ablation",
+        action="store_true",
+        help="Mark an explicit reduced-support CLI run as a noncanonical calibration.",
+    )
     parser.add_argument(
         "--preflight-only",
         action="store_true",
@@ -1437,8 +2059,24 @@ def main() -> None:
         validation.get("resolutions", []),
         preflight_only=bool(args.preflight_only),
     )
-    if any(value is not None for value in (args.steps, args.max_bond, args.learned_terms, args.cutoff)):
-        configured_cases = [{}]
+    configured_cases = apply_case_override_mode(
+        configured_cases,
+        preflight_only=bool(args.preflight_only),
+        override_requested=any(
+            value is not None
+            for value in (
+                args.steps,
+                args.max_bond,
+                args.mpo_max_bond,
+                args.mps_max_bond,
+                args.learned_terms,
+                args.cutoff,
+                args.mpo_cutoff,
+                args.mps_cutoff,
+            )
+        )
+        or bool(args.ablation),
+    )
     protocols_raw = args.protocols or validation.get(
         "protocols", ["no_cd", "kipu_dqfm_l1", "learned_sparse_agp"]
     )
@@ -1454,18 +2092,26 @@ def main() -> None:
     selection_limit = sys.maxsize if backend["name"] == "tenpy_tdvp_mpo" else max_requested_terms
     learned_full = learned_term_selection(coefficient_path, selection_limit)
 
-    output_dir = args.output_dir or _resolve_path(validation.get("output_dir", "mps_validation"), base=trained_run)
+    output_dir = args.output_dir or _resolve_path(
+        validation.get("output_dir", "mps_validation"),
+        base=trained_run,
+    )
     if not output_dir.is_absolute():
         output_dir = run_root / output_dir
+    canonical_output_dir = output_dir
+    execution_mode = "preflight_only" if args.preflight_only else "validation"
+    output_dir = execution_output_dir(output_dir, preflight_only=bool(args.preflight_only))
     data_dir = output_dir / "Models_Data"
     images_dir = output_dir / "Images"
     summary_path = data_dir / "mps_physical_validation_summary.json"
     previous_resolutions: object = []
     if summary_path.is_file():
         previous_payload = _load_json(summary_path)
-        if (
-            int(previous_payload.get("n_qubits", -1)) == n_qubits
-            and str(previous_payload.get("coefficient_path", "")) == str(coefficient_path)
+        if previous_payload_matches_execution(
+            previous_payload,
+            n_qubits=n_qubits,
+            coefficient_path=coefficient_path,
+            execution_mode=execution_mode,
         ):
             previous_resolutions = previous_payload.get("resolution_results", [])
     payload: dict[str, object] = {
@@ -1483,7 +2129,7 @@ def main() -> None:
         "ground_bitstring": ground_bitstring,
         "protocols": list(protocols),
         "resolution_results": [],
-        "execution_mode": "preflight_only" if args.preflight_only else "validation",
+        "execution_mode": execution_mode,
         "certification": {"status": "not_tested"},
     }
 
@@ -1507,7 +2153,11 @@ def main() -> None:
         )
         learned = subset_learned_terms(learned_full, learned_terms)
         is_mpo_backend = backend["name"] == "tenpy_tdvp_mpo"
-        ablation = bool(case.get("ablation", backend["ablation"]))
+        ablation = resolve_case_ablation(
+            cli_ablation=bool(args.ablation),
+            case_ablation=case.get("ablation", False),
+            backend_ablation=backend["ablation"],
+        )
         support_class = "legacy"
         if is_mpo_backend and "learned_sparse_agp" in protocols:
             support_class = require_full_learned_support(
@@ -1515,10 +2165,26 @@ def main() -> None:
                 available_terms=int(learned["available_terms"]),
                 ablation=ablation,
             )
-        mpo_max_bond = int(case.get("mpo_max_bond", case.get("max_bond", validation.get("max_bond", 64))))
-        mpo_cutoff = float(case.get("mpo_cutoff", case.get("cutoff", validation.get("cutoff", 1.0e-10))))
-        mps_max_bond = int(case.get("mps_max_bond", case.get("max_bond", validation.get("max_bond", 64))))
-        mps_cutoff = float(case.get("mps_cutoff", case.get("cutoff", validation.get("cutoff", 1.0e-10))))
+        mpo_max_bond = int(
+            args.mpo_max_bond
+            if args.mpo_max_bond is not None
+            else case.get("mpo_max_bond", case.get("max_bond", validation.get("max_bond", 64)))
+        )
+        mpo_cutoff = float(
+            args.mpo_cutoff
+            if args.mpo_cutoff is not None
+            else case.get("mpo_cutoff", case.get("cutoff", validation.get("cutoff", 1.0e-10)))
+        )
+        mps_max_bond = int(
+            args.mps_max_bond
+            if args.mps_max_bond is not None
+            else case.get("mps_max_bond", case.get("max_bond", validation.get("max_bond", 64)))
+        )
+        mps_cutoff = float(
+            args.mps_cutoff
+            if args.mps_cutoff is not None
+            else case.get("mps_cutoff", case.get("cutoff", validation.get("cutoff", 1.0e-10)))
+        )
         resource_caps = backend["resource_caps"]
         resource_caps = resource_caps if isinstance(resource_caps, Mapping) else {}
         case_payload: dict[str, object] = {
@@ -1529,6 +2195,10 @@ def main() -> None:
             "settings": {
                 "backend": backend["name"],
                 "integrator": str(case.get("integrator", backend["integrator"])),
+                "operator_representation": str(
+                    case.get("operator_representation", backend["representation"])
+                ),
+                "operator_implementation_version": _MPO_OPERATOR_IMPLEMENTATION_VERSION,
                 "n_qubits": n_qubits,
                 "total_time": total_time,
                 "initial_state": "+" * n_qubits,
@@ -1560,7 +2230,19 @@ def main() -> None:
                 "action_probe_dynamic_samples": int(
                     case.get("action_probe_dynamic_samples", backend["action_probe_dynamic_samples"])
                 ),
+                "coefficient_error_max": float(backend["coefficient_error_max"]),
                 "action_error_max": float(backend["action_error_max"]),
+                "time_window_size": case.get(
+                    "time_window_size", backend["time_window_size"]
+                ),
+                "adaptive_time_windows": bool(
+                    case.get(
+                        "adaptive_time_windows", backend["adaptive_time_windows"]
+                    )
+                ),
+                "time_axis_position": int(
+                    case.get("time_axis_position", backend["time_axis_position"])
+                ),
                 "mpo_workspace_cap_bytes": int(case.get("mpo_workspace_cap_bytes", backend["mpo_workspace_cap_bytes"])),
                 "max_build_seconds": case.get("max_build_seconds", resource_caps.get("max_build_seconds")),
                 "max_peak_memory_gb": case.get("max_peak_memory_gb", resource_caps.get("max_peak_memory_gb")),
@@ -1638,11 +2320,41 @@ def main() -> None:
         "status": "not_tested",
         "reason": "Only one eligible resolution was run.",
     }
+    state_convergence: dict[str, object] = {
+        "status": "not_tested",
+        "reason": "No independent state-bond pair was configured.",
+    }
     eligible_ladder: list[Mapping[str, object]] = []
     if backend["name"] == "tenpy_tdvp_mpo":
         eligible_ladder = eligible_mpo_resolution_ladder(resolution_results)
         payload["eligible_resolution_count"] = len(eligible_ladder)
-    if backend["name"] == "tenpy_tdvp_mpo" and len(eligible_ladder) >= 2:
+    convergence_pairs = validation.get("convergence_pairs", {})
+    if (
+        backend["name"] == "tenpy_tdvp_mpo"
+        and isinstance(convergence_pairs, Mapping)
+        and convergence_pairs
+    ):
+        independent = assess_independent_mpo_convergence(
+            eligible_ladder,
+            convergence_pairs=convergence_pairs,  # type: ignore[arg-type]
+            energy_atol=float(validation.get("convergence_energy_atol", 0.05)),
+            fidelity_atol=float(validation.get("convergence_fidelity_atol", 0.01)),
+        )
+        timestep_value = independent.get("timestep", {})
+        state_value = independent.get("state", {})
+        timestep_convergence = (
+            dict(timestep_value) if isinstance(timestep_value, Mapping) else {"status": "not_tested"}
+        )
+        state_convergence = (
+            dict(state_value) if isinstance(state_value, Mapping) else {"status": "not_tested"}
+        )
+        convergence = {
+            "status": independent.get("status", "not_tested"),
+            "method": "independent_named_timestep_and_state_pairs",
+            "timestep": timestep_convergence,
+            "state": state_convergence,
+        }
+    elif backend["name"] == "tenpy_tdvp_mpo" and len(eligible_ladder) >= 2:
         coarse_results = _canonical_mpo_results(eligible_ladder[-2]["results"])  # type: ignore[arg-type]
         fine_results = _canonical_mpo_results(eligible_ladder[-1]["results"])  # type: ignore[arg-type]
         convergence = assess_mps_convergence(
@@ -1662,6 +2374,7 @@ def main() -> None:
         )
     payload["convergence"] = convergence
     payload["timestep_convergence"] = timestep_convergence
+    payload["state_convergence"] = state_convergence
 
     compression: dict[str, object] = {"status": "not_tested", "reason": "Legacy product-formula backend."}
     gate_resolution = publish_final_eligible_mpo_results(payload, resolution_results)
@@ -1673,6 +2386,10 @@ def main() -> None:
         _canonical_mpo_results(gate_resolution["results"])  # type: ignore[arg-type]
         if gate_resolution is not None
         else {}
+    )
+    statevector_gate_results = statevector_comparison_results(
+        gate_resolution=gate_resolution,
+        final_results=final_results,  # type: ignore[arg-type]
     )
     if backend["name"] == "tenpy_tdvp_mpo" and gate_resolution is not None:
         compression = assess_mpo_compression(
@@ -1705,7 +2422,7 @@ def main() -> None:
             ),
         )
         statevector_agreement = assess_statevector_agreement(
-            gate_results if backend["name"] == "tenpy_tdvp_mpo" else final_results,  # type: ignore[arg-type]
+            statevector_gate_results if backend["name"] == "tenpy_tdvp_mpo" else final_results,  # type: ignore[arg-type]
             (
                 _canonical_mpo_results(reference_results)
                 if backend["name"] == "tenpy_tdvp_mpo"
@@ -1724,6 +2441,8 @@ def main() -> None:
         require_compression=backend["name"] == "tenpy_tdvp_mpo",
         timestep_convergence=timestep_convergence,
         require_timestep=backend["name"] == "tenpy_tdvp_mpo",
+        state_convergence=state_convergence,
+        require_state_convergence=backend["name"] == "tenpy_tdvp_mpo",
         require_statevector=(
             n_qubits <= 15 and backend["name"] == "tenpy_tdvp_mpo" and gate_resolution is not None
         ) or bool(statevector_reference),
@@ -1747,6 +2466,19 @@ def main() -> None:
     _save_progress(summary_path, payload)
     images_dir.mkdir(parents=True, exist_ok=True)
     plot_physical_comparison_table(images_dir, payload)
+    if args.preflight_only:
+        status_payload = preflight_gate_status_payload(
+            payload,
+            action_error_max=float(backend["action_error_max"]),
+            preflight_summary_path=summary_path,
+        )
+        canonical_data_dir = canonical_output_dir / "Models_Data"
+        canonical_images_dir = canonical_output_dir / "Images"
+        canonical_summary_path = canonical_data_dir / "mps_physical_validation_summary.json"
+        if should_publish_preflight_status(canonical_summary_path):
+            _save_progress(canonical_summary_path, status_payload)
+            canonical_images_dir.mkdir(parents=True, exist_ok=True)
+            plot_physical_comparison_table(canonical_images_dir, status_payload)
     print(json.dumps(payload, indent=2), flush=True)
 
 

@@ -106,27 +106,29 @@ backend policy uses exact statevectors only through q15 and tensor networks for
 `q > 15`. The old top-term q20 statevector configuration is retained only for
 provenance and is not the canonical validator.
 
-Physical validation is not part of the loss. The completed canonical MPS
-validation targets the `residual_81920` adaptive-temporal checkpoint and keeps
-all 32,768 learned AGP terms. Terms sharing the same occupied-qubit support are
-combined before local exponentiation; no coefficient-ranked pruning or
-numerical threshold was used.
+Physical validation is not part of the loss. The completed canonical
+tensor-network validation targets the `residual_81920` adaptive-temporal
+checkpoint and keeps all 32,768 learned AGP terms. The learned operator is
+represented as a joint-time full-support MPO and evolved with two-site TDVP;
+no coefficient-ranked pruning or numerical threshold is used.
 
 The exact target is `E0=-26.0` with unique ground bitstring `00...0`. The
 fine-resolution results are:
 
 | Method | Final energy | Energy error | Ground fidelity |
 | --- | ---: | ---: | ---: |
-| no CD | -3.2390823 | 22.7609177 | 1.95723e-05 |
-| nested commutator l=1 | -12.2268621 | 13.7731379 | 0.00806762 |
-| learned sparse AGP | -25.6453873 | 0.3546127 | 0.93648534 |
+| no CD | -3.2396367 | 22.7603633 | 1.96521e-05 |
+| nested commutator l=1 | -12.2273803 | 13.7726197 | 0.00807466 |
+| learned sparse AGP | -25.6478383 | 0.3521617 | 0.93771284 |
 
-The 24-step/bond-32/cutoff-`1e-9` and
-48-step/bond-64/cutoff-`1e-10` ladders agree within the configured tolerances.
-For the PINN row, the energy delta is `0.00678613` and the fidelity delta is
-`0.00212781`; the fine run reached peak bond 57 below its cap of 64. The
+The numerical ladder separates its two convergence axes. Timestep convergence
+compares 24 and 48 steps at MPS bond 64; state convergence compares bonds 32
+and 64 at 48 steps. For the PINN row, the timestep deltas are `2.34945e-4` in
+energy and `1.14153e-4` in fidelity, while the state-bond deltas are
+`2.48970e-4` and `1.14048e-5`. MPO compression, sampled action error, source
+completeness, timestep convergence, and state convergence all pass. The
 machine-readable evidence and comparison PDF are under the retained
-checkpoint's `mps_validation/` directory.
+checkpoint's `mpo_validation/` directory.
 
 ## Certification Discipline
 

@@ -55,31 +55,34 @@ This reference validates the final classical optimization problem. It does not
 provide the evolved q156 quantum state. The final dynamics were therefore
 computed with a bounded-bond MPS approximation rather than a dense statevector.
 
-## MPS Dynamical Validation
+## Full-Support Tensor-Network Dynamical Validation
 
-The retained comparison uses the same 2048 learned terms at both numerical
-resolutions. This deployment support retains `0.9555395` of the trained
-coefficient RMS norm.
+The canonical comparison deploys every one of the 32,768 learned AGP terms.
+The coefficients are compressed as a joint-time full-support MPO and evolved
+with two-site TDVP. No coefficient threshold or ranked support truncation is
+used.
 
 | Method | Final energy | Energy error | Ground fidelity | `<Z_i>` RMSE | `<Z_i Z_{i+1}>` RMSE |
 |---|---:|---:|---:|---:|---:|
-| no CD | -26.2569071 | 183.343093 | 3.85877e-37 | 0.970099 | 0.841677 |
-| Kipu/DQFM l=1 | -97.7452309 | 111.854769 | 1.42713e-16 | 0.846395 | 0.424831 |
-| learned sparse AGP | -188.153516 | 21.4464841 | 0.0207493 | 0.146486 | 0.0926501 |
+| no CD | -26.2623879 | 183.3376121 | 4.00991e-37 | 0.970088 | 0.841646 |
+| Kipu/DQFM l=1 | -97.7266362 | 111.8733638 | 1.41209e-16 | 0.846403 | 0.424950 |
+| learned sparse AGP | -201.3901459 | 8.2098541 | 0.2394617 | 0.049607 | 0.040647 |
 
-This historical reduced-support ablation compares 24 steps, bond 32, cutoff `1e-9` against
-48 steps, bond 64, cutoff `1e-10`. Successive-resolution differences are:
+The numerical ladder changes one approximation axis at a time:
 
-| Method | Energy difference | Fidelity difference | Gate |
-|---|---:|---:|---|
-| no CD | 0.0225031 | 1.13717e-38 | pass |
-| Kipu/DQFM l=1 | 0.00915165 | 1.00548e-18 | pass |
-| learned sparse AGP | 0.0279652 | 5.40831e-5 | pass |
+| Gate | Coarse/fine settings | PINN energy difference | PINN fidelity difference | Status |
+|---|---|---:|---:|---|
+| Timestep | 24/48 steps, MPS bond 64 | 0.0460534 | 0.00158305 | pass |
+| State bond | bonds 32/64, 48 steps | 2.34444e-6 | 2.89228e-7 | pass |
 
-Peak fine-resolution MPS bonds are 4, 6, and 23 respectively. The reduced-
-support trajectory is numerically converged, but it is not canonical physical
-validation of the trained 32768-term PINN operator. It remains a deployment
-ablation, not an exact q156 statevector or a global-support sufficiency proof.
+The learned dynamic MPO has peak bond 95, and the fine learned trajectory
+reaches the configured MPS bond cap of 64. Learned-source completeness passes,
+the sampled learned-MPO action error is zero, and the maximum reported static
+action errors are `2.39139e-5` for no CD and `4.40030e-5` for nested l=1,
+below the configured `1e-3` threshold. All required q156 tensor-network gates
+therefore pass. This validates the numerical deployment of the complete
+trained output; it is not an exact q156 statevector or a proof of sufficiency
+relative to Pauli strings outside the learned support.
 
 ## Learned-Support Deployment Diagnostic
 
@@ -112,10 +115,10 @@ cutoff `1e-10`. Its fine result is:
 The coarse/fine differences are `0.0169764` in energy and `1.52810e-4` in
 fidelity, so the 8192-term ablation passes the existing MPS convergence
 tolerances. This validates only the truncation-sensitivity study inside the
-trained 32768-term output. The all-32768-term trajectory has one coarse result
-but no fine-resolution partner, so canonical full-model physical validation is
-`not tested`. The study also does not establish sufficiency relative to Pauli
-strings outside the trained output.
+trained 32768-term output. The separate canonical ladder above now supplies
+the independent timestep and state-bond partners for the all-32768-term
+trajectory. Neither study establishes sufficiency relative to Pauli strings
+outside the trained output.
 
 ## Certification
 
@@ -134,14 +137,14 @@ strings outside the trained output.
 | Fixed external probe basis | not tested | No independent probe family was evaluated |
 | q156 dense-statevector validation | not tested | A 2^156 statevector is unavailable |
 | Reduced-support q156 MPS ablation | pass | the 2048- and 8192-term deployments pass their 24-to-48-step convergence gates |
-| Full learned-support q156 MPS validation | not tested | all 32768 terms were run only at the coarse resolution |
+| Full learned-support q156 TN validation | pass | all 32768 terms pass independent 24/48-step and bond-32/64 convergence gates |
+| Full-support MPO/source fidelity | pass | source completeness passes and learned sampled action error is zero |
 | Learned-output deployment support plateau | pass | ablation only: 8192-to-16384 gains are below 5%; the coarse 32768 endpoint confirms the plateau |
 
-The defensible claim is **promising projected sparse AGP behavior with
-converged reduced-support q156 MPS ablations**. Canonical physical validation
-of the complete learned PINN operator is not tested, and the missing
-independent probes and K/Q/seed sweeps also prevent a global-support reliability
-claim.
+The defensible claim is **projected sparse AGP behavior with converged,
+full-output q156 tensor-network dynamics**. The missing independent probes and
+K/Q/seed sweeps still prevent a global-support reliability claim, and no q156
+exact-statevector oracle exists for the full time evolution.
 
 ## Artifacts
 
@@ -170,10 +173,15 @@ The machine-readable curriculum summary is:
 Models_Data/holdout_feedback_summary_residual_69855.json
 ```
 
-The retained tensor-network outputs are:
+The retained canonical tensor-network outputs are:
 
 ```text
-rounds/round_20/mps_validation/Models_Data/mps_physical_validation_summary.json
-rounds/round_20/mps_validation/Images/physical_method_comparison_table.pdf
+rounds/round_20/mpo_validation/Models_Data/mps_physical_validation_summary.json
+rounds/round_20/mpo_validation/Images/physical_method_comparison_table.pdf
+```
+
+The historical support-deployment ablations remain under:
+
+```text
 rounds/round_20/mps_support_sweep/Models_Data/support_sweep_summary.json
 ```

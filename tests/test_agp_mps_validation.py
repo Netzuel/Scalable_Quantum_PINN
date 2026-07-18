@@ -1,7 +1,9 @@
+import json
 import sys
 import unittest
 from importlib.util import find_spec
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
@@ -15,6 +17,7 @@ import agp_mps_validation as validation_module
 from agp_mps_validation import (
     apply_grouped_hamiltonian_rotation_mps,
     assess_mps_convergence,
+    assess_independent_mpo_convergence,
     assess_statevector_agreement,
     apply_pauli_rotation_mps,
     diagonal_ising_mps_metrics,
@@ -35,6 +38,44 @@ from utils import SparsePauliOperator
 
 
 class AGPMPSValidationTests(unittest.TestCase):
+    def test_backend_accepts_direct_time_full_support_representation(self):
+        backend = resolve_validation_backend(
+            {
+                "mpo_backend": {
+                    "name": "tenpy_tdvp_mpo",
+                    "representation": "direct_time_full_support",
+                }
+            }
+        )
+
+        self.assertEqual(backend["representation"], "direct_time_full_support")
+
+    def test_backend_accepts_joint_time_full_support_representation(self):
+        backend = resolve_validation_backend(
+            {
+                "mpo_backend": {
+                    "name": "tenpy_tdvp_mpo",
+                    "representation": "joint_time_full_support",
+                    "coefficient_error_max": 2.0e-4,
+                    "time_window_size": 3,
+                    "adaptive_time_windows": True,
+                    "time_axis_position": 7,
+                }
+            }
+        )
+
+        self.assertEqual(backend["representation"], "joint_time_full_support")
+        self.assertEqual(backend["coefficient_error_max"], 2.0e-4)
+        self.assertEqual(backend["time_window_size"], 3)
+        self.assertTrue(backend["adaptive_time_windows"])
+        self.assertEqual(backend["time_axis_position"], 7)
+
+    def test_backend_rejects_unknown_operator_representation(self):
+        with self.assertRaisesRegex(ValueError, "representation"):
+            resolve_validation_backend(
+                {"mpo_backend": {"name": "tenpy_tdvp_mpo", "representation": "magic"}}
+            )
+
     def test_preflight_cli_selects_only_named_preflight_cases(self):
         configured = [
             {"name": "speed_preflight", "preflight_only": True, "steps": 1},
@@ -54,6 +95,208 @@ class AGPMPSValidationTests(unittest.TestCase):
                 [{"name": "coarse", "steps": 24}],
                 preflight_only=True,
             )
+
+    def test_normal_validation_excludes_preflight_cases(self):
+        configured = [
+            {"name": "speed_preflight", "preflight_only": True, "steps": 1},
+            {"name": "coarse", "steps": 24},
+        ]
+
+        selected = validation_module.select_validation_cases(
+            configured,
+            preflight_only=False,
+        )
+
+        self.assertEqual(selected, [configured[1]])
+
+    def test_preflight_marker_must_be_a_boolean(self):
+        with self.assertRaisesRegex(ValueError, "must be a Boolean"):
+            validation_module.select_validation_cases(
+                [{"name": "speed_preflight", "preflight_only": "false"}],
+                preflight_only=False,
+            )
+
+    def test_preflight_keeps_selected_case_when_cli_overrides_are_present(self):
+        selected = [{"name": "speed_preflight", "preflight_only": True, "mpo_max_bond": 64}]
+
+        resolved = validation_module.apply_case_override_mode(
+            selected,
+            preflight_only=True,
+            override_requested=True,
+        )
+
+        self.assertEqual(resolved, selected)
+
+    def test_preflight_uses_an_isolated_output_namespace(self):
+        base = Path("mpo_validation")
+
+        self.assertEqual(
+            validation_module.execution_output_dir(base, preflight_only=True),
+            base / "preflight",
+        )
+        self.assertEqual(
+            validation_module.execution_output_dir(base, preflight_only=False),
+            base,
+        )
+
+    def test_explicit_cli_ablation_marks_a_reduced_support_case(self):
+        self.assertTrue(
+            validation_module.resolve_case_ablation(
+                cli_ablation=True,
+                case_ablation=False,
+                backend_ablation=False,
+            )
+        )
+        self.assertFalse(
+            validation_module.resolve_case_ablation(
+                cli_ablation=False,
+                case_ablation=False,
+                backend_ablation=False,
+            )
+        )
+
+    def test_statevector_calibration_uses_final_ablation_results_without_a_gate_resolution(self):
+        final_results = {
+            "no_cd": {"final_energy": -1.0},
+            "kipu_dqfm_l1": {"final_energy": -2.0},
+            "learned_sparse_agp": {"final_energy": -3.0},
+        }
+
+        selected = validation_module.statevector_comparison_results(
+            gate_resolution=None,
+            final_results=final_results,
+        )
+
+        self.assertEqual(
+            set(selected),
+            {"no_cd", "nested_l1", "learned_sparse_agp"},
+        )
+        self.assertEqual(selected["nested_l1"]["final_energy"], -2.0)
+
+    def test_cli_accepts_independent_mpo_and_mps_numerical_overrides(self):
+        with patch(
+            "sys.argv",
+            [
+                "agp_mps_validation.py",
+                "--config",
+                "config.json",
+                "--mpo-max-bond",
+                "512",
+                "--mps-max-bond",
+                "128",
+                "--mpo-cutoff",
+                "0",
+                "--mps-cutoff",
+                "1e-12",
+            ],
+        ):
+            args = validation_module.parse_args()
+
+        self.assertEqual(args.mpo_max_bond, 512)
+        self.assertEqual(args.mps_max_bond, 128)
+        self.assertEqual(args.mpo_cutoff, 0.0)
+        self.assertEqual(args.mps_cutoff, 1.0e-12)
+
+    def test_failed_preflight_exports_canonical_not_tested_status(self):
+        payload = {
+            "backend": "tenpy_tdvp_mpo",
+            "n_qubits": 24,
+            "trained_run": "/tmp/run",
+            "coefficient_path": "/tmp/run/final.pt",
+            "ground_energy": -28.1,
+            "ground_bitstring": "0" * 24,
+            "protocols": ["no_cd", "kipu_dqfm_l1", "learned_sparse_agp"],
+            "full_learned_terms": 32768,
+            "results": {
+                "learned_sparse_agp": {
+                    "mps_diagnostics": {
+                        "mpo_action_error": 0.941,
+                        "mpo_action_status": "not_feasible",
+                    }
+                }
+            },
+        }
+
+        status = validation_module.preflight_gate_status_payload(
+            payload,
+            action_error_max=1.0e-3,
+            preflight_summary_path=Path("preflight/Models_Data/summary.json"),
+        )
+
+        self.assertEqual(status["execution_mode"], "validation_status")
+        self.assertEqual(status["certification"]["status"], "not_tested")
+        self.assertEqual(status["preflight_gate"]["status"], "fail")
+        self.assertEqual(status["results"], {})
+        self.assertIn("0.941", status["availability_note"])
+
+    def test_successful_preflight_reports_pass_but_remains_uncertified(self):
+        payload = {
+            "results": {
+                "learned_sparse_agp": {
+                    "mps_diagnostics": {
+                        "mpo_action_error": 1.0e-6,
+                        "mpo_action_status": "measured",
+                    }
+                }
+            }
+        }
+
+        status = validation_module.preflight_gate_status_payload(
+            payload,
+            action_error_max=1.0e-3,
+            preflight_summary_path=Path("preflight/summary.json"),
+        )
+
+        self.assertEqual(status["preflight_gate"]["status"], "pass")
+        self.assertEqual(status["certification"]["status"], "not_tested")
+
+    def test_preflight_status_does_not_overwrite_canonical_validation(self):
+        with TemporaryDirectory() as tmp:
+            summary_path = Path(tmp) / "mps_physical_validation_summary.json"
+            summary_path.write_text(
+                json.dumps({"execution_mode": "validation", "certification": {"status": "pass"}}),
+                encoding="utf-8",
+            )
+
+            self.assertFalse(validation_module.should_publish_preflight_status(summary_path))
+
+            summary_path.write_text(
+                json.dumps({"execution_mode": "validation_status"}),
+                encoding="utf-8",
+            )
+            self.assertTrue(validation_module.should_publish_preflight_status(summary_path))
+
+    def test_cached_payload_requires_matching_execution_mode(self):
+        payload = {
+            "n_qubits": 24,
+            "coefficient_path": "/tmp/final.pt",
+            "execution_mode": "preflight_only",
+        }
+
+        self.assertFalse(
+            validation_module.previous_payload_matches_execution(
+                payload,
+                n_qubits=24,
+                coefficient_path=Path("/tmp/final.pt"),
+                execution_mode="validation",
+            )
+        )
+        self.assertTrue(
+            validation_module.previous_payload_matches_execution(
+                payload,
+                n_qubits=24,
+                coefficient_path=Path("/tmp/final.pt"),
+                execution_mode="preflight_only",
+            )
+        )
+        self.assertFalse(
+            validation_module.previous_payload_matches_execution(
+                {key: value for key, value in payload.items() if key != "execution_mode"},
+                n_qubits=24,
+                coefficient_path=Path("/tmp/final.pt"),
+                execution_mode="validation",
+            )
+        )
 
     def test_parse_args_accepts_preflight_only(self):
         argv = ["agp_mps_validation.py", "--config", "config.json", "--preflight-only"]
@@ -150,6 +393,42 @@ class AGPMPSValidationTests(unittest.TestCase):
             )
         )
 
+    def test_joint_time_cache_migrates_operator_gate_to_action_diagnostics(self):
+        settings = {
+            "operator_representation": "joint_time_full_support",
+            "steps": 1,
+        }
+        previous = [
+            {
+                "settings": settings,
+                "results": {
+                    "learned_sparse_agp": {
+                        "final_energy": -1.0,
+                        "mps_diagnostics": {
+                            "representation": "joint_time_full_support",
+                            "operator_certificate": {
+                                "status": "pass",
+                                "max_relative_action_error_upper_bound": 5.0e-3,
+                            },
+                            "mpo_action_status": "not_tested",
+                        },
+                    }
+                },
+            }
+        ]
+
+        cached = cached_protocol_result(
+            previous,
+            settings=settings,
+            protocol="learned_sparse_agp",
+        )
+
+        self.assertEqual(cached["mps_diagnostics"]["mpo_action_status"], "pass")
+        self.assertEqual(cached["mps_diagnostics"]["mpo_action_error"], 5.0e-3)
+        self.assertEqual(
+            cached["mps_diagnostics"]["mpo_action_diagnostics"]["status"], "pass"
+        )
+
     def test_certification_requires_only_configured_validation_gates(self):
         certification = validation_certification(
             convergence={"status": "not_tested"},
@@ -216,11 +495,217 @@ class AGPMPSValidationTests(unittest.TestCase):
             statevector_agreement={"status": "not_tested"},
             require_convergence=True,
             require_compression=True,
+            state_convergence={"status": "pass"},
+            require_state_convergence=True,
             require_statevector=False,
         )
 
         self.assertEqual(certification["status"], "pass")
         self.assertIn("mpo_compression", certification["required_gates"])
+        self.assertIn("state_convergence", certification["required_gates"])
+
+    def test_independent_mpo_convergence_uses_named_time_and_state_pairs(self):
+        def case(name, *, steps, mps_bond, energy_shift=0.0):
+            results = {
+                protocol: {
+                    "final_energy": -2.0 + energy_shift,
+                    "ground_state_fidelity": 0.4 + energy_shift,
+                }
+                for protocol in ("no_cd", "nested_l1", "learned_sparse_agp")
+            }
+            return {
+                "name": name,
+                "settings": {
+                    "steps": steps,
+                    "timestep": 1.0 / steps,
+                    "mps_max_bond": mps_bond,
+                    "mps_cutoff": 1.0e-10,
+                    "mpo_max_bond": 64,
+                    "mpo_cutoff": 1.0e-12,
+                    "time_window_size": 1,
+                    "time_axis_position": 2,
+                },
+                "results": results,
+            }
+
+        assessment = assess_independent_mpo_convergence(
+            [
+                case("time_coarse", steps=8, mps_bond=64, energy_shift=0.01),
+                case("state_coarse", steps=16, mps_bond=32, energy_shift=0.005),
+                case("fine", steps=16, mps_bond=64),
+            ],
+            convergence_pairs={
+                "timestep": ("time_coarse", "fine"),
+                "state": ("state_coarse", "fine"),
+            },
+            energy_atol=0.05,
+            fidelity_atol=0.02,
+        )
+
+        self.assertEqual(assessment["status"], "pass", assessment)
+        self.assertEqual(assessment["timestep"]["status"], "pass")
+        self.assertEqual(assessment["state"]["status"], "pass")
+
+    def test_independent_mpo_convergence_rejects_confounded_pair(self):
+        common_results = {
+            protocol: {"final_energy": -2.0, "ground_state_fidelity": 0.4}
+            for protocol in ("no_cd", "nested_l1", "learned_sparse_agp")
+        }
+        resolutions = [
+            {
+                "name": "coarse",
+                "settings": {
+                    "steps": 8,
+                    "timestep": 0.125,
+                    "mps_max_bond": 32,
+                    "mps_cutoff": 1.0e-9,
+                    "mpo_max_bond": 64,
+                    "mpo_cutoff": 1.0e-12,
+                    "time_window_size": 1,
+                    "time_axis_position": 2,
+                },
+                "results": common_results,
+            },
+            {
+                "name": "fine",
+                "settings": {
+                    "steps": 16,
+                    "timestep": 0.0625,
+                    "mps_max_bond": 64,
+                    "mps_cutoff": 1.0e-10,
+                    "mpo_max_bond": 64,
+                    "mpo_cutoff": 1.0e-12,
+                    "time_window_size": 1,
+                    "time_axis_position": 2,
+                },
+                "results": common_results,
+            },
+        ]
+
+        assessment = assess_independent_mpo_convergence(
+            resolutions,
+            convergence_pairs={
+                "timestep": ("coarse", "fine"),
+                "state": ("coarse", "fine"),
+            },
+            energy_atol=0.05,
+            fidelity_atol=0.02,
+        )
+
+        self.assertEqual(assessment["status"], "not_tested")
+        self.assertEqual(assessment["timestep"]["status"], "not_comparable")
+        self.assertEqual(assessment["state"]["status"], "not_comparable")
+
+    def test_direct_full_support_compression_gate_does_not_require_temporal_modes(self):
+        direct_diagnostics = {
+            "status": "ok",
+            "representation": "direct_time_full_support",
+            "operator_gate_status": "pass",
+            "mpo_action_status": "pass",
+            "mpo_action_error": 0.0,
+            "resource_statuses": {"dynamic_mpo_assembly": "ok"},
+            "operator_certificates": [
+                {
+                    "source_completeness_status": "pass",
+                    "operator_gate_status": "pass",
+                    "max_relative_action_error_upper_bound": 0.0,
+                }
+            ],
+        }
+        baseline_diagnostics = {
+            "status": "ok",
+            "representation": "temporal_mode_block_sum",
+            "temporal_rank": 1,
+            "temporal_retained_norm": 1.0,
+            "static_mpo_compression": {"h0": {"status": "ok"}},
+            "resource_statuses": {"dynamic_mpo_assembly": "ok"},
+            "mpo_action_status": "measured",
+            "mpo_action_error": 0.0,
+        }
+
+        result = assess_mpo_compression(
+            {
+                "no_cd": {"mps_diagnostics": baseline_diagnostics},
+                "nested_l1": {"mps_diagnostics": baseline_diagnostics},
+                "learned_sparse_agp": {"mps_diagnostics": direct_diagnostics},
+            },
+            action_error_max=1.0e-3,
+        )
+
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual(result["protocols"]["learned_sparse_agp"]["temporal"], "not_applicable")
+        self.assertEqual(result["protocols"]["learned_sparse_agp"]["source_completeness"], "pass")
+
+    def test_joint_time_full_support_gate_uses_joint_operator_certificate(self):
+        joint_diagnostics = {
+            "status": "ok",
+            "representation": "joint_time_full_support",
+            "operator_gate_status": "pass",
+            "source_completeness_status": "pass",
+            "operator_certificate": {
+                "status": "pass",
+                "coefficient_status": "pass",
+                "action_status": "pass",
+                "max_relative_action_error_upper_bound": 4.0e-4,
+            },
+            "resource_statuses": {
+                "joint_time_pauli_compression": "ok",
+                "dynamic_mpo_slicing": "ok",
+            },
+        }
+        baseline_diagnostics = {
+            "status": "ok",
+            "representation": "temporal_mode_block_sum",
+            "temporal_rank": 1,
+            "temporal_retained_norm": 1.0,
+            "static_mpo_compression": {"h0": {"status": "ok"}},
+            "resource_statuses": {"dynamic_mpo_assembly": "ok"},
+            "mpo_action_status": "measured",
+            "mpo_action_error": 0.0,
+        }
+
+        result = assess_mpo_compression(
+            {
+                "no_cd": {"mps_diagnostics": baseline_diagnostics},
+                "nested_l1": {"mps_diagnostics": baseline_diagnostics},
+                "learned_sparse_agp": {"mps_diagnostics": joint_diagnostics},
+            },
+            action_error_max=1.0e-3,
+        )
+
+        self.assertEqual(result["status"], "pass", result)
+        learned = result["protocols"]["learned_sparse_agp"]
+        self.assertEqual(learned["temporal"], "not_applicable")
+        self.assertEqual(learned["dynamic_mpo"], "pass")
+        self.assertEqual(learned["mpo_action"], "pass")
+
+    def test_finite_action_upper_bound_can_certify_numerically_unresolved_probe(self):
+        diagnostics = {
+            "status": "ok",
+            "representation": "temporal_mode_block_sum",
+            "temporal_rank": 1,
+            "temporal_retained_norm": 1.0,
+            "static_mpo_compression": {"h0": {"status": "ok"}},
+            "resource_statuses": {"dynamic_mpo_assembly": "ok"},
+            "mpo_action_status": "numerically_unresolved",
+            "mpo_action_error": 9.0e-5,
+            "mpo_action_diagnostics": {
+                "status": "numerically_unresolved",
+                "max_relative_action_error_upper_bound": 9.0e-5,
+            },
+        }
+
+        passed = assess_mpo_compression(
+            {"no_cd": {"mps_diagnostics": diagnostics}},
+            action_error_max=1.0e-3,
+        )
+        failed = assess_mpo_compression(
+            {"no_cd": {"mps_diagnostics": diagnostics}},
+            action_error_max=1.0e-5,
+        )
+
+        self.assertEqual(passed["protocols"]["no_cd"]["mpo_action"], "pass")
+        self.assertEqual(failed["protocols"]["no_cd"]["mpo_action"], "fail")
 
     def test_certification_rejects_ablation_and_incomplete_mpo_resolution_ladders(self):
         common = {

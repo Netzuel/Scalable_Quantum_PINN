@@ -75,22 +75,23 @@ conda run --no-capture-output -n torch-mps python -u \
   --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q156/sweep_test/config.json
 ```
 
-The historical validator configuration uses a symmetric Pauli-product formula
-and quimb MPS compression. It compares 24 steps/bond 32/cutoff `1e-9` with 48
-steps/bond 64/cutoff `1e-10`, keeping a reduced learned support fixed at 2048
-terms. This is a deployment ablation, not canonical validation of the trained
-32768-term PINN operator. Under `Rules.md`, canonical tensor-network validation
-must keep all 32768 learned terms fixed across the numerical ladder.
+The canonical validator keeps all 32,768 learned terms and constructs a
+joint-time full-support MPO for two-site TDVP. It separates timestep
+convergence (24 versus 48 steps at MPS bond 64) from state convergence (bonds
+32 versus 64 at 48 steps). MPO compression, source completeness, sampled
+operator action, timestep convergence, and state convergence must all pass.
 
 The retained MPS summary and PDF are written under the round-20 checkpoint:
 
 ```text
-mps_validation/Models_Data/mps_physical_validation_summary.json
-mps_validation/Images/physical_method_comparison_table.pdf
+mpo_validation/Models_Data/mps_physical_validation_summary.json
+mpo_validation/Images/physical_method_comparison_table.pdf
 ```
 
-This is a scalable approximate dynamical validation, not an exact q156
-statevector and not a proof that the omitted AGP support is negligible.
+The fine full-support result reaches `E(T)=-201.390146` and ground fidelity
+`0.2394617`, versus `E_0=-209.6`. This is a convergence-gated scalable
+dynamical validation, not an exact q156 statevector and not a proof that Pauli
+strings outside the trained AGP support are negligible.
 
 ## Learned-Support Diagnostic
 
@@ -104,8 +105,8 @@ mps_support_sweep/Models_Data/support_sweep_summary.json
 ```
 
 The diagnostic identifies 8192 terms as the smallest tested reduced deployment
-that passes both the `5%` within-output support plateau and the coarse/fine MPS
-convergence gate. This is an ablation result only. The full 32768-term support
-has a coarse result but no fine-resolution partner, so canonical physical
-validation remains `not tested`. Pauli strings absent from the trained AGP
-support remain outside both conclusions.
+that passes both the `5%` within-output support plateau and its coarse/fine MPS
+convergence gate. This remains an ablation result only. The separate canonical
+ladder now validates all 32,768 learned terms at both timestep resolutions and
+both state-bond resolutions. Pauli strings absent from the trained AGP support
+remain outside both conclusions.

@@ -110,6 +110,8 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             "tests/test_ising_ground_state_solver.py",
             "tests/test_agp_mps_validation.py",
             "tests/test_agp_mpo_backend.py",
+            "tests/test_agp_tn_regression_matrix.py",
+            "tests/test_agp_tn_router.py",
             "tests/test_agp_joint_calibration.py",
             "tests/test_agp_support_swap.py",
             "tests/test_qiskit_hamiltonian_generator.py",
@@ -261,7 +263,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         self.assertEqual(tensor_validation["coefficient_threshold"], 0.0)
         self.assertEqual(
             [case["learned_terms"] for case in tensor_validation["resolutions"]],
-            [32768, 32768],
+            [32768, 32768, 32768, 32768],
         )
         self.assertNotIn("scalable_validation", q20)
         self.assertNotIn("hydrogen_energy_validation", q20)
@@ -313,10 +315,21 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         self.assertTrue(tensor_validation["enabled"])
         self.assertEqual(tensor_validation["operator_grouping"], "support")
         self.assertEqual(tensor_validation["coefficient_threshold"], 0.0)
+        validation_ladder = [
+            case
+            for case in tensor_validation["resolutions"]
+            if not case.get("preflight_only", False)
+        ]
         self.assertEqual(
-            [case["learned_terms"] for case in tensor_validation["resolutions"]],
-            [32768, 32768],
+            [case["learned_terms"] for case in validation_ladder],
+            [32768, 32768, 32768],
         )
+        preflight = [
+            case
+            for case in tensor_validation["resolutions"]
+            if case.get("preflight_only", False)
+        ]
+        self.assertEqual([case["learned_terms"] for case in preflight], [32768])
 
     def test_q156_config_uses_scalable_twenty_round_curriculum(self):
         config_path = ISING_SCENARIO_DIR / "q156/sweep_test/config.json"
@@ -333,6 +346,39 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         exact_reference = ROOT / payload["scalable_validation"]["exact_final_ground_reference"]
         self.assertTrue(exact_reference.is_file(), exact_reference)
         self.assertEqual(len(payload["scalable_validation"]["ground_bitstring"]), 156)
+
+    def test_diagonal_ising_tensor_network_configs_use_joint_full_support_ladders(self):
+        for q in (15, 20, 156):
+            with self.subTest(q=q):
+                config_path = ISING_SCENARIO_DIR / f"q{q}/sweep_test/config.json"
+                payload = json.loads(config_path.read_text(encoding="utf-8"))
+                validation = payload["tensor_network_validation"]
+                backend = validation["mpo_backend"]
+                self.assertTrue(validation["enabled"])
+                self.assertEqual(validation["output_dir"], "mpo_validation")
+                self.assertEqual(backend["name"], "tenpy_tdvp_mpo")
+                self.assertEqual(backend["integrator"], "tdvp")
+                self.assertEqual(backend["representation"], "joint_time_full_support")
+                self.assertEqual(validation["coefficient_threshold"], 0.0)
+                preflight = [
+                    case
+                    for case in validation["resolutions"]
+                    if case.get("preflight_only", False)
+                ]
+                canonical = [
+                    case
+                    for case in validation["resolutions"]
+                    if not case.get("preflight_only", False)
+                ]
+                self.assertEqual(len(preflight), 1)
+                self.assertEqual(len(canonical), 3)
+                self.assertTrue(
+                    all(case["learned_terms"] == 32768 for case in validation["resolutions"])
+                )
+                self.assertEqual(
+                    set(validation["convergence_pairs"]),
+                    {"timestep", "state"},
+                )
 
     def test_q15_support_selection_is_configured_not_script_specific(self):
         config_path = ISING_SCENARIO_DIR / "q15/sweep_test/config.json"
