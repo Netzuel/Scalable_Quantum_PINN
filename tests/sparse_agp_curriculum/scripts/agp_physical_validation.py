@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from utils import SparsePauliOperator, _commutator_pauli_labels_unchecked, load_pauli_hamiltonian_pair  # noqa: E402
 from scripts.agp_plot_annotations import plot_physical_comparison_table  # noqa: E402
+from scripts.agp_resource_policy import resolve_resource_budget  # noqa: E402
 from agp_validation_identity import build_validation_identity  # noqa: E402
 
 
@@ -642,35 +643,94 @@ def final_run_from_summary(config: dict[str, object]) -> Path:
     feedback = feedback if isinstance(feedback, dict) else {}
     base_agp_terms = int(feedback.get("base_agp_terms", 16384))
     rounds = int(feedback.get("iterations", 10))
-    add_terms = int(feedback.get("add_residual_terms_per_iteration", 1024))
+    physical = config.get("physical", {})
+    physical = physical if isinstance(physical, dict) else {}
+    physical_parameters = physical.get("parameters", {})
+    physical_parameters = physical_parameters if isinstance(physical_parameters, dict) else {}
+    q = int(physical_parameters.get("num_qubits", 1))
+    add_request = feedback.get("add_residual_terms_per_iteration", 1024)
+    add_terms = (
+        resolve_resource_budget(
+            add_request,
+            q=q,
+            capacity=4**q,
+            name="holdout_feedback.add_residual_terms_per_iteration",
+        ).realized
+        if isinstance(add_request, Mapping)
+        else int(add_request)
+    )
     initial_residual = int(config.get("support_sweep", {}).get("residual_top_k", 2048))  # type: ignore[union-attr]
     unseen_batches = int(feedback.get("unseen_residual_batches_after_final_iteration", 1))
     residual_request = feedback.get("holdout_residual_top_k", "auto")
     if str(residual_request).lower() == "auto":
         residual_top_k = initial_residual + (rounds + unseen_batches) * add_terms
+    elif isinstance(residual_request, Mapping):
+        residual_top_k = resolve_resource_budget(
+            residual_request,
+            q=q,
+            capacity=4**q,
+            name="holdout_feedback.holdout_residual_top_k",
+        ).realized
     else:
         residual_top_k = int(residual_request)
     output_root = RUN_DIR / str(feedback.get("output_root", "runs/fixed_k_holdout_feedback_v1"))
     output_dir = output_root / f"agp_{base_agp_terms}_residual_{residual_top_k}_add_{add_terms}_rounds_{rounds}"
     validation = config.get("physical_validation", {})
     validation = validation if isinstance(validation, dict) else {}
-    if str(validation.get("trained_run_selection", "")).lower() == "best_holdout_residual":
-        best = best_residual_run_from_summary(output_dir=output_dir, residual_top_k=residual_top_k)
-        if best is not None:
-            return best
-    refined = preferred_refinement_run_from_summary(output_dir=output_dir, residual_top_k=residual_top_k)
-    if refined is not None:
-        return refined
-    expected = output_dir / "rounds" / f"round_{rounds:02d}"
-    if expected.is_dir():
-        return expected
     matches = sorted(output_root.glob(f"agp_{base_agp_terms}_residual_*_add_*_rounds_{rounds}"))
-    if matches:
-        refined = preferred_refinement_run_from_summary(output_dir=matches[-1], residual_top_k=residual_top_k)
+    candidates = [output_dir] if output_dir.is_dir() else []
+    candidates.extend(path for path in reversed(matches) if path not in candidates)
+    for candidate in candidates:
+        if str(validation.get("trained_run_selection", "")).lower() == "best_holdout_residual":
+            best = best_residual_run_from_summary(output_dir=candidate, residual_top_k=residual_top_k)
+            if best is not None:
+                return best
+        has_gate_selection, gate_selected = gate_selected_run_from_summary(
+            output_dir=candidate,
+            residual_top_k=residual_top_k,
+        )
+        if has_gate_selection:
+            if gate_selected is not None:
+                return gate_selected
+            continue
+        refined = preferred_refinement_run_from_summary(output_dir=candidate, residual_top_k=residual_top_k)
         if refined is not None:
             return refined
-        return matches[-1] / "rounds" / f"round_{rounds:02d}"
-    return expected
+        expected = candidate / "rounds" / f"round_{rounds:02d}"
+        if expected.is_dir():
+            return expected
+    return output_dir / "rounds" / f"round_{rounds:02d}"
+
+
+def feedback_summary_path(*, output_dir: Path, residual_top_k: int) -> Path | None:
+    expected = output_dir / "Models_Data" / f"holdout_feedback_summary_residual_{residual_top_k}.json"
+    if expected.is_file():
+        return expected
+    matches = sorted((output_dir / "Models_Data").glob("holdout_feedback_summary_residual_*.json"))
+    return matches[0] if len(matches) == 1 else None
+
+
+def gate_selected_run_from_summary(
+    *,
+    output_dir: Path,
+    residual_top_k: int,
+) -> tuple[bool, Path | None]:
+    summary_path = feedback_summary_path(output_dir=output_dir, residual_top_k=residual_top_k)
+    if summary_path is None:
+        return False, None
+    payload = load_json(summary_path)
+    if "selected_run" not in payload:
+        return False, None
+    selected = payload.get("selected_run")
+    if not isinstance(selected, dict) or str(selected.get("status", "")).lower() != "accepted":
+        return True, None
+    run_value = selected.get("run_dir")
+    if not run_value:
+        return True, None
+    run_dir = Path(str(run_value))
+    if not run_dir.is_absolute():
+        run_dir = output_dir / run_dir
+    return True, run_dir if run_dir.is_dir() else None
 
 
 def metric_value(row: Mapping[str, object], *keys: str) -> float | None:
@@ -688,8 +748,8 @@ def metric_value(row: Mapping[str, object], *keys: str) -> float | None:
 
 
 def best_residual_run_from_summary(*, output_dir: Path, residual_top_k: int) -> Path | None:
-    summary_path = output_dir / "Models_Data" / f"holdout_feedback_summary_residual_{residual_top_k}.json"
-    if not summary_path.is_file():
+    summary_path = feedback_summary_path(output_dir=output_dir, residual_top_k=residual_top_k)
+    if summary_path is None:
         return None
     payload = load_json(summary_path)
     candidates: list[tuple[float, Path]] = []
@@ -761,12 +821,14 @@ def refinement_run_from_summary(
     summary_key: str,
     default_dir: str,
 ) -> Path | None:
-    summary_path = output_dir / "Models_Data" / f"holdout_feedback_summary_residual_{residual_top_k}.json"
-    if not summary_path.is_file():
+    summary_path = feedback_summary_path(output_dir=output_dir, residual_top_k=residual_top_k)
+    if summary_path is None:
         return None
     payload = load_json(summary_path)
     refinement = payload.get(summary_key, {})
     if not isinstance(refinement, dict) or not bool(refinement.get("enabled", False)):
+        return None
+    if "accepted" in refinement and not bool(refinement.get("accepted", False)):
         return None
     run_dir = output_dir / str(refinement.get("run_dir", default_dir))
     return run_dir if run_dir.is_dir() else None

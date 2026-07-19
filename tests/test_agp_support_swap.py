@@ -38,8 +38,12 @@ from agp_holdout_feedback import (  # noqa: E402
     merge_fixed_unseen_probe_metrics,
     parse_holdout_feedback_args,
     pau_transfer_stability_settings_from_feedback,
+    calibration_active_capacity,
     save_fixed_unseen_probe,
     select_residual_additions,
+    select_residual_additions_with_provenance,
+    resolve_feedback_addition_budget,
+    residual_stratification_settings_from_feedback,
     support_swap_settings_from_feedback,
     temporal_refinement_settings_from_feedback,
 )
@@ -211,6 +215,45 @@ class AGPSupportSwapTests(unittest.TestCase):
         )
 
         self.assertEqual([row["label"] for row in additions], ["ZI"])
+
+    def test_residual_addition_stratification_is_opt_in(self):
+        settings = residual_stratification_settings_from_feedback({})
+        self.assertFalse(settings["enabled"])
+
+        settings = residual_stratification_settings_from_feedback(
+            {
+                "residual_stratification": {
+                    "enabled": True,
+                    "locality_quotas": {"1": 2, "2": 2},
+                    "spatial_bins": 2,
+                    "seed": 17,
+                }
+            }
+        )
+        additions, provenance = select_residual_additions_with_provenance(
+            [
+                {"label": "XIIIIIII", "residual_rms": 10.0},
+                {"label": "IXIIIIII", "residual_rms": 9.0},
+                {"label": "IIIIIIXI", "residual_rms": 8.0},
+                {"label": "IIIIIIIX", "residual_rms": 7.0},
+                {"label": "XXIIIIII", "residual_rms": 6.0},
+                {"label": "IXXIIIII", "residual_rms": 5.0},
+                {"label": "IIIIIXXI", "residual_rms": 4.0},
+                {"label": "IIIIIIXX", "residual_rms": 3.0},
+            ],
+            current_residual_labels=set(),
+            add_terms=4,
+            min_rms=0.0,
+            q=8,
+            stratification=settings,
+        )
+
+        labels = [str(row["label"]) for row in additions]
+        orders = [sum(symbol != "I" for symbol in label) for label in labels]
+        self.assertEqual(orders.count(1), 2)
+        self.assertEqual(orders.count(2), 2)
+        self.assertTrue(provenance["enabled"])
+        self.assertEqual(provenance["selected_terms"], 4)
 
     def test_refresh_fixed_unseen_only_parser_selects_diagnostics_mode(self):
         args = parse_holdout_feedback_args(
@@ -389,6 +432,105 @@ class AGPSupportSwapTests(unittest.TestCase):
                             residual_top_k=2,
                         )
 
+    def test_normal_runner_rejects_existing_baseline_without_fixed_probe_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "feedback"
+            data_dir = output_dir / "Models_Data"
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "baseline checkpoint already exists.*before baseline training",
+            ):
+                assert_fixed_unseen_manifest_lifecycle(
+                    output_dir=output_dir,
+                    data_dir=data_dir,
+                    residual_top_k=2,
+                    baseline_checkpoint_present=True,
+                )
+
+    def test_main_rejects_existing_baseline_without_fixed_probe_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            scenario = Path(temporary)
+            config_path = scenario / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "physical": {
+                            "parameters": {
+                                "num_qubits": 2,
+                                "hamiltonian_source": "unused.json",
+                            }
+                        },
+                        "support_sweep": {
+                            "agp_terms": [1],
+                            "intermediate_top_k": 8,
+                            "residual_top_k": 1,
+                        },
+                        "holdout_feedback": {
+                            "base_agp_terms": 1,
+                            "holdout_residual_top_k": 2,
+                            "iterations": 0,
+                            "add_residual_terms_per_iteration": 0,
+                            "unseen_residual_batches_after_final_iteration": 0,
+                            "baseline_root": "runs/baselines",
+                            "output_root": "runs/feedback",
+                            "fixed_unseen_probes": {
+                                "enabled": True,
+                                "active_terms": 1,
+                                "null_terms": 1,
+                                "candidate_multiplier": 1,
+                                "max_candidate_terms": 8,
+                            },
+                        },
+                        "training": {
+                            "parameters": {
+                                "epochs": 1,
+                                "num_points": 2,
+                                "lr": 1.0e-4,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            baseline_checkpoint = (
+                scenario / "runs" / "baselines" / "agp_1" / "Models_Data" / "training_checkpoint.pt"
+            )
+            baseline_checkpoint.parent.mkdir(parents=True)
+            torch.save(
+                {
+                    "model_state_dict": {},
+                    "agp_labels": ["XI"],
+                    "residual_labels": ["XX"],
+                    "config": {},
+                },
+                baseline_checkpoint,
+            )
+            output_root = scenario / "runs" / "feedback"
+
+            with patch(
+                "agp_holdout_feedback.build_common_holdout_residual_labels",
+                return_value=(["XY", "YX", "YY", "ZZ"], 1),
+            ), patch(
+                "agp_holdout_feedback.fixed_unseen_reference_rms",
+                return_value=np.asarray([1.0, 1.0, 0.0, 0.0]),
+            ), patch(
+                "agp_holdout_feedback.load_pauli_hamiltonian_pair",
+                return_value=(None, None),
+            ), patch(
+                "agp_holdout_feedback.run_training",
+                side_effect=AssertionError("must not train"),
+            ), patch(
+                "agp_holdout_feedback.train_feedback_round",
+                side_effect=AssertionError("must not train"),
+            ), self.assertRaisesRegex(
+                RuntimeError,
+                "baseline checkpoint already exists.*before baseline training",
+            ):
+                agp_holdout_feedback.main(["--config", str(config_path)])
+
+            self.assertEqual(list(output_root.rglob("fixed_unseen_probe_labels.json")), [])
+
     def test_main_persists_fixed_unseen_lifecycle_and_resumes_with_same_manifest(self):
         row_fields = {
             "training_final_relative_residual": 0.5,
@@ -448,16 +590,6 @@ class AGPSupportSwapTests(unittest.TestCase):
             }
             config_path.write_text(json.dumps(payload), encoding="utf-8")
             baseline_checkpoint = scenario / "runs" / "baselines" / "agp_1" / "Models_Data" / "training_checkpoint.pt"
-            baseline_checkpoint.parent.mkdir(parents=True)
-            torch.save(
-                {
-                    "model_state_dict": {},
-                    "agp_labels": ["XI"],
-                    "residual_labels": ["XX"],
-                    "config": {},
-                },
-                baseline_checkpoint,
-            )
             certification_path = (
                 scenario
                 / "runs"
@@ -470,6 +602,24 @@ class AGPSupportSwapTests(unittest.TestCase):
             certification_path.write_text(json.dumps({"labels": ["ZI"]}) + "\n", encoding="utf-8")
             candidates = ["XY", "YX", "ZI", "IZ", "YY", "ZZ", "II", "ZX"]
             train_calls: list[Path] = []
+            baseline_train_calls: list[Path] = []
+            output_dir = scenario / "runs" / "feedback" / "agp_1_residual_2_add_1_rounds_1"
+            manifest_path = output_dir / "Models_Data" / "fixed_unseen_probe_labels.json"
+
+            def fake_run_training(_settings, run_dir, _payload):
+                self.assertTrue(manifest_path.is_file())
+                baseline_train_calls.append(run_dir)
+                checkpoint = run_dir / "Models_Data" / "training_checkpoint.pt"
+                checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    {
+                        "model_state_dict": {},
+                        "agp_labels": ["XI"],
+                        "residual_labels": ["XX"],
+                        "config": {},
+                    },
+                    checkpoint,
+                )
 
             def fake_train_feedback_round(**kwargs):
                 run_dir = kwargs["run_dir"]
@@ -512,6 +662,9 @@ class AGPSupportSwapTests(unittest.TestCase):
             argv = ["agp_holdout_feedback.py", "--config", str(config_path)]
             try:
                 with patch.object(sys, "argv", argv), patch(
+                    "agp_holdout_feedback.precompute_baseline_support_labels",
+                    return_value=(["XI"], ["XX"]),
+                ), patch(
                     "agp_holdout_feedback.build_common_holdout_residual_labels",
                     side_effect=lambda **kwargs: (candidates[: kwargs["residual_top_k"]], 1),
                 ), patch(
@@ -531,10 +684,11 @@ class AGPSupportSwapTests(unittest.TestCase):
                 ), patch(
                     "agp_holdout_feedback.train_feedback_round",
                     side_effect=fake_train_feedback_round,
+                ), patch(
+                    "agp_holdout_feedback.run_training",
+                    side_effect=fake_run_training,
                 ):
                     agp_holdout_feedback.main()
-                    output_dir = scenario / "runs" / "feedback" / "agp_1_residual_2_add_1_rounds_1"
-                    manifest_path = output_dir / "Models_Data" / "fixed_unseen_probe_labels.json"
                     summary_path = output_dir / "Models_Data" / "holdout_feedback_summary_residual_2.json"
                     first_manifest = manifest_path.read_bytes()
                     first_summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -592,6 +746,10 @@ class AGPSupportSwapTests(unittest.TestCase):
         self.assertNotIn("ZI", manifest["active_labels"] + manifest["null_labels"])
         self.assertIn(str(certification_path.resolve()), manifest["certification_probe_manifest_paths"])
         self.assertEqual(first_manifest, resumed_manifest)
+        self.assertEqual(
+            [path.resolve() for path in baseline_train_calls],
+            [(scenario / "runs" / "baselines" / "agp_1").resolve()],
+        )
         self.assertEqual(len(train_calls), 2)
         self.assertEqual(checkpoint_before, checkpoint_after)
         self.assertFalse(diagnostic_manifest["certification_eligible"])
@@ -619,6 +777,121 @@ class AGPSupportSwapTests(unittest.TestCase):
                 {key for key in summary["temporal_refinement"] if key.startswith("fixed_unseen_")},
                 set(FIXED_UNSEEN_ROW_FIELDS),
             )
+
+    def test_clean_run_persists_fixed_probe_manifest_before_baseline_training(self):
+        row = {
+            "training_final_relative_residual": 0.5,
+            "holdout_relative_residual": 0.5,
+            "unseen_relative_residual": 0.5,
+            "unseen_relative_residual_status": {"valid": True, "reason": "finite_reference"},
+            "seen_residual": 1.0,
+            "seen_relative_residual": 0.5,
+            "unseen_residual": 1.0,
+            "unseen_reference_residual": 2.0,
+            "unseen_residual_per_term": 1.0,
+            "unseen_residual_terms": 1,
+            "n_qubits": 2,
+            "agp_terms": 1,
+        }
+        fixed_metrics = {
+            "fixed_unseen_active_terms": 1,
+            "fixed_unseen_active_residual": 1.0,
+            "fixed_unseen_active_reference_residual": 2.0,
+            "fixed_unseen_active_relative": 0.5,
+            "fixed_unseen_active_status": {"valid": True, "reason": "finite_reference"},
+            "fixed_unseen_null_terms": 1,
+            "fixed_unseen_null_absolute_per_term": 0.0,
+            "fixed_unseen_null_scaled": 0.0,
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            scenario = Path(temporary)
+            config_path = scenario / "config.json"
+            payload = {
+                "physical": {"parameters": {"num_qubits": 2, "hamiltonian_source": "unused.json"}},
+                "support_sweep": {"agp_terms": [1], "intermediate_top_k": 8, "residual_top_k": 1},
+                "holdout_feedback": {
+                    "base_agp_terms": 1,
+                    "holdout_residual_top_k": 2,
+                    "iterations": 0,
+                    "add_residual_terms_per_iteration": 0,
+                    "unseen_residual_batches_after_final_iteration": 0,
+                    "baseline_root": "runs/baselines",
+                    "output_root": "runs/feedback",
+                    "fixed_unseen_probes": {
+                        "enabled": True,
+                        "active_terms": 1,
+                        "null_terms": 1,
+                        "candidate_multiplier": 1,
+                        "max_candidate_terms": 8,
+                    },
+                },
+                "training": {"parameters": {"epochs": 1, "num_points": 2, "lr": 1.0e-4}},
+            }
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            output_dir = scenario / "runs" / "feedback" / "agp_1_residual_2_add_0_rounds_0"
+            manifest_path = output_dir / "Models_Data" / "fixed_unseen_probe_labels.json"
+            baseline_run = scenario / "runs" / "baselines" / "agp_1"
+            manifest_seen_by_trainer: list[bool] = []
+
+            def fake_run_training(_settings, run_dir, _payload):
+                manifest_seen_by_trainer.append(manifest_path.is_file())
+                checkpoint = run_dir / "Models_Data" / "training_checkpoint.pt"
+                checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    {
+                        "model_state_dict": {},
+                        "agp_labels": ["XI"],
+                        "residual_labels": ["XX"],
+                        "config": {},
+                    },
+                    checkpoint,
+                )
+                return {"relative_residual": 0.5}
+
+            def fake_evaluate_one_run(**kwargs):
+                labels = list(kwargs["common_residual_labels"])
+                return {**row, "holdout_residual_terms": len(labels)}, [
+                    {"label": label, "residual_rms": 1.0}
+                    for label in labels
+                ]
+
+            old_feedback_run_dir = agp_holdout_feedback.RUN_DIR
+            old_baseline_run_dir = agp_baseline_train.RUN_DIR
+            try:
+                with patch.object(sys, "argv", ["agp_holdout_feedback.py", "--config", str(config_path)]), patch(
+                    "agp_holdout_feedback.precompute_baseline_support_labels",
+                    return_value=(["XI"], ["XX"]),
+                    create=True,
+                ), patch(
+                    "agp_holdout_feedback.build_common_holdout_residual_labels",
+                    return_value=(["XX", "XY", "YY", "II"], 1),
+                ), patch(
+                    "agp_holdout_feedback.fixed_unseen_reference_rms",
+                    return_value=np.asarray([1.0, 2.0, 1.0, 0.0]),
+                ), patch(
+                    "agp_holdout_feedback.load_pauli_hamiltonian_pair",
+                    return_value=(None, None),
+                ), patch(
+                    "agp_holdout_feedback.evaluate_one_run",
+                    side_effect=fake_evaluate_one_run,
+                ), patch(
+                    "agp_holdout_feedback.evaluate_fixed_unseen_probe",
+                    return_value=fixed_metrics,
+                ), patch(
+                    "agp_holdout_feedback.run_training",
+                    side_effect=fake_run_training,
+                ):
+                    agp_holdout_feedback.main()
+            finally:
+                agp_holdout_feedback.RUN_DIR = old_feedback_run_dir
+                agp_baseline_train.RUN_DIR = old_baseline_run_dir
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest_seen_by_trainer, [True])
+            self.assertTrue(manifest["certification_eligible"])
+            self.assertEqual(manifest["provenance"], "pre_training_fixed_probe")
+            self.assertTrue((baseline_run / "Models_Data" / "training_checkpoint.pt").is_file())
 
     def test_fixed_unseen_evaluator_returns_exact_prefixed_row_schema(self):
         probe = {
@@ -903,6 +1176,99 @@ class AGPSupportSwapTests(unittest.TestCase):
         self.assertEqual(settings.protect_top_fraction, 0.05)
         self.assertEqual(settings.new_gate_logit, 2.0)
 
+    def test_support_swap_terms_can_scale_per_qubit(self):
+        settings = support_swap_settings_from_feedback(
+            {
+                "support_swap": {
+                    "enabled": True,
+                    "terms_per_iteration": {
+                        "mode": "per_qubit",
+                        "per_qubit": 12.8,
+                        "minimum": 256,
+                    },
+                }
+            },
+            q=156,
+            capacity=32768,
+        )
+
+        self.assertEqual(settings.terms_per_iteration, 1997)
+        self.assertEqual(settings.resource_budget["requested"], 1997)
+        self.assertEqual(settings.resource_budget["realized"], 1997)
+
+    def test_support_swap_capacity_is_capped_by_the_resolved_active_target(self):
+        capacity, provenance = calibration_active_capacity(
+            {
+                "agp_calibration": {
+                    "enabled": True,
+                    "target_active_terms": {
+                        "mode": "per_qubit",
+                        "per_qubit": 4.0,
+                        "minimum": 8,
+                    },
+                }
+            },
+            q=20,
+            support_terms=1024,
+        )
+        settings = support_swap_settings_from_feedback(
+            {
+                "support_swap": {
+                    "enabled": True,
+                    "terms_per_iteration": {
+                        "mode": "per_qubit",
+                        "per_qubit": 10.0,
+                    },
+                }
+            },
+            q=20,
+            capacity=capacity,
+        )
+
+        self.assertEqual(capacity, 80)
+        self.assertEqual(provenance["realized"], 80)
+        self.assertEqual(settings.terms_per_iteration, 80)
+        self.assertIn("capacity", settings.resource_budget["clipping_reasons"])
+
+    def test_support_swap_stratification_is_opt_in_and_preserves_quotas(self):
+        settings = support_swap_settings_from_feedback(
+            {
+                "support_swap": {
+                    "enabled": True,
+                    "terms_per_iteration": 8,
+                    "stratification": {
+                        "enabled": True,
+                        "locality_quotas": {"1": 2, "2": 4, "3+": 2},
+                        "spatial_bins": 4,
+                        "seed": 19,
+                    },
+                }
+            }
+        )
+
+        self.assertEqual(
+            settings.stratification,
+            {
+                "enabled": True,
+                "locality_quotas": {"1": 2, "2": 4, "3+": 2},
+                "spatial_bins": 4,
+                "seed": 19,
+            },
+        )
+
+    def test_residual_addition_request_can_scale_per_qubit(self):
+        budget = resolve_feedback_addition_budget(
+            {
+                "mode": "per_qubit",
+                "per_qubit": 153.6,
+                "minimum": 3072,
+            },
+            q=156,
+        )
+
+        self.assertEqual(budget.requested, 23962)
+        self.assertEqual(budget.realized, 23962)
+
     def test_temporal_refinement_settings_are_read_from_holdout_feedback_config(self):
         settings = temporal_refinement_settings_from_feedback(
             {
@@ -993,6 +1359,8 @@ class AGPSupportSwapTests(unittest.TestCase):
                     {"label": "E", "score": 2.0},
                     {"label": "F", "score": 1.0},
                 ],
+                "resource_budget": {"mode": "per_qubit", "realized": 2},
+                "stratification": {"enabled": True, "realized_terms": 2},
                 "reason": "planned",
             },
             preview_terms=2,
@@ -1004,6 +1372,8 @@ class AGPSupportSwapTests(unittest.TestCase):
         self.assertEqual(compact["removed_labels"], ["A", "B"])
         self.assertEqual(compact["added_labels"], ["D", "E"])
         self.assertEqual([row["label"] for row in compact["candidate_rows"]], ["D", "E"])
+        self.assertEqual(compact["resource_budget"]["realized"], 2)
+        self.assertEqual(compact["stratification"]["realized_terms"], 2)
 
     def test_fixed_k_support_swap_replaces_weak_terms_with_hard_residual_candidates(self):
         h0 = SparsePauliOperator({"XI": -1.0, "IX": -1.0})
@@ -1030,6 +1400,12 @@ class AGPSupportSwapTests(unittest.TestCase):
             max_swaps=2,
             candidate_pool_size=16,
             protect_top_fraction=0.25,
+            stratification={
+                "enabled": True,
+                "locality_quotas": {"1": 1, "2": 1},
+                "spatial_bins": 2,
+                "seed": 5,
+            },
         )
 
         self.assertEqual(plan["swap_count"], 2)
@@ -1038,6 +1414,8 @@ class AGPSupportSwapTests(unittest.TestCase):
         self.assertTrue(set(plan["removed_labels"]).issubset({"XI", "IY"}))
         self.assertTrue(set(plan["added_labels"]).isdisjoint(current))
         self.assertTrue(set(plan["added_labels"]).issubset(set(plan["candidate_labels"])))
+        self.assertTrue(plan["stratification"]["enabled"])
+        self.assertEqual(plan["stratification"]["requested_terms"], 2)
 
     def test_trainable_state_remap_preserves_retained_output_rows_and_initializes_new_terms(self):
         old_labels = ["AA", "BB", "CC"]

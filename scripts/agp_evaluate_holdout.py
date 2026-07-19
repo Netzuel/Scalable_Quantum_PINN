@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 from projected_sparse_training_common import (  # noqa: E402
     ProjectedSparseLossWeights,
     build_projected_support,
-    load_body_state_compatible,
+    load_projected_checkpoint_weights,
     make_projected_model,
     select_device,
 )
@@ -36,23 +36,7 @@ def load_json(path: Path) -> dict[str, object]:
 
 
 def load_body_weights(model: torch.nn.Module, checkpoint: dict[str, object]) -> None:
-    state = checkpoint["model_state_dict"]
-    body_state = {
-        key.removeprefix("body."): value
-        for key, value in state.items()
-        if key.startswith("body.")
-    }
-    load_body_state_compatible(model.body, body_state)
-    if "agp_log_gamma" in state and "agp_gate_logits" in state:
-        support_metadata = checkpoint.get("config", {}).get("support", {})
-        support_metadata = support_metadata if isinstance(support_metadata, dict) else {}
-        calibration = support_metadata.get("agp_calibration", {})
-        calibration = calibration if isinstance(calibration, dict) else {}
-        device = next(model.parameters()).device
-        model.agp_gate_temperature = float(calibration.get("gate_temperature", 1.0))
-        model.agp_target_active_terms = int(calibration.get("target_active_terms", len(model.agp_labels)))
-        model.agp_log_gamma = torch.nn.Parameter(state["agp_log_gamma"].detach().to(device).float().reshape(()))
-        model.agp_gate_logits = torch.nn.Parameter(state["agp_gate_logits"].detach().to(device).float().flatten())
+    load_projected_checkpoint_weights(model, checkpoint)
 
 
 def norm_sq_subset(values: torch.Tensor, indices: list[int]) -> torch.Tensor:

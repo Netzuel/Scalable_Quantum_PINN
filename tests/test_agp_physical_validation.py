@@ -20,7 +20,7 @@ for path in (SCRIPTS_DIR, FRAMEWORK_SCRIPTS_DIR, TESTS_DIR, ROOT):
         sys.path.insert(0, str(path))
 
 from agp_support import KrylovSupportConfig, select_krylov_agp_labels
-from agp_holdout_feedback import fit_residual_budget_to_available
+from agp_holdout_feedback import fit_residual_budget_to_available, resolve_holdout_residual_top_k
 from agp_holdout_study import relative_metric_with_reference_status
 from agp_plot_annotations import (
     find_physical_summary_for_images_dir,
@@ -292,6 +292,59 @@ class AGPPhysicalValidationTests(unittest.TestCase):
             selected = find_physical_summary_for_images_dir(images_dir)
 
             self.assertEqual(selected, canonical)
+
+    def test_deep_certified_deployment_summary_is_discovered(self):
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            images_dir = run_dir / "Images"
+            shallow = (
+                run_dir
+                / "mpo_validation"
+                / "Models_Data"
+                / "mps_physical_validation_summary.json"
+            )
+            deep = (
+                run_dir
+                / "rounds"
+                / "round_20"
+                / "deployment_attribution"
+                / "dense_257_export"
+                / "mpo_validation"
+                / "Models_Data"
+                / "mps_physical_validation_summary.json"
+            )
+            images_dir.mkdir(parents=True)
+            shallow.parent.mkdir(parents=True)
+            deep.parent.mkdir(parents=True)
+            shallow.write_text(
+                json.dumps(
+                    {
+                        "execution_mode": "validation",
+                        "certification": {"status": "pass"},
+                        "results": {
+                            "learned_sparse_agp": {"ground_state_fidelity": 0.2}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            deep.write_text(
+                json.dumps(
+                    {
+                        "execution_mode": "validation",
+                        "certification": {"status": "pass"},
+                        "results": {
+                            "learned_sparse_agp": {"ground_state_fidelity": 0.3}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.utime(deep, (shallow.stat().st_mtime + 10, shallow.stat().st_mtime + 10))
+
+            selected = find_physical_summary_for_images_dir(images_dir)
+
+            self.assertEqual(selected, deep)
 
     def test_converged_full_support_tn_outranks_truncated_statevector_for_hcd(self):
         with TemporaryDirectory() as tmp:
@@ -728,6 +781,45 @@ class AGPPhysicalValidationTests(unittest.TestCase):
         self.assertEqual(fitted["final_round_expected_unseen_terms"], 429)
         self.assertEqual(fitted["residual_budget_fit_status"], "auto_reduced_additions_to_preserve_rounds")
 
+    def test_feedback_q_budget_accepts_per_qubit_resource_policy(self):
+        resolved, budget = resolve_holdout_residual_top_k(
+            {"mode": "per_qubit", "per_qubit": 4096.0},
+            q=156,
+            capacity=4**156,
+            initial_residual_terms=4096,
+            rounds=20,
+            add_residual_terms=3072,
+            unseen_batches_after_final_iteration=1,
+        )
+
+        self.assertEqual(resolved, 638976)
+        self.assertEqual(budget["mode"], "per_qubit")
+        self.assertEqual(budget["resource_budget"]["requested"], 638976)
+        self.assertEqual(budget["resource_budget"]["realized"], 638976)
+
+    def test_feedback_budget_reserves_immutable_probe_terms_before_fitting_rounds(self):
+        budget = {
+            "mode": "auto",
+            "resolved_holdout_residual_top_k": 1000,
+        }
+
+        residual_top_k, add_terms, fitted = fit_residual_budget_to_available(
+            residual_top_k=1000,
+            add_residual_terms=100,
+            residual_budget=budget,
+            available_residual_terms=1000,
+            reserved_probe_terms=160,
+            initial_residual_terms=200,
+            rounds=5,
+            unseen_batches_after_final_iteration=1,
+        )
+
+        self.assertEqual(residual_top_k, 840)
+        self.assertEqual(add_terms, 100)
+        self.assertEqual(fitted["reserved_fixed_unseen_probe_terms"], 160)
+        self.assertEqual(fitted["available_feedback_residual_terms"], 840)
+        self.assertEqual(fitted["final_round_expected_unseen_terms"], 140)
+
     def test_relative_metric_marks_zero_reference_as_invalid(self):
         value, status = relative_metric_with_reference_status(
             residual=42.0,
@@ -780,6 +872,43 @@ class AGPPhysicalValidationTests(unittest.TestCase):
             finally:
                 agp_physical_validation.RUN_DIR = old_run_dir
 
+    def test_final_run_discovers_fitted_q_aware_budget_directory(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_run_dir = agp_physical_validation.RUN_DIR
+            agp_physical_validation.RUN_DIR = root
+            try:
+                output_dir = root / "runs" / "q_aware" / "agp_8_residual_18_add_3_rounds_2"
+                expected = output_dir / "rounds" / "round_02"
+                expected.mkdir(parents=True)
+                data_dir = output_dir / "Models_Data"
+                data_dir.mkdir(parents=True)
+                (data_dir / "holdout_feedback_summary_residual_18.json").write_text(
+                    json.dumps({"rows": [{"feedback_round": 2, "run_dir": "rounds/round_02"}]}),
+                    encoding="utf-8",
+                )
+                config = {
+                    "physical": {"parameters": {"num_qubits": 10}},
+                    "support_sweep": {"residual_top_k": 4},
+                    "holdout_feedback": {
+                        "base_agp_terms": 8,
+                        "iterations": 2,
+                        "add_residual_terms_per_iteration": {
+                            "mode": "per_qubit",
+                            "per_qubit": 1.0,
+                        },
+                        "holdout_residual_top_k": {
+                            "mode": "per_qubit",
+                            "per_qubit": 2.0,
+                        },
+                        "output_root": "runs/q_aware",
+                    },
+                }
+
+                self.assertEqual(final_run_from_summary(config), expected)
+            finally:
+                agp_physical_validation.RUN_DIR = old_run_dir
+
     def test_final_run_prefers_adaptive_temporal_refinement_over_temporal_refinement(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -824,6 +953,55 @@ class AGPPhysicalValidationTests(unittest.TestCase):
                 }
 
                 self.assertEqual(final_run_from_summary(config), adaptive)
+            finally:
+                agp_physical_validation.RUN_DIR = old_run_dir
+
+    def test_final_run_uses_gate_selected_refinement_and_skips_rejected_adaptive(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_run_dir = agp_physical_validation.RUN_DIR
+            agp_physical_validation.RUN_DIR = root
+            try:
+                output_dir = root / "runs" / "refined" / "agp_8_residual_16_add_2_rounds_3"
+                temporal = output_dir / "temporal_refinement"
+                adaptive = output_dir / "adaptive_temporal_refinement"
+                temporal.mkdir(parents=True)
+                adaptive.mkdir(parents=True)
+                data_dir = output_dir / "Models_Data"
+                data_dir.mkdir(parents=True)
+                summary = {
+                    "selected_run": {
+                        "status": "accepted",
+                        "source": "temporal_refinement",
+                        "run_dir": "temporal_refinement",
+                    },
+                    "temporal_refinement": {
+                        "enabled": True,
+                        "accepted": True,
+                        "run_dir": "temporal_refinement",
+                    },
+                    "adaptive_temporal_refinement": {
+                        "enabled": True,
+                        "accepted": False,
+                        "run_dir": "adaptive_temporal_refinement",
+                    },
+                }
+                (data_dir / "holdout_feedback_summary_residual_16.json").write_text(
+                    json.dumps(summary),
+                    encoding="utf-8",
+                )
+                config = {
+                    "support_sweep": {"residual_top_k": 10},
+                    "holdout_feedback": {
+                        "base_agp_terms": 8,
+                        "iterations": 3,
+                        "add_residual_terms_per_iteration": 2,
+                        "holdout_residual_top_k": 16,
+                        "output_root": "runs/refined",
+                    },
+                }
+
+                self.assertEqual(final_run_from_summary(config), temporal)
             finally:
                 agp_physical_validation.RUN_DIR = old_run_dir
 

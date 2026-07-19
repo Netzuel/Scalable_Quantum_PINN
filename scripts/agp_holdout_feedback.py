@@ -22,6 +22,7 @@ from agp_holdout_study import (  # noqa: E402
     build_common_holdout_residual_labels,
     evaluate_one_run,
     feedback_threshold_decision,
+    fixed_unseen_gate,
     fixed_unseen_plot_series,
     load_json,
     moving_unseen_diagnostics,
@@ -29,9 +30,14 @@ from agp_holdout_study import (  # noqa: E402
 )
 from agp_residual_probes import (  # noqa: E402
     FixedUnseenProbeConfig,
+    fixed_unseen_manifest_contract as residual_probe_manifest_contract,
     fixed_unseen_metrics,
+    partition_fixed_unseen_candidates,
     select_fixed_unseen_probes,
 )
+from agp_resource_policy import resolve_resource_budget  # noqa: E402
+from agp_stratified_support import stratified_ranked_selection  # noqa: E402
+from agp_support import build_configured_projected_support  # noqa: E402
 from projected_sparse_training_common import (  # noqa: E402
     LABEL_FS,
     LEGEND_FS,
@@ -66,6 +72,7 @@ from agp_baseline_train import (  # noqa: E402
     model_config_from_payload,
     run_training,
     settings_for_support,
+    support_selection_payload,
 )
 from models import PadeActivation  # noqa: E402
 from utils import load_pauli_hamiltonian_pair  # noqa: E402
@@ -101,6 +108,8 @@ class SupportSwapSettings:
     candidate_pool_multiplier: int = 16
     protect_top_fraction: float = 0.02
     new_gate_logit: float = 2.0
+    resource_budget: dict[str, object] | None = None
+    stratification: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -135,19 +144,107 @@ class PauTransferStabilitySettings:
     fallback: str = "silu_rational_fit"
 
 
+def _stratification_settings(
+    raw: object,
+    *,
+    name: str,
+) -> dict[str, object]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping):
+        raise TypeError(f"{name} must be a mapping.")
+    locality_quotas = raw.get("locality_quotas", {})
+    if not isinstance(locality_quotas, Mapping):
+        raise TypeError(f"{name}.locality_quotas must be a mapping.")
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "locality_quotas": {
+            str(key): int(value)
+            for key, value in locality_quotas.items()
+        },
+        "spatial_bins": max(1, int(raw.get("spatial_bins", 1))),
+        "seed": int(raw.get("seed", 0)),
+    }
+
+
+def residual_stratification_settings_from_feedback(
+    feedback: Mapping[str, object],
+) -> dict[str, object]:
+    return _stratification_settings(
+        feedback.get("residual_stratification", {}),
+        name="holdout_feedback.residual_stratification",
+    )
+
+
+def calibration_active_capacity(
+    payload: Mapping[str, object],
+    *,
+    q: int,
+    support_terms: int,
+) -> tuple[int, dict[str, object]]:
+    calibration = payload.get("agp_calibration", {})
+    if not isinstance(calibration, Mapping) or not bool(calibration.get("enabled", False)):
+        target: int | Mapping[str, object] = int(support_terms)
+    else:
+        configured = calibration.get("target_active_terms")
+        target = int(support_terms) if configured is None else configured
+    budget = resolve_resource_budget(
+        target,
+        q=int(q),
+        capacity=int(support_terms),
+        name="agp_calibration.target_active_terms",
+    )
+    capacity = max(1, int(budget.realized))
+    provenance = budget.to_dict()
+    if capacity != int(budget.realized):
+        provenance["realized"] = capacity
+        provenance["clipping_reasons"] = tuple(budget.clipping_reasons) + (
+            "model_minimum",
+        )
+    return capacity, provenance
+
+
 def fixed_unseen_probe_settings_from_feedback(
     feedback: Mapping[str, object],
+    *,
+    q: int | None = None,
+    capacity: int | None = None,
 ) -> FixedUnseenProbeConfig:
     raw = feedback.get("fixed_unseen_probes", {})
     if not isinstance(raw, Mapping):
         return FixedUnseenProbeConfig()
+    def resolve_terms(value: object, name: str) -> tuple[int, dict[str, object] | None]:
+        if not isinstance(value, Mapping):
+            return max(0, int(value)), None
+        if q is None or capacity is None:
+            raise ValueError(f"q and capacity are required for q-aware {name}.")
+        budget = resolve_resource_budget(value, q=q, capacity=capacity, name=name)
+        return budget.realized, budget.to_dict()
+
+    active_terms, active_budget = resolve_terms(
+        raw.get("active_terms", 0),
+        "holdout_feedback.fixed_unseen_probes.active_terms",
+    )
+    null_terms, null_budget = resolve_terms(
+        raw.get("null_terms", 0),
+        "holdout_feedback.fixed_unseen_probes.null_terms",
+    )
+    reservation_mode = str(raw.get("reservation_mode", "post_holdout_tail")).strip().lower()
+    if reservation_mode not in {"post_holdout_tail", "pre_feedback_global"}:
+        raise ValueError(
+            "holdout_feedback.fixed_unseen_probes.reservation_mode must be "
+            "'post_holdout_tail' or 'pre_feedback_global'."
+        )
     return FixedUnseenProbeConfig(
         enabled=bool(raw.get("enabled", False)),
-        active_terms=max(0, int(raw.get("active_terms", 0))),
-        null_terms=max(0, int(raw.get("null_terms", 0))),
+        active_terms=active_terms,
+        null_terms=null_terms,
         reference_rms_threshold=max(0.0, float(raw.get("reference_rms_threshold", 1.0e-12))),
         seed=int(raw.get("seed", 0)),
         candidate_multiplier=max(1, int(raw.get("candidate_multiplier", 4))),
+        reservation_mode=reservation_mode,
+        active_resource_budget=active_budget,
+        null_resource_budget=null_budget,
     )
 
 
@@ -179,32 +276,24 @@ def build_fixed_unseen_probe_manifest(
         if certification_eligible
         else "historical_diagnostic_backfill"
     )
+    manifest["training_lifecycle"] = (
+        {
+            "probe_selection_phase": "before_optimizer_step",
+            "baseline_checkpoint_present": False,
+        }
+        if certification_eligible
+        else {
+            "probe_selection_phase": "historical_after_training",
+            "baseline_checkpoint_present": True,
+        }
+    )
     manifest["manifest_sha256"] = _stable_hash(manifest)
     return manifest
 
 
 def fixed_unseen_manifest_contract(payload: Mapping[str, object]) -> tuple[bool, str]:
     """Return whether a manifest satisfies the current immutable provenance contract."""
-
-    schema_version = payload.get("schema_version")
-    if not isinstance(schema_version, int) or schema_version < CURRENT_FIXED_UNSEEN_MANIFEST_SCHEMA:
-        return False, "legacy_fixed_unseen_manifest"
-    if schema_version != CURRENT_FIXED_UNSEEN_MANIFEST_SCHEMA:
-        return False, "unsupported_fixed_unseen_manifest_schema"
-    stored_hash = payload.get("manifest_sha256")
-    if not isinstance(stored_hash, str) or not stored_hash:
-        return False, "missing_manifest_sha256"
-    hashed_payload = {key: value for key, value in payload.items() if key != "manifest_sha256"}
-    if stored_hash != _stable_hash(hashed_payload):
-        return False, "invalid_fixed_unseen_manifest_hash"
-    eligible = payload.get("certification_eligible")
-    provenance = payload.get("provenance")
-    reason = payload.get("certification_reason")
-    if eligible is True and provenance == "pre_training_fixed_probe" and reason == "pre_training_fixed_probe":
-        return True, "pre_training_fixed_probe"
-    if eligible is False and provenance == "diagnostic_backfill" and reason == "historical_diagnostic_backfill":
-        return True, "historical_diagnostic_backfill"
-    return False, "invalid_fixed_unseen_provenance"
+    return residual_probe_manifest_contract(dict(payload))
 
 
 def _label_identity(labels: Collection[str]) -> dict[str, object]:
@@ -230,6 +319,7 @@ def fixed_unseen_probe_manifest_identity(
         "reference_rms_threshold": float(settings.reference_rms_threshold),
         "seed": int(settings.seed),
         "candidate_multiplier": int(settings.candidate_multiplier),
+        "reservation_mode": str(settings.reservation_mode),
         "requested_candidate_terms": int(requested_candidate_terms),
         "candidate_universe": _label_identity(candidate_universe_labels),
         "excluded_labels": _label_identity(sorted(str(label) for label in excluded_labels)),
@@ -295,6 +385,7 @@ def load_or_validate_fixed_unseen_probe(
             "reference_rms_threshold",
             "seed",
             "candidate_multiplier",
+            "reservation_mode",
             "requested_candidate_terms",
             "excluded_labels",
         ):
@@ -735,17 +826,45 @@ def load_checkpoint_labels(checkpoint_path: Path) -> tuple[list[str], list[str]]
     return [str(label) for label in checkpoint["agp_labels"]], [str(label) for label in checkpoint["residual_labels"]]
 
 
-def support_swap_settings_from_feedback(feedback: dict[str, object]) -> SupportSwapSettings:
+def support_swap_settings_from_feedback(
+    feedback: dict[str, object],
+    *,
+    q: int | None = None,
+    capacity: int | None = None,
+) -> SupportSwapSettings:
     raw = feedback.get("support_swap", {})
     if not isinstance(raw, dict):
         return SupportSwapSettings()
+    terms_spec = raw.get("terms_per_iteration", 0)
+    if isinstance(terms_spec, Mapping):
+        if q is None or capacity is None:
+            raise ValueError(
+                "q and capacity are required for a q-aware support_swap.terms_per_iteration policy."
+            )
+        resource_budget = resolve_resource_budget(
+            terms_spec,
+            q=q,
+            capacity=capacity,
+            name="support_swap.terms_per_iteration",
+        )
+        terms_per_iteration = resource_budget.realized
+        resource_payload: dict[str, object] | None = resource_budget.to_dict()
+    else:
+        terms_per_iteration = max(0, int(terms_spec))
+        resource_payload = None
+    stratification = _stratification_settings(
+        raw.get("stratification", {}),
+        name="holdout_feedback.support_swap.stratification",
+    )
     return SupportSwapSettings(
         enabled=bool(raw.get("enabled", False)),
-        terms_per_iteration=max(0, int(raw.get("terms_per_iteration", 0))),
+        terms_per_iteration=terms_per_iteration,
         start_round=max(1, int(raw.get("start_round", 2))),
         candidate_pool_multiplier=max(1, int(raw.get("candidate_pool_multiplier", 16))),
         protect_top_fraction=max(0.0, float(raw.get("protect_top_fraction", 0.02))),
         new_gate_logit=float(raw.get("new_gate_logit", 2.0)),
+        resource_budget=resource_payload,
+        stratification=stratification,
     )
 
 
@@ -885,6 +1004,10 @@ def compact_support_swap_plan(plan: dict[str, object] | None, *, preview_terms: 
     for key in ("protected_label_count", "protect_top_fraction"):
         if key in plan:
             compact[key] = plan[key]
+    for key in ("resource_budget", "stratification"):
+        value = plan.get(key)
+        if isinstance(value, Mapping):
+            compact[key] = copy.deepcopy(dict(value))
     return compact
 
 
@@ -937,7 +1060,27 @@ def select_residual_additions(
     add_terms: int,
     min_rms: float,
 ) -> list[dict[str, object]]:
-    additions: list[dict[str, object]] = []
+    additions, _ = select_residual_additions_with_provenance(
+        spectrum,
+        current_residual_labels,
+        excluded_labels=excluded_labels,
+        add_terms=add_terms,
+        min_rms=min_rms,
+    )
+    return additions
+
+
+def select_residual_additions_with_provenance(
+    spectrum: list[dict[str, object]],
+    current_residual_labels: set[str],
+    *,
+    excluded_labels: Collection[str] = (),
+    add_terms: int,
+    min_rms: float,
+    q: int | None = None,
+    stratification: Mapping[str, object] | None = None,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    candidates: list[dict[str, object]] = []
     excluded = {str(label) for label in excluded_labels}
     for row in spectrum:
         label = str(row["label"])
@@ -945,10 +1088,31 @@ def select_residual_additions(
             continue
         if float(row["residual_rms"]) < min_rms:
             continue
-        additions.append(row)
-        if len(additions) >= add_terms:
-            break
-    return additions
+        candidates.append(row)
+
+    budget = max(0, int(add_terms))
+    enabled = bool(stratification and stratification.get("enabled", False))
+    if enabled:
+        if q is None:
+            raise ValueError("q is required when residual-addition stratification is enabled.")
+        selection = stratified_ranked_selection(
+            candidates,
+            budget,
+            q=int(q),
+            locality_quotas=stratification.get("locality_quotas", {}),
+            spatial_bins=int(stratification.get("spatial_bins", 1)),
+            seed=int(stratification.get("seed", 0)),
+        )
+        return list(selection.selected_rows), selection.provenance
+
+    additions = candidates[:budget]
+    return additions, {
+        "enabled": False,
+        "requested_terms": budget,
+        "selected_terms": len(additions),
+        "candidate_terms": len(candidates),
+        "fill_rule": "global residual importance ranking",
+    }
 
 
 def make_support_with_residual_labels(
@@ -989,6 +1153,38 @@ def load_feedback_hamiltonian_pair(config):
         system=config.system,
         n_qubits=config.n_qubits,
         distance=config.distance,
+    )
+
+
+def precompute_baseline_support_labels(
+    payload: dict[str, object],
+    settings: ProjectedRunSettings,
+) -> tuple[list[str], list[str]]:
+    """Resolve deterministic baseline labels before any optimizer step."""
+
+    adaptive_active = (
+        settings.adaptive_enabled
+        and settings.adaptive_stages > 1
+        and settings.adaptive_growth_per_stage > 0
+    )
+    if adaptive_active:
+        raise RuntimeError(
+            "Certification-eligible fixed unseen probes require deterministic pre-training "
+            "baseline support; adaptive baseline support must be disabled or pre-reserved explicitly."
+        )
+    h0, h1 = load_feedback_hamiltonian_pair(settings.model)
+    support = build_configured_projected_support(
+        h0,
+        h1,
+        agp_top_k=settings.agp_top_k,
+        intermediate_top_k=settings.intermediate_top_k,
+        residual_top_k=settings.residual_top_k,
+        support_selection=support_selection_payload(payload),
+        stage=0,
+    )
+    return (
+        [str(label) for label in support["agp_labels"]],
+        [str(label) for label in support["residual_labels"]],
     )
 
 
@@ -1070,6 +1266,7 @@ def train_feedback_round(
     round_index: int,
     additions: list[dict[str, object]],
     support_swap_plan: dict[str, object] | None = None,
+    residual_addition_stratification: dict[str, object] | None = None,
     tau_override: torch.Tensor | None = None,
     temporal_sampling_metadata: dict[str, object] | None = None,
     pau_transfer_stability: PauTransferStabilitySettings | None = None,
@@ -1091,6 +1288,7 @@ def train_feedback_round(
 
     loss_weights = ProjectedSparseLossWeights(
         residual=settings.residual_weight,
+        residual_objective=settings.residual_objective,
         agp_l2=settings.agp_l2_weight,
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
@@ -1098,6 +1296,7 @@ def train_feedback_round(
         schedule_monotonic=settings.schedule_monotonic_weight,
         schedule_correction_l2=settings.schedule_correction_l2_weight,
         calibration_budget=settings.calibration_budget_weight,
+        calibration_budget_normalization=settings.calibration_budget_normalization,
         calibration_binary=settings.calibration_binary_weight,
         calibration_scale_l2=settings.calibration_scale_l2_weight,
     )
@@ -1163,6 +1362,9 @@ def train_feedback_round(
     metadata["feedback_round"] = round_index
     metadata["feedback_added_terms"] = additions
     metadata["feedback_added_term_count"] = len(additions)
+    metadata["residual_addition_stratification"] = dict(
+        residual_addition_stratification or {"enabled": False}
+    )
     metadata["support_swap"] = compact_support_swap_plan(support_swap_plan)
     metadata["pau_transfer_stability"] = transfer_metadata
     metadata["adaptive_enabled"] = False
@@ -1181,6 +1383,7 @@ def train_feedback_round(
             "gate_temperature": float(getattr(model, "agp_gate_temperature", 1.0)),
             "uses_ground_truth_observables": False,
             "objective": "projected_euler_lagrange_residual_with_trainable_scale_and_gates",
+            "target_active_budget": dict(getattr(model, "agp_target_active_budget", {})),
         }
 
     images_dir = run_dir / settings.path_images
@@ -1253,6 +1456,8 @@ def resolve_holdout_residual_top_k(
     rounds: int,
     add_residual_terms: int,
     unseen_batches_after_final_iteration: int,
+    q: int | None = None,
+    capacity: int | None = None,
 ) -> tuple[int, dict[str, object]]:
     """Resolve the holdout residual budget.
 
@@ -1271,9 +1476,22 @@ def resolve_holdout_residual_top_k(
 
     if raw_value is None:
         raw_value = "auto"
+    resource_budget: dict[str, object] | None = None
     if isinstance(raw_value, str) and raw_value.strip().lower() in {"auto", "automatic"}:
         resolved = automatic_budget
         mode = "auto"
+    elif isinstance(raw_value, Mapping):
+        if q is None or capacity is None:
+            raise ValueError("q and capacity are required for a q-aware holdout residual budget.")
+        resource = resolve_resource_budget(
+            raw_value,
+            q=q,
+            capacity=capacity,
+            name="holdout_feedback.holdout_residual_top_k",
+        )
+        resolved = resource.realized
+        mode = resource.mode
+        resource_budget = resource.to_dict()
     else:
         resolved = int(raw_value)
         mode = "explicit"
@@ -1284,7 +1502,7 @@ def resolve_holdout_residual_top_k(
             f"initial training residual size {initial_residual_terms}."
         )
 
-    return resolved, {
+    payload = {
         "mode": mode,
         "resolved_holdout_residual_top_k": resolved,
         "initial_residual_terms": initial_residual_terms,
@@ -1299,6 +1517,20 @@ def resolve_holdout_residual_top_k(
         ),
         "final_round_expected_unseen_terms": max(resolved - minimum_nonempty_unseen_budget, 0),
     }
+    if resource_budget is not None:
+        payload["resource_budget"] = resource_budget
+    return resolved, payload
+
+
+def resolve_feedback_addition_budget(raw_value: object, *, q: int):
+    """Resolve a fixed or per-qubit residual-addition request."""
+
+    return resolve_resource_budget(
+        raw_value,
+        q=q,
+        capacity=4**q,
+        name="holdout_feedback.add_residual_terms_per_iteration",
+    )
 
 
 def fit_residual_budget_to_available(
@@ -1307,20 +1539,24 @@ def fit_residual_budget_to_available(
     add_residual_terms: int,
     residual_budget: dict[str, object],
     available_residual_terms: int,
+    reserved_probe_terms: int = 0,
     initial_residual_terms: int,
     rounds: int,
     unseen_batches_after_final_iteration: int,
 ) -> tuple[int, int, dict[str, object]]:
-    if available_residual_terms < initial_residual_terms:
+    reserved_probe_terms = max(int(reserved_probe_terms), 0)
+    available_feedback_terms = int(available_residual_terms) - reserved_probe_terms
+    if available_feedback_terms < initial_residual_terms:
         raise ValueError(
-            f"Available residual labels ({available_residual_terms}) are fewer than the initial "
-            f"training residual labels ({initial_residual_terms})."
+            f"Available feedback residual labels ({available_feedback_terms}) after reserving "
+            f"{reserved_probe_terms} fixed probes are fewer than the initial training residual "
+            f"labels ({initial_residual_terms})."
         )
     fitted = dict(residual_budget)
     requested_residual_top_k = int(residual_top_k)
     requested_add = int(add_residual_terms)
     unseen_batches = max(int(unseen_batches_after_final_iteration), 0)
-    effective_residual_top_k = min(requested_residual_top_k, int(available_residual_terms))
+    effective_residual_top_k = min(requested_residual_top_k, available_feedback_terms)
     effective_add = requested_add
     status = "unchanged"
 
@@ -1342,19 +1578,202 @@ def fit_residual_budget_to_available(
             "requested_holdout_residual_top_k": requested_residual_top_k,
             "requested_add_residual_terms_per_iteration": requested_add,
             "available_generated_residual_terms": int(available_residual_terms),
+            "reserved_fixed_unseen_probe_terms": reserved_probe_terms,
+            "available_feedback_residual_terms": available_feedback_terms,
             "resolved_holdout_residual_top_k": effective_residual_top_k,
             "effective_add_residual_terms_per_iteration": effective_add,
             "add_residual_terms_per_iteration": effective_add,
             "minimum_budget_before_final_unseen_exhaustion": minimum_budget_before_final_unseen_exhaustion,
             "final_round_expected_unseen_terms": final_unseen_terms,
             "automatic_fit_rule": (
-                "After generated residual labels are known, use all available holdout labels but reduce "
-                "the per-round addition size when needed so feedback_iterations rounds and the requested "
-                "post-final unseen batches remain nonempty."
+                "After generated residual labels are known, reserve immutable fixed unseen probes, then "
+                "use the remaining holdout labels and reduce the per-round addition size when needed so "
+                "feedback_iterations rounds and the requested post-final unseen batches remain nonempty."
             ),
         }
     )
     return effective_residual_top_k, effective_add, fitted
+
+
+def reserve_and_fit_feedback_candidates(
+    *,
+    candidate_labels: Sequence[str],
+    reference_rms: np.ndarray,
+    excluded_labels: Collection[str],
+    probe_settings: FixedUnseenProbeConfig,
+    residual_top_k: int,
+    add_residual_terms: int,
+    residual_budget: dict[str, object],
+    initial_residual_terms: int,
+    rounds: int,
+    unseen_batches_after_final_iteration: int,
+    feedback_excluded_labels: Collection[str] = (),
+    q: int | None = None,
+    residual_stratification: Mapping[str, object] | None = None,
+    required_feedback_labels: Collection[str] = (),
+) -> tuple[dict[str, object], list[str], int, int, dict[str, object]]:
+    """Freeze unseen probes, then fit the curriculum to the remaining universe."""
+
+    feedback_excluded = {str(label) for label in feedback_excluded_labels}
+    reference_by_label = {
+        str(label): float(value)
+        for label, value in zip(candidate_labels, reference_rms, strict=True)
+    }
+    eligible_rows = [
+        (str(label), float(value))
+        for label, value in zip(candidate_labels, reference_rms, strict=True)
+        if str(label) not in feedback_excluded
+    ]
+
+    def select_feedback_labels(
+        labels: Sequence[str],
+        budget: int,
+    ) -> tuple[list[str], dict[str, object]]:
+        enabled = bool(
+            residual_stratification
+            and residual_stratification.get("enabled", False)
+        )
+        if not enabled:
+            selected = [str(label) for label in labels[:budget]]
+            return selected, {
+                "enabled": False,
+                "requested_terms": int(budget),
+                "selected_terms": len(selected),
+                "candidate_terms": len(labels),
+                "fill_rule": "existing generated residual ranking",
+            }
+        if q is None:
+            raise ValueError("q is required when feedback-reservoir stratification is enabled.")
+
+        required_set = {str(value) for value in required_feedback_labels}
+        missing_required = required_set - {str(label) for label in labels}
+        if missing_required:
+            raise ValueError(
+                "Required training residual labels are absent from the feedback reservoir: "
+                f"{sorted(missing_required)[:8]}"
+            )
+        required = [
+            str(label)
+            for label in labels
+            if str(label) in required_set
+        ]
+        if len(required) > int(budget):
+            raise ValueError(
+                "The feedback-reservoir budget is smaller than the required training residual support."
+            )
+        remaining = [str(label) for label in labels if str(label) not in set(required)]
+        rows = [
+            {
+                "label": label,
+                "residual_rms": reference_by_label[label],
+            }
+            for label in remaining
+        ]
+        selection = stratified_ranked_selection(
+            rows,
+            int(budget) - len(required),
+            q=int(q),
+            locality_quotas=residual_stratification.get("locality_quotas", {}),
+            spatial_bins=int(residual_stratification.get("spatial_bins", 1)),
+            seed=int(residual_stratification.get("seed", 0)),
+        )
+        selected = required + [str(row["label"]) for row in selection.selected_rows]
+        provenance = dict(selection.provenance)
+        provenance.update(
+            {
+                "requested_terms": int(budget),
+                "selected_terms": len(selected),
+                "candidate_terms": len(labels),
+                "preserved_required_terms": len(required),
+                "stratified_new_terms": len(selection.selected_rows),
+            }
+        )
+        return selected, provenance
+
+    if probe_settings.reservation_mode == "post_holdout_tail":
+        eligible_labels = [label for label, _ in eligible_rows]
+        fitted_top_k, fitted_add, fitted_budget = fit_residual_budget_to_available(
+            residual_top_k=residual_top_k,
+            add_residual_terms=add_residual_terms,
+            residual_budget=residual_budget,
+            available_residual_terms=len(eligible_labels),
+            reserved_probe_terms=0,
+            initial_residual_terms=initial_residual_terms,
+            rounds=rounds,
+            unseen_batches_after_final_iteration=unseen_batches_after_final_iteration,
+        )
+        common_residual_labels, stratification_provenance = select_feedback_labels(
+            eligible_labels,
+            fitted_top_k,
+        )
+        common_set = set(common_residual_labels)
+        tail_rows = [row for row in eligible_rows if row[0] not in common_set]
+        tail_labels = [label for label, _ in tail_rows]
+        tail_reference = np.asarray([value for _, value in tail_rows], dtype=float)
+        probe = build_fixed_unseen_probe(
+            candidate_labels=tail_labels,
+            excluded_labels={str(label) for label in excluded_labels} | set(common_residual_labels),
+            reference_rms=tail_reference,
+            settings=probe_settings,
+        )
+        reserved_labels = set(probe["active_labels"]) | set(probe["null_labels"])
+        probe.update(
+            {
+                "reservation_mode": "post_holdout_tail",
+                "candidate_terms": len(candidate_labels),
+                "feedback_excluded_terms": len(feedback_excluded),
+                "reserved_terms": len(reserved_labels),
+                "feedback_candidate_terms": len(common_residual_labels),
+                "active_resource_budget": probe_settings.active_resource_budget,
+                "null_resource_budget": probe_settings.null_resource_budget,
+            }
+        )
+        fitted_budget["reserved_fixed_unseen_probe_terms"] = len(reserved_labels)
+        fitted_budget["probe_reservation_mode"] = "post_holdout_tail"
+        fitted_budget["candidate_stratification"] = stratification_provenance
+        return probe, common_residual_labels, fitted_top_k, fitted_add, fitted_budget
+    if probe_settings.reservation_mode != "pre_feedback_global":
+        raise ValueError(f"Unsupported fixed unseen reservation mode {probe_settings.reservation_mode!r}.")
+
+    probe, feedback_candidates = partition_fixed_unseen_candidates(
+        candidate_labels,
+        reference_rms,
+        excluded_labels=excluded_labels,
+        config=probe_settings,
+        feedback_excluded_labels=feedback_excluded_labels,
+    )
+    reserved_terms = int(probe["reserved_terms"])
+    fitted_top_k, fitted_add, fitted_budget = fit_residual_budget_to_available(
+        residual_top_k=residual_top_k,
+        add_residual_terms=add_residual_terms,
+        residual_budget=residual_budget,
+        available_residual_terms=len(feedback_candidates) + reserved_terms,
+        reserved_probe_terms=reserved_terms,
+        initial_residual_terms=initial_residual_terms,
+        rounds=rounds,
+        unseen_batches_after_final_iteration=unseen_batches_after_final_iteration,
+    )
+    common_residual_labels, stratification_provenance = select_feedback_labels(
+        feedback_candidates,
+        fitted_top_k,
+    )
+    reserved_labels = set(probe["active_labels"]) | set(probe["null_labels"])
+    overlap = reserved_labels & set(common_residual_labels)
+    if overlap:
+        raise AssertionError(
+            "fixed unseen probes intersect feedback candidates: "
+            f"{sorted(overlap)[:8]}"
+        )
+    forbidden_feedback = {str(label) for label in feedback_excluded_labels}
+    forbidden_overlap = forbidden_feedback & set(common_residual_labels)
+    if forbidden_overlap:
+        raise AssertionError(
+            "formal certification probes intersect feedback candidates: "
+            f"{sorted(forbidden_overlap)[:8]}"
+        )
+    fitted_budget["probe_reservation_mode"] = "pre_feedback_global"
+    fitted_budget["candidate_stratification"] = stratification_provenance
+    return probe, common_residual_labels, fitted_top_k, fitted_add, fitted_budget
 
 
 def plot_feedback_added_terms(rounds: list[dict[str, object]], images_dir: Path) -> None:
@@ -1387,6 +1806,22 @@ def plot_feedback_added_terms(rounds: list[dict[str, object]], images_dir: Path)
     plt.close(fig)
 
 
+def feedback_unseen_plot_values(
+    rows: Sequence[Mapping[str, object]],
+) -> tuple[list[float], list[float]]:
+    """Keep fixed certification probes visible beside moving diagnostics."""
+
+    fixed_values = [optional_float(row.get("fixed_unseen_active_relative")) for row in rows]
+    moving_values = [
+        np.nan
+        if int(row.get("unseen_residual_terms", 1)) == 0
+        or row.get("unseen_relative_residual") is None
+        else optional_float(row["unseen_relative_residual"])
+        for row in rows
+    ]
+    return fixed_values, moving_values
+
+
 def plot_feedback_relative_residuals(rows: list[dict[str, object]], images_dir: Path, thresholds: Thresholds) -> None:
     import matplotlib
 
@@ -1395,16 +1830,12 @@ def plot_feedback_relative_residuals(rows: list[dict[str, object]], images_dir: 
 
     set_paper_style(plt)
     x = np.asarray([int(row["feedback_round"]) for row in rows], dtype=float)
-    unseen_values = [
-        np.nan
-        if int(row.get("unseen_residual_terms", 1)) == 0 or row.get("unseen_relative_residual") is None
-        else optional_float(row["unseen_relative_residual"])
-        for row in rows
-    ]
+    fixed_unseen_values, moving_unseen_values = feedback_unseen_plot_values(rows)
     series = [
         ("training", [float(row["training_final_relative_residual"]) for row in rows], OKABE_ITO[0], "o"),
         ("holdout", [float(row["holdout_relative_residual"]) for row in rows], OKABE_ITO[1], "s"),
-        ("moving unseen quotient", unseen_values, OKABE_ITO[2], "^"),
+        ("fixed unseen quotient", fixed_unseen_values, OKABE_ITO[2], "^"),
+        ("moving unseen diagnostic", moving_unseen_values, OKABE_ITO[3], "v"),
     ]
     fig, ax = plt.subplots(figsize=(5.8, 3.5))
     for label, values, color, marker in series:
@@ -1417,7 +1848,7 @@ def plot_feedback_relative_residuals(rows: list[dict[str, object]], images_dir: 
     ax.set_title(fr"$q={n_qubits}$ holdout-feedback residuals", fontsize=TITLE_FS)
     ax.set_xticks(x)
     ax.tick_params(axis="both", labelsize=TICK_FS, length=TICK_LENGTH, width=TICK_WIDTH)
-    fig.legend(loc="upper center", ncol=3, frameon=False, fontsize=LEGEND_FS, bbox_to_anchor=(0.53, 1.02))
+    fig.legend(loc="upper center", ncol=2, frameon=False, fontsize=LEGEND_FS, bbox_to_anchor=(0.53, 1.02))
     fig.subplots_adjust(top=0.80, left=0.13, right=0.98, bottom=0.16)
     fig.savefig(images_dir / "holdout_feedback_relative_residuals.pdf", format="pdf")
     plt.close(fig)
@@ -1627,6 +2058,7 @@ def assert_fixed_unseen_manifest_lifecycle(
     data_dir: Path,
     residual_top_k: int,
     enabled: bool = True,
+    baseline_checkpoint_present: bool = False,
 ) -> None:
     """Prevent normal training from upgrading historical runs into fixed-probe runs."""
     if not enabled:
@@ -1644,6 +2076,14 @@ def assert_fixed_unseen_manifest_lifecycle(
                 f"({reason}). Start a new run root; historical diagnostic backfill remains certification-ineligible."
             )
         return
+
+    if baseline_checkpoint_present:
+        raise RuntimeError(
+            "Cannot create a certification-eligible fixed unseen probe manifest because the "
+            "baseline checkpoint already exists and no manifest was persisted before baseline "
+            "training. Start a clean baseline and feedback run root; use "
+            "--refresh-fixed-unseen-only only for certification-ineligible diagnostics."
+        )
 
     markers: list[Path] = []
     summary_path = data_dir / f"holdout_feedback_summary_residual_{residual_top_k}.json"
@@ -1695,6 +2135,102 @@ def write_feedback_summary(
         unseen_threshold=thresholds.unseen,
         fixed_unseen_probe=fixed_unseen_probe,
     )
+    def classify_refinement(candidate: dict[str, object] | None) -> dict[str, object] | None:
+        if candidate is None:
+            return None
+        classified = dict(candidate)
+        gate = fixed_unseen_gate(
+            classified,
+            unseen_threshold=thresholds.unseen,
+            fixed_unseen_probe=fixed_unseen_probe,
+        )
+        holdout_value = optional_float(classified.get("holdout_relative_residual"))
+        holdout_pass = bool(np.isfinite(holdout_value) and holdout_value <= thresholds.holdout)
+        classified["accepted"] = bool(holdout_pass and gate["status"] == "pass")
+        classified["acceptance"] = {
+            "holdout_gate": {
+                "status": "pass" if holdout_pass else "fail",
+                "value": holdout_value if np.isfinite(holdout_value) else None,
+                "threshold": float(thresholds.holdout),
+            },
+            "unseen_gate": gate,
+        }
+        return classified
+
+    temporal_refinement = classify_refinement(temporal_refinement)
+    adaptive_temporal_refinement = classify_refinement(adaptive_temporal_refinement)
+    selection_fields = (
+        "fixed_unseen_active_relative",
+        "holdout_relative_residual",
+        "fixed_unseen_null_scaled",
+    )
+
+    def selection_metric(candidate: Mapping[str, object]) -> dict[str, float | None]:
+        metric: dict[str, float | None] = {}
+        for field in selection_fields:
+            value = optional_float(candidate.get(field))
+            metric[field] = float(value) if np.isfinite(value) else None
+        return metric
+
+    def selection_key(candidate: Mapping[str, object]) -> tuple[float, float, float, str, int, str]:
+        metric = candidate["selection_metric"]
+        if not isinstance(metric, Mapping):
+            raise TypeError("Training-candidate selection metric must be a mapping.")
+        values = tuple(
+            float(metric[field]) if metric.get(field) is not None else float("inf")
+            for field in selection_fields
+        )
+        return (
+            *values,
+            str(candidate.get("source", "")),
+            int(candidate.get("round", -1)),
+            str(candidate.get("run_dir", "")),
+        )
+
+    accepted_candidates: list[dict[str, object]] = []
+    for row in rows:
+        gate = fixed_unseen_gate(
+            row,
+            unseen_threshold=thresholds.unseen,
+            fixed_unseen_probe=fixed_unseen_probe,
+        )
+        holdout_value = optional_float(row.get("holdout_relative_residual"))
+        if np.isfinite(holdout_value) and holdout_value <= thresholds.holdout and gate["status"] == "pass":
+            accepted_candidates.append(
+                {
+                    "source": "feedback_round",
+                    "round": int(row.get("feedback_round", 0)),
+                    "run_dir": row.get("run_dir"),
+                    "selection_metric": selection_metric(row),
+                }
+            )
+    for source, candidate in (
+        ("temporal_refinement", temporal_refinement),
+        ("adaptive_temporal_refinement", adaptive_temporal_refinement),
+    ):
+        if candidate is not None and bool(candidate.get("accepted", False)):
+            accepted_candidates.append(
+                {
+                    "source": source,
+                    "run_dir": candidate.get("run_dir"),
+                    "selection_metric": selection_metric(candidate),
+                }
+            )
+    ranked_candidates = sorted(accepted_candidates, key=selection_key)
+
+    selected_run: dict[str, object] = {
+        "status": "not_found",
+        "source": None,
+        "run_dir": None,
+        "selection_rule": (
+            "lexicographic_minimum_of_fixed_unseen_active_relative_then_"
+            "holdout_relative_residual_then_fixed_unseen_null_scaled"
+        ),
+        "selection_candidates": ranked_candidates,
+    }
+    if ranked_candidates:
+        selected_run.update({"status": "accepted", **ranked_candidates[0]})
+
     payload = {
         "description": (
             "Holdout-feedback training: high-RMS unseen holdout residual strings are added to the "
@@ -1704,6 +2240,7 @@ def write_feedback_summary(
         "residual_budget": residual_budget,
         "fixed_unseen_probe": dict(fixed_unseen_probe) if fixed_unseen_probe is not None else None,
         "decision": decision,
+        "selected_run": selected_run,
         "moving_unseen_diagnostic": moving_unseen_diagnostics(rows),
         "rounds": round_rows,
         "rows": rows,
@@ -1726,12 +2263,10 @@ def write_feedback_summary(
     plot_feedback_added_terms(round_rows, images_dir)
     if round_rows:
         final_round_dir = output_dir / str(round_rows[-1]["run_dir"])
-        if temporal_refinement and temporal_refinement.get("enabled", False):
-            candidate_dir = output_dir / str(temporal_refinement.get("run_dir", ""))
-            if candidate_dir.is_dir():
-                final_round_dir = candidate_dir
-        if adaptive_temporal_refinement and adaptive_temporal_refinement.get("enabled", False):
-            candidate_dir = output_dir / str(adaptive_temporal_refinement.get("run_dir", ""))
+        if selected_run["status"] == "accepted" and selected_run.get("run_dir"):
+            candidate_dir = Path(str(selected_run["run_dir"]))
+            if not candidate_dir.is_absolute():
+                candidate_dir = output_dir / candidate_dir
             if candidate_dir.is_dir():
                 final_round_dir = candidate_dir
         coefficient_path = final_round_dir / "Models_Data" / "final_agp_coefficients.pt"
@@ -1795,11 +2330,17 @@ def preflight_fixed_unseen_diagnostic_refresh(
 
     base_agp_terms = int(args.base_agp_terms if args.base_agp_terms is not None else feedback.get("base_agp_terms", 1024))
     rounds = int(args.rounds if args.rounds is not None else feedback.get("iterations", 1))
-    add_residual_terms = int(
+    payload = load_json(config_path)
+    if not isinstance(payload, dict):
+        raise TypeError("config.json must contain a JSON object.")
+    n_qubits = model_config_from_payload(payload).n_qubits
+    add_budget = resolve_feedback_addition_budget(
         args.add_residual_terms
         if args.add_residual_terms is not None
-        else feedback.get("add_residual_terms_per_iteration", 1024)
+        else feedback.get("add_residual_terms_per_iteration", 1024),
+        q=n_qubits,
     )
+    add_residual_terms = add_budget.realized
     requested_residual_terms = (
         args.residual_top_k if args.residual_top_k is not None else feedback.get("holdout_residual_top_k", "auto")
     )
@@ -1894,11 +2435,16 @@ def main(argv: Sequence[str] | None = None) -> None:
                 return
     base_agp_terms = int(args.base_agp_terms if args.base_agp_terms is not None else feedback.get("base_agp_terms", 1024))
     rounds = int(args.rounds if args.rounds is not None else feedback.get("iterations", 1))
-    add_residual_terms = int(
+    physical = payload.get("physical", {})
+    physical_parameters = physical.get("parameters", {}) if isinstance(physical, dict) else {}
+    n_qubits = int(physical_parameters.get("num_qubits", 0))
+    add_budget = resolve_feedback_addition_budget(
         args.add_residual_terms
         if args.add_residual_terms is not None
-        else feedback.get("add_residual_terms_per_iteration", 1024)
+        else feedback.get("add_residual_terms_per_iteration", 1024),
+        q=n_qubits,
     )
+    add_residual_terms = add_budget.realized
     epochs_per_round = int(
         args.epochs_per_round
         if args.epochs_per_round is not None
@@ -1917,8 +2463,22 @@ def main(argv: Sequence[str] | None = None) -> None:
     lr = float(args.lr if args.lr is not None else feedback.get("lr", 1e-5))
     device_name = str(args.device if args.device is not None else feedback.get("device", "auto"))
     min_rms = float(args.min_rms if args.min_rms is not None else feedback.get("min_rms", 0.0))
-    support_swap_settings = support_swap_settings_from_feedback(feedback)
-    fixed_unseen_probe_settings = fixed_unseen_probe_settings_from_feedback(feedback)
+    active_swap_capacity, active_target_budget = calibration_active_capacity(
+        payload,
+        q=n_qubits,
+        support_terms=base_agp_terms,
+    )
+    support_swap_settings = support_swap_settings_from_feedback(
+        feedback,
+        q=n_qubits,
+        capacity=active_swap_capacity,
+    )
+    residual_stratification = residual_stratification_settings_from_feedback(feedback)
+    fixed_unseen_probe_settings = fixed_unseen_probe_settings_from_feedback(
+        feedback,
+        q=n_qubits,
+        capacity=4**n_qubits,
+    )
     pau_transfer_stability_settings = pau_transfer_stability_settings_from_feedback(feedback)
     temporal_refinement_settings = temporal_refinement_settings_from_feedback(feedback)
     adaptive_temporal_settings = adaptive_temporal_refinement_settings_from_feedback(feedback)
@@ -1960,34 +2520,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"use_legacy_baseline source={legacy_base_run.relative_to(RUN_DIR)}")
             base_run = legacy_base_run
             base_checkpoint = legacy_checkpoint
-    if not base_checkpoint.is_file():
-        if args.refresh_fixed_unseen_only:
-            raise FileNotFoundError(
-                "Diagnostics-only fixed-unseen refresh requires an existing baseline checkpoint; "
-                "it will not train a missing baseline."
-            )
-        print(
-            f"train_missing_baseline agp_terms={base_agp_terms} "
-            f"epochs={base_settings.epochs} residual_terms={base_settings.residual_top_k}"
-        )
-        run_training(base_settings, base_run, baseline_payload)
-    agp_labels, residual_labels = load_checkpoint_labels(base_checkpoint)
-    current_residual_labels = set(residual_labels)
-    trainable_state = projected_trainable_state_from_checkpoint(base_checkpoint)
-    residual_top_k, residual_budget = resolve_holdout_residual_top_k(
-        residual_top_k_request,
-        initial_residual_terms=len(residual_labels),
-        rounds=rounds,
-        add_residual_terms=add_residual_terms,
-        unseen_batches_after_final_iteration=unseen_residual_batches,
-    )
-    print(
-        "resolved_feedback_residual_budget "
-        f"mode={residual_budget['mode']} Q={residual_top_k} "
-        f"initial={len(residual_labels)} rounds={rounds} "
-        f"add={add_residual_terms} final_unseen_budget={residual_budget['final_round_expected_unseen_terms']}"
-    )
-
     sweep_support = payload.get("support_sweep", {})
     support_sizes = (
         [int(value) for value in sweep_support.get("agp_terms", [base_agp_terms])]
@@ -2000,73 +2532,58 @@ def main(argv: Sequence[str] | None = None) -> None:
         else baseline_root / f"agp_{support_size}"
         for support_size in support_sizes
     ]
-    initial_fixed_probe_request = residual_top_k + fixed_unseen_probe_settings.candidate_multiplier * (
-        fixed_unseen_probe_settings.active_terms + fixed_unseen_probe_settings.null_terms
-    )
-    fixed_probe_candidate_cap = fixed_unseen_probe_candidate_cap(
-        feedback,
-        moving_holdout_terms=residual_top_k,
-    )
-    initial_candidate_request = (
-        initial_fixed_probe_request
-        if fixed_probe_candidate_cap is None
-        else min(initial_fixed_probe_request, fixed_probe_candidate_cap)
-    )
-    candidate_residual_labels, holdout_basis_agp_terms = build_common_holdout_residual_labels(
-        run_dirs=sweep_run_dirs,
-        config_payload=payload,
-        residual_top_k=initial_candidate_request,
-        intermediate_top_k=intermediate_top_k,
-    )
-    if len(candidate_residual_labels) < residual_top_k:
-        print(
-            "resolved_feedback_residual_budget_available "
-            f"requested={residual_top_k} available={len(candidate_residual_labels)}"
+    baseline_missing = not base_checkpoint.is_file()
+    precomputed_holdout_agp_labels: list[str] | None = None
+    if baseline_missing:
+        if args.refresh_fixed_unseen_only:
+            raise FileNotFoundError(
+                "Diagnostics-only fixed-unseen refresh requires an existing baseline checkpoint; "
+                "it will not train a missing baseline."
+            )
+        precomputed_supports = {
+            support_size: precompute_baseline_support_labels(
+                baseline_payload,
+                settings_for_support(baseline_payload, support_size),
+            )
+            for support_size in support_sizes
+        }
+        if base_agp_terms not in precomputed_supports:
+            precomputed_supports[base_agp_terms] = precompute_baseline_support_labels(
+                baseline_payload,
+                base_settings,
+            )
+        agp_labels, residual_labels = precomputed_supports[base_agp_terms]
+        precomputed_holdout_agp_labels = sort_pauli_labels(
+            {
+                label
+                for support_agp_labels, _ in precomputed_supports.values()
+                for label in support_agp_labels
+            }
         )
-    residual_top_k, add_residual_terms, residual_budget = fit_residual_budget_to_available(
-        residual_top_k=residual_top_k,
-        add_residual_terms=add_residual_terms,
-        residual_budget=residual_budget,
-        available_residual_terms=len(candidate_residual_labels),
+        trainable_state: dict[str, object] | None = None
+    else:
+        agp_labels, residual_labels = load_checkpoint_labels(base_checkpoint)
+        trainable_state = projected_trainable_state_from_checkpoint(base_checkpoint)
+    current_residual_labels = set(residual_labels)
+    residual_top_k, residual_budget = resolve_holdout_residual_top_k(
+        residual_top_k_request,
         initial_residual_terms=len(residual_labels),
         rounds=rounds,
+        add_residual_terms=add_residual_terms,
         unseen_batches_after_final_iteration=unseen_residual_batches,
+        q=n_qubits,
+        capacity=4**n_qubits,
     )
-    fixed_probe_request = max(
-        residual_top_k,
-        residual_top_k
-        + fixed_unseen_probe_settings.candidate_multiplier
-        * (fixed_unseen_probe_settings.active_terms + fixed_unseen_probe_settings.null_terms),
-    )
-    if len(candidate_residual_labels) < fixed_probe_request:
-        bounded_fixed_probe_request = (
-            fixed_probe_request
-            if fixed_probe_candidate_cap is None
-            else min(fixed_probe_request, fixed_probe_candidate_cap)
-        )
-        candidate_residual_labels, holdout_basis_agp_terms = build_common_holdout_residual_labels(
-            run_dirs=sweep_run_dirs,
-            config_payload=payload,
-            residual_top_k=bounded_fixed_probe_request,
-            intermediate_top_k=intermediate_top_k,
-        )
-    common_residual_labels = candidate_residual_labels[:residual_top_k]
+    residual_budget["addition_resource_budget"] = add_budget.to_dict()
+    residual_budget["active_target_resource_budget"] = active_target_budget
     print(
-        "fitted_feedback_residual_budget "
-        f"Q={residual_top_k} add={add_residual_terms} "
-        f"status={residual_budget['residual_budget_fit_status']} "
-        f"final_unseen_budget={residual_budget['final_round_expected_unseen_terms']}"
+        "resolved_feedback_residual_budget "
+        f"mode={residual_budget['mode']} Q={residual_top_k} "
+        f"initial={len(residual_labels)} rounds={rounds} "
+        f"add={add_residual_terms} final_unseen_budget={residual_budget['final_round_expected_unseen_terms']}"
     )
+
     output_root = output_root_arg if output_root_arg.is_absolute() else RUN_DIR / output_root_arg
-    output_dir = output_root / f"agp_{base_agp_terms}_residual_{residual_top_k}_add_{add_residual_terms}_rounds_{rounds}"
-    data_dir = output_dir / "Models_Data"
-    assert_fixed_unseen_manifest_lifecycle(
-        output_dir=output_dir,
-        data_dir=data_dir,
-        residual_top_k=residual_top_k,
-        enabled=fixed_unseen_probe_settings.enabled and not args.refresh_fixed_unseen_only,
-    )
-    data_dir.mkdir(parents=True, exist_ok=True)
     hamiltonian_path = Path(feedback_settings.model.hamiltonian_source)
     if not hamiltonian_path.is_absolute():
         hamiltonian_path = ROOT / hamiltonian_path
@@ -2089,6 +2606,113 @@ def main(argv: Sequence[str] | None = None) -> None:
         | persisted_certification_labels
     )
     fixed_probe_base_excluded_labels = set(residual_labels) | certification_probe_labels
+    initial_fixed_probe_request = residual_top_k + fixed_unseen_probe_settings.candidate_multiplier * (
+        fixed_unseen_probe_settings.active_terms + fixed_unseen_probe_settings.null_terms
+    )
+    fixed_probe_candidate_cap = fixed_unseen_probe_candidate_cap(
+        feedback,
+        moving_holdout_terms=residual_top_k,
+    )
+    initial_candidate_request = (
+        initial_fixed_probe_request
+        if fixed_probe_candidate_cap is None
+        else min(initial_fixed_probe_request, fixed_probe_candidate_cap)
+    )
+    candidate_residual_labels, holdout_basis_agp_terms = build_common_holdout_residual_labels(
+        run_dirs=sweep_run_dirs,
+        config_payload=payload,
+        residual_top_k=initial_candidate_request,
+        intermediate_top_k=intermediate_top_k,
+        explicit_agp_labels=precomputed_holdout_agp_labels,
+    )
+    candidate_reference_rms = fixed_unseen_reference_rms(
+        h0=h0_swap,
+        h1=h1_swap,
+        settings=feedback_settings,
+        agp_labels=agp_labels,
+        candidate_labels=candidate_residual_labels,
+    )
+    if len(candidate_residual_labels) < residual_top_k:
+        print(
+            "resolved_feedback_residual_budget_available "
+            f"requested={residual_top_k} available={len(candidate_residual_labels)}"
+        )
+    (
+        expected_fixed_unseen_probe,
+        common_residual_labels,
+        residual_top_k,
+        add_residual_terms,
+        residual_budget,
+    ) = reserve_and_fit_feedback_candidates(
+        candidate_labels=candidate_residual_labels,
+        reference_rms=candidate_reference_rms,
+        excluded_labels=fixed_probe_base_excluded_labels,
+        probe_settings=fixed_unseen_probe_settings,
+        residual_top_k=residual_top_k,
+        add_residual_terms=add_residual_terms,
+        residual_budget=residual_budget,
+        initial_residual_terms=len(residual_labels),
+        rounds=rounds,
+        unseen_batches_after_final_iteration=unseen_residual_batches,
+        feedback_excluded_labels=certification_probe_labels,
+        q=n_qubits,
+        residual_stratification=residual_stratification,
+        required_feedback_labels=residual_labels,
+    )
+    expected_fixed_unseen_probe.update(
+        fixed_unseen_probe_manifest_identity(
+            settings=fixed_unseen_probe_settings,
+            candidate_universe_labels=candidate_residual_labels,
+            excluded_labels=fixed_probe_base_excluded_labels,
+            requested_candidate_terms=initial_candidate_request,
+        )
+    )
+    expected_fixed_unseen_probe.update(
+        {
+            "moving_holdout_terms": int(residual_top_k),
+            "requested_candidate_terms_initial": int(initial_candidate_request),
+            "requested_candidate_terms_final": int(initial_candidate_request),
+            "resource_cap": fixed_probe_candidate_cap,
+            "realized_candidate_terms": len(candidate_residual_labels),
+            "realized_tail_terms": int(expected_fixed_unseen_probe["reserved_terms"]),
+            "expansion_history": [
+                {
+                    "requested_candidate_terms": int(initial_candidate_request),
+                    "realized_candidate_terms": len(candidate_residual_labels),
+                    "realized_feedback_terms": len(common_residual_labels),
+                    "realized_active_terms": len(expected_fixed_unseen_probe["active_labels"]),
+                    "realized_null_terms": len(expected_fixed_unseen_probe["null_labels"]),
+                }
+            ],
+            "insufficiency_reason": (
+                None
+                if expected_fixed_unseen_probe.get("status") in {"complete", "disabled"}
+                else "generator_saturated"
+            ),
+            "reference_rms_metadata": _reference_rms_metadata(
+                candidate_labels=candidate_residual_labels,
+                reference_rms=candidate_reference_rms,
+                probe=expected_fixed_unseen_probe,
+            ),
+        }
+    )
+    print(
+        "fitted_feedback_residual_budget "
+        f"Q={residual_top_k} add={add_residual_terms} "
+        f"reserved_probes={expected_fixed_unseen_probe['reserved_terms']} "
+        f"status={residual_budget['residual_budget_fit_status']} "
+        f"final_unseen_budget={residual_budget['final_round_expected_unseen_terms']}"
+    )
+    output_dir = output_root / f"agp_{base_agp_terms}_residual_{residual_top_k}_add_{add_residual_terms}_rounds_{rounds}"
+    data_dir = output_dir / "Models_Data"
+    assert_fixed_unseen_manifest_lifecycle(
+        output_dir=output_dir,
+        data_dir=data_dir,
+        residual_top_k=residual_top_k,
+        enabled=fixed_unseen_probe_settings.enabled and not args.refresh_fixed_unseen_only,
+        baseline_checkpoint_present=not baseline_missing,
+    )
+    data_dir.mkdir(parents=True, exist_ok=True)
     historical_training_residual_labels: set[str] = set()
     if args.refresh_fixed_unseen_only:
         historical_checkpoints = sorted(
@@ -2110,31 +2734,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             historical_training_residual_labels.update(checkpoint_residual_labels)
         fixed_probe_base_excluded_labels.update(historical_training_residual_labels)
 
-    def generate_fixed_probe_candidates(request: int) -> list[str]:
-        labels, _ = build_common_holdout_residual_labels(
-            run_dirs=sweep_run_dirs,
-            config_payload=payload,
-            residual_top_k=request,
-            intermediate_top_k=intermediate_top_k,
-        )
-        return labels
-
-    expected_fixed_unseen_probe, candidate_residual_labels = build_expanding_fixed_unseen_probe(
-        generate_candidates=generate_fixed_probe_candidates,
-        reference_rms_for_labels=lambda labels: fixed_unseen_reference_rms(
-            h0=h0_swap,
-            h1=h1_swap,
-            settings=feedback_settings,
-            agp_labels=agp_labels,
-            candidate_labels=labels,
-        ),
-        settings=fixed_unseen_probe_settings,
-        moving_holdout_terms=residual_top_k,
-        excluded_labels=fixed_probe_base_excluded_labels,
-        initial_request=fixed_probe_request,
-        resource_cap=fixed_probe_candidate_cap,
-    )
-    common_residual_labels = candidate_residual_labels[:residual_top_k]
     fixed_probe_excluded_labels = set(residual_labels) | set(common_residual_labels) | certification_probe_labels
     fixed_probe_path = data_dir / "fixed_unseen_probe_labels.json"
     if fixed_probe_path.is_file():
@@ -2180,6 +2779,36 @@ def main(argv: Sequence[str] | None = None) -> None:
             ),
         )
         save_fixed_unseen_probe(fixed_probe_path, fixed_unseen_probe)
+    if baseline_missing:
+        print(
+            f"train_missing_baseline agp_terms={base_agp_terms} "
+            f"epochs={base_settings.epochs} residual_terms={base_settings.residual_top_k}"
+        )
+        expected_agp_labels = list(agp_labels)
+        expected_residual_labels = list(residual_labels)
+        run_training(base_settings, base_run, baseline_payload)
+        actual_agp_labels, actual_residual_labels = load_checkpoint_labels(base_checkpoint)
+        if actual_agp_labels != expected_agp_labels or actual_residual_labels != expected_residual_labels:
+            raise RuntimeError(
+                "Baseline checkpoint support differs from its pre-training probe identity; "
+                "the run is not certification-eligible."
+            )
+        probe_labels = (
+            set(fixed_unseen_probe.get("active_labels", []))
+            | set(fixed_unseen_probe.get("null_labels", []))
+        )
+        overlap = probe_labels & set(actual_residual_labels)
+        if overlap:
+            raise RuntimeError(
+                "Baseline training residual labels intersect pre-training fixed unseen probes: "
+                f"{sorted(overlap)[:8]}"
+            )
+        agp_labels = actual_agp_labels
+        residual_labels = actual_residual_labels
+        current_residual_labels = set(residual_labels)
+        trainable_state = projected_trainable_state_from_checkpoint(base_checkpoint)
+    if trainable_state is None:
+        raise RuntimeError("Missing projected trainable state after baseline preparation.")
     existing_state = load_existing_feedback_state(
         output_dir=output_dir,
         data_dir=data_dir,
@@ -2373,7 +3002,11 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     for round_index in range(completed_round + 1, rounds + 1):
         previous_run = base_run if round_index == 1 else round_run_dir(output_dir, round_index - 1)
-        support_swap_plan: dict[str, object] = {"enabled": False, "swap_count": 0}
+        support_swap_plan: dict[str, object] = {
+            "enabled": False,
+            "swap_count": 0,
+            "resource_budget": support_swap_settings.resource_budget,
+        }
         if (
             support_swap_settings.enabled
             and support_swap_settings.terms_per_iteration > 0
@@ -2392,7 +3025,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                     * support_swap_settings.candidate_pool_multiplier
                 ),
                 protect_top_fraction=support_swap_settings.protect_top_fraction,
+                stratification=support_swap_settings.stratification,
             )
+            support_swap_plan["resource_budget"] = support_swap_settings.resource_budget
             if int(support_swap_plan.get("swap_count", 0)) > 0:
                 agp_labels = [str(label) for label in support_swap_plan["new_agp_labels"]]
                 trainable_state = remap_trainable_state_for_agp_labels(
@@ -2408,15 +3043,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                     f"removed={support_swap_plan.get('removed_labels', [])[:5]} "
                     f"added={support_swap_plan.get('added_labels', [])[:5]}"
                 )
-        additions = select_residual_additions(
+        additions, addition_stratification = select_residual_additions_with_provenance(
             spectra[round_index - 1],
             current_residual_labels,
             excluded_labels=(
                 set(fixed_unseen_probe.get("active_labels", []))
                 | set(fixed_unseen_probe.get("null_labels", []))
+                | certification_probe_labels
             ),
             add_terms=add_residual_terms,
             min_rms=min_rms,
+            q=n_qubits,
+            stratification=residual_stratification,
         )
         current_residual_labels.update(str(row["label"]) for row in additions)
         residual_labels = sort_pauli_labels(current_residual_labels)
@@ -2435,6 +3073,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             round_index=round_index,
             additions=additions,
             support_swap_plan=support_swap_plan,
+            residual_addition_stratification=addition_stratification,
             pau_transfer_stability=pau_transfer_stability_settings,
         )
         row, spectrum = evaluate_one_run(
@@ -2481,6 +3120,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "unseen_reference_residual": row.get("unseen_reference_residual"),
                 "unseen_residual_per_term": row.get("unseen_residual_per_term"),
                 "first_added_terms": additions[:32],
+                "residual_addition_stratification": addition_stratification,
                 "support_metadata": {
                     "first_commutator_nnz": metadata["first_commutator_nnz"],
                     "second_commutator_nnz": metadata["second_commutator_nnz"],

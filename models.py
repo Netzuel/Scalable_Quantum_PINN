@@ -476,6 +476,7 @@ class ProjectedSparseLossWeights:
     """Weights for fixed-schedule projected sparse AGP experiments."""
 
     residual: float = 1.0
+    residual_objective: str = "absolute"
     agp_l2: float = 1e-8
     residual_block_normalization: str = "none"
     agp_smoothness: float = 0.0
@@ -483,8 +484,52 @@ class ProjectedSparseLossWeights:
     schedule_monotonic: float = 0.0
     schedule_correction_l2: float = 0.0
     calibration_budget: float = 0.0
+    calibration_budget_normalization: str = "support"
     calibration_binary: float = 0.0
     calibration_scale_l2: float = 0.0
+
+
+def projected_residual_objective(
+    residual_loss: torch.Tensor,
+    reference_loss: torch.Tensor,
+    *,
+    mode: str,
+) -> torch.Tensor:
+    """Resolve the optimized projected residual without changing diagnostics."""
+
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode == "absolute":
+        return residual_loss
+    if normalized_mode == "reference_normalized":
+        eps = torch.finfo(residual_loss.dtype).eps
+        denominator = reference_loss.detach().clamp_min(eps)
+        return residual_loss / denominator
+    raise ValueError(
+        "Unsupported projected residual objective "
+        f"{mode!r}; expected 'absolute' or 'reference_normalized'."
+    )
+
+
+def calibration_budget_penalty(
+    active_gate_sum: torch.Tensor,
+    *,
+    target_active_terms: int | float,
+    support_terms: int,
+    mode: str,
+) -> torch.Tensor:
+    """Return a dimensionless soft-gate count penalty."""
+
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode == "support":
+        denominator = max(int(support_terms), 1)
+    elif normalized_mode == "target":
+        denominator = max(float(target_active_terms), 1.0)
+    else:
+        raise ValueError(
+            "Unsupported calibration budget normalization "
+            f"{mode!r}; expected 'support' or 'target'."
+        )
+    return ((active_gate_sum - float(target_active_terms)) / denominator) ** 2
 
 
 class ProjectedSparseAGPPINN(nn.Module):
@@ -748,6 +793,11 @@ class ProjectedSparseAGPPINN(nn.Module):
             reference_loss = PauliAlgebra.norm_sq(reference_residual)
         eps = torch.finfo(residual_loss.dtype).eps
         relative_residual = residual_loss / torch.clamp(reference_loss, min=eps)
+        optimized_residual = projected_residual_objective(
+            residual_loss,
+            reference_loss,
+            mode=weights.residual_objective,
+        )
         residual_per_term = residual_loss / max(len(self.residual_labels), 1)
         reference_residual_per_term = reference_loss / max(len(self.residual_labels), 1)
         agp_l2_loss = torch.mean(prediction["agp_coefficients"].pow(2))
@@ -784,12 +834,15 @@ class ProjectedSparseAGPPINN(nn.Module):
             calibration_gamma = self.agp_calibration_gamma().to(device=agp_l2_loss.device, dtype=agp_l2_loss.dtype)
             target_active_terms = float(getattr(self, "agp_target_active_terms", len(self.agp_labels)))
             calibration_active_gate_sum = torch.sum(gates)
-            calibration_budget_loss = (
-                (calibration_active_gate_sum - target_active_terms) / max(len(self.agp_labels), 1)
-            ) ** 2
+            calibration_budget_loss = calibration_budget_penalty(
+                calibration_active_gate_sum,
+                target_active_terms=target_active_terms,
+                support_terms=len(self.agp_labels),
+                mode=weights.calibration_budget_normalization,
+            )
             calibration_binary_loss = torch.mean(gates * (1.0 - gates))
             calibration_scale_l2_loss = (calibration_gamma - 1.0) ** 2
-        total = weights.residual * residual_loss
+        total = weights.residual * optimized_residual
         if weights.agp_l2 != 0.0:
             total = total + weights.agp_l2 * agp_l2_loss
         if weights.agp_smoothness != 0.0:
@@ -809,6 +862,7 @@ class ProjectedSparseAGPPINN(nn.Module):
         diagnostics = {
             "total": total.detach(),
             "residual": residual_loss.detach(),
+            "optimized_residual": optimized_residual.detach(),
             "reference_residual": reference_loss.detach(),
             "relative_residual": relative_residual.detach(),
             "residual_per_term": residual_per_term.detach(),
@@ -831,6 +885,47 @@ class ProjectedSparseAGPPINN(nn.Module):
             "second_commutator_nnz": torch.tensor(float(self.second_commutator.nnz), device=t_collocation.device),
         }
         return total, diagnostics
+
+
+class ProjectedSparseAGPExportModel(ProjectedSparseAGPPINN):
+    """Forward-only projected AGP model without commutator construction."""
+
+    def __init__(
+        self,
+        n_qubits: int,
+        agp_labels: Sequence[str],
+        *,
+        hidden_width: int = 56,
+        hidden_layers: int = 3,
+        activation: str = "silu",
+        layer_type: str = "quadratic",
+        t_min: float = 0.0,
+        t_max: float = 1.0,
+    ) -> None:
+        nn.Module.__init__(self)
+        if int(n_qubits) < 1:
+            raise ValueError("n_qubits must be positive.")
+        if t_max <= t_min:
+            raise ValueError("t_max must be greater than t_min.")
+        self.n_qubits = int(n_qubits)
+        self.t_min = float(t_min)
+        self.t_max = float(t_max)
+        self.agp_labels = sort_pauli_labels(agp_labels)
+        if not self.agp_labels:
+            raise ValueError("agp_labels must be non-empty.")
+        self.layer_type = str(layer_type)
+        self.body = _make_body(
+            1,
+            len(self.agp_labels),
+            hidden_width=int(hidden_width),
+            hidden_layers=int(hidden_layers),
+            activation=str(activation),
+            layer_type=str(layer_type),
+        )
+        self.register_buffer("h_initial_sparse", torch.empty(0, dtype=torch.complex64))
+
+    def sparse_operators(self, t: torch.Tensor) -> dict[str, torch.Tensor]:
+        raise RuntimeError("ProjectedSparseAGPExportModel supports forward coefficient export only.")
 
 
 @dataclass(frozen=True)

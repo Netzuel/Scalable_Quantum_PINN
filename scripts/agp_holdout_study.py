@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -28,13 +27,14 @@ from projected_sparse_training_common import (  # noqa: E402
     TITLE_FS,
     build_projected_support,
     compact_pauli_label,
-    load_body_state_compatible,
+    load_projected_checkpoint_weights,
     make_projected_model,
     pauli_weight,
     select_device,
     set_paper_style,
 )
 from agp_baseline_train import model_config_from_payload, parse_support_sizes  # noqa: E402
+from agp_residual_probes import fixed_unseen_manifest_contract  # noqa: E402
 from utils import all_pauli_labels, load_pauli_hamiltonian_pair, sort_pauli_labels  # noqa: E402
 
 
@@ -66,29 +66,6 @@ def _finite_series_value(value: object) -> float:
     return numeric if math.isfinite(numeric) else float("nan")
 
 
-def _fixed_unseen_manifest_contract(payload: Mapping[str, object]) -> tuple[bool, str]:
-    schema_version = payload.get("schema_version")
-    if not isinstance(schema_version, int) or schema_version < 2:
-        return False, "legacy_fixed_unseen_manifest"
-    if schema_version != 2:
-        return False, "unsupported_fixed_unseen_manifest_schema"
-    stored_hash = payload.get("manifest_sha256")
-    if not isinstance(stored_hash, str) or not stored_hash:
-        return False, "missing_manifest_sha256"
-    hashed_payload = {key: value for key, value in payload.items() if key != "manifest_sha256"}
-    encoded = json.dumps(hashed_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    if stored_hash != hashlib.sha256(encoded).hexdigest():
-        return False, "invalid_fixed_unseen_manifest_hash"
-    eligible = payload.get("certification_eligible")
-    provenance = payload.get("provenance")
-    reason = payload.get("certification_reason")
-    if eligible is True and provenance == "pre_training_fixed_probe" and reason == "pre_training_fixed_probe":
-        return True, "pre_training_fixed_probe"
-    if eligible is False and provenance == "diagnostic_backfill" and reason == "historical_diagnostic_backfill":
-        return True, "historical_diagnostic_backfill"
-    return False, "invalid_fixed_unseen_provenance"
-
-
 def fixed_unseen_gate(
     row: Mapping[str, object],
     *,
@@ -101,7 +78,7 @@ def fixed_unseen_gate(
         return {"status": "not_tested", "value": None, "reason": "missing_fixed_unseen_manifest"}
     if "enabled" not in fixed_unseen_probe or "status" not in fixed_unseen_probe:
         return {"status": "not_tested", "value": None, "reason": "missing_fixed_unseen_lifecycle"}
-    contract_valid, contract_reason = _fixed_unseen_manifest_contract(fixed_unseen_probe)
+    contract_valid, contract_reason = fixed_unseen_manifest_contract(dict(fixed_unseen_probe))
     if not contract_valid:
         return {"status": "not_tested", "value": None, "reason": contract_reason}
     enabled = bool(fixed_unseen_probe["enabled"])
@@ -292,23 +269,7 @@ def relpath(path: Path, base: Path | None = None) -> str:
 
 
 def load_body_weights(model: torch.nn.Module, checkpoint: dict[str, object]) -> None:
-    state = checkpoint["model_state_dict"]
-    body_state = {
-        key.removeprefix("body."): value
-        for key, value in state.items()
-        if key.startswith("body.")
-    }
-    load_body_state_compatible(model.body, body_state)
-    if "agp_log_gamma" in state and "agp_gate_logits" in state:
-        support_metadata = checkpoint.get("config", {}).get("support", {})
-        support_metadata = support_metadata if isinstance(support_metadata, dict) else {}
-        calibration = support_metadata.get("agp_calibration", {})
-        calibration = calibration if isinstance(calibration, dict) else {}
-        device = next(model.parameters()).device
-        model.agp_gate_temperature = float(calibration.get("gate_temperature", 1.0))
-        model.agp_target_active_terms = int(calibration.get("target_active_terms", len(model.agp_labels)))
-        model.agp_log_gamma = torch.nn.Parameter(state["agp_log_gamma"].detach().to(device).float().reshape(()))
-        model.agp_gate_logits = torch.nn.Parameter(state["agp_gate_logits"].detach().to(device).float().flatten())
+    load_projected_checkpoint_weights(model, checkpoint)
 
 
 def load_checkpoint_labels(run_dir: Path) -> tuple[list[str], list[str]]:
@@ -558,6 +519,7 @@ def build_common_holdout_residual_labels(
     config_payload: dict[str, object],
     residual_top_k: int,
     intermediate_top_k: int,
+    explicit_agp_labels: Sequence[str] | None = None,
 ) -> tuple[list[str], int]:
     config = model_config_from_payload(config_payload)
     hamiltonian_path = Path(config.hamiltonian_source)
@@ -569,10 +531,11 @@ def build_common_holdout_residual_labels(
         n_qubits=config.n_qubits,
         distance=config.distance,
     )
-    agp_labels: set[str] = set()
-    for run_dir in run_dirs:
-        run_agp_labels, _ = load_checkpoint_labels(run_dir)
-        agp_labels.update(run_agp_labels)
+    agp_labels: set[str] = set(str(label) for label in (explicit_agp_labels or ()))
+    if explicit_agp_labels is None:
+        for run_dir in run_dirs:
+            run_agp_labels, _ = load_checkpoint_labels(run_dir)
+            agp_labels.update(run_agp_labels)
     sorted_agp = sort_pauli_labels(agp_labels)
     support_config = config_payload.get("support_sweep", {})
     support_selection = support_config.get("agp_support_selection", {}) if isinstance(support_config, dict) else {}

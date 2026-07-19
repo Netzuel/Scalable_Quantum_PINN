@@ -198,21 +198,9 @@ def find_physical_summary_for_images_dir(images_dir: Path) -> Path | None:
     for root in search_roots:
         found_at_root = False
         for pattern in (
-            "Models_Data/physical_validation_summary.json",
-            "Models_Data/hydrogen_physical_validation_summary.json",
-            "Models_Data/mps_physical_validation_summary.json",
-            "*/Models_Data/physical_validation_summary.json",
-            "*/Models_Data/hydrogen_physical_validation_summary.json",
-            "*/Models_Data/mps_physical_validation_summary.json",
-            "*/*/Models_Data/physical_validation_summary.json",
-            "*/*/Models_Data/hydrogen_physical_validation_summary.json",
-            "*/*/Models_Data/mps_physical_validation_summary.json",
-            "*/*/*/Models_Data/physical_validation_summary.json",
-            "*/*/*/Models_Data/hydrogen_physical_validation_summary.json",
-            "*/*/*/Models_Data/mps_physical_validation_summary.json",
-            "*/*/*/*/Models_Data/physical_validation_summary.json",
-            "*/*/*/*/Models_Data/hydrogen_physical_validation_summary.json",
-            "*/*/*/*/Models_Data/mps_physical_validation_summary.json",
+            "**/Models_Data/physical_validation_summary.json",
+            "**/Models_Data/hydrogen_physical_validation_summary.json",
+            "**/Models_Data/mps_physical_validation_summary.json",
         ):
             try:
                 for candidate in root.glob(pattern):

@@ -88,6 +88,16 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
     adaptive = support.get("adaptive", {}) if isinstance(support, dict) else {}
     calibration = calibration_payload(payload)
     schedule = schedule_payload(payload)
+    residual_objective = str(loss.get("residual_objective", "absolute")).strip().lower()
+    if residual_objective not in {"absolute", "reference_normalized"}:
+        raise ValueError(
+            "training.loss.residual_objective must be 'absolute' or 'reference_normalized'."
+        )
+    calibration_options = calibration_kwargs(calibration)
+    if calibration_options["calibration_budget_normalization"] not in {"support", "target"}:
+        raise ValueError(
+            "agp_calibration.budget_normalization must be 'support' or 'target'."
+        )
     return ProjectedRunSettings(
         model=model_config_from_payload(payload),
         epochs=int(parameters.get("epochs", 5000)),
@@ -109,6 +119,7 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
         adaptive_growth_per_stage=int(adaptive.get("growth_terms_per_stage", 0)) if isinstance(adaptive, dict) else 0,
         top_coefficients=int(export.get("top_coefficients", 16)),
         residual_weight=float(loss.get("residual", 1.0)),
+        residual_objective=residual_objective,
         agp_l2_weight=float(loss.get("agp_l2", 1e-8)),
         residual_block_normalization=str(loss.get("residual_block_normalization", "none")),
         agp_smoothness_weight=float(loss.get("agp_smoothness", 0.0)),
@@ -116,7 +127,7 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
         schedule_monotonic_weight=float(loss.get("schedule_monotonic", 0.0)),
         schedule_correction_l2_weight=float(loss.get("schedule_correction_l2", 0.0)),
         **schedule_kwargs(schedule),
-        **calibration_kwargs(calibration),
+        **calibration_options,
         path_images=str(export.get("path_images", "Images/")),
         path_data=str(export.get("path_data", "Models_Data/")),
     )
@@ -143,6 +154,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
     )
     loss_weights = ProjectedSparseLossWeights(
         residual=settings.residual_weight,
+        residual_objective=settings.residual_objective,
         agp_l2=settings.agp_l2_weight,
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
@@ -150,6 +162,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
         schedule_monotonic=settings.schedule_monotonic_weight,
         schedule_correction_l2=settings.schedule_correction_l2_weight,
         calibration_budget=settings.calibration_budget_weight,
+        calibration_budget_normalization=settings.calibration_budget_normalization,
         calibration_binary=settings.calibration_binary_weight,
         calibration_scale_l2=settings.calibration_scale_l2_weight,
     )
@@ -230,6 +243,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
                 "gate_temperature": float(getattr(model, "agp_gate_temperature", 1.0)),
                 "uses_ground_truth_observables": False,
                 "objective": "projected_euler_lagrange_residual_with_trainable_scale_and_gates",
+                "target_active_budget": dict(getattr(model, "agp_target_active_budget", {})),
             }
 
         optimizer, optimizer_info = make_optimizer(model, settings)
@@ -297,6 +311,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
         "support": metadata,
         "optimizer": optimizer_info,
         "optimizer_stages": optimizer_stages,
+        "source_config": payload,
     }
     with (data_dir / "config.json").open("w", encoding="utf-8") as handle:
         json.dump(run_metadata, handle, indent=2)

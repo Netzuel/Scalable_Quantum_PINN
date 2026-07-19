@@ -244,7 +244,10 @@ These diagnostics have distinct meanings:
 The four configuration blocks define defaults for future runs only. They do not
 retroactively certify completed artifacts. A normal-run fixed-probe manifest is
 eligible only when established before training, and a valid resume reuses that
-immutable manifest. The diagnostics-only `--refresh-fixed-unseen-only` mode
+immutable manifest. If a baseline checkpoint already exists but its fixed-probe
+manifest does not, normal training fails closed: the baseline and feedback run
+must be restarted under a clean lineage. The diagnostics-only
+`--refresh-fixed-unseen-only` mode
 can backfill one immutable historical probe manifest and evaluate retained
 checkpoints without training or changing checkpoint files. Such a manifest is
 explicitly marked `certification_eligible=false` with
@@ -262,6 +265,13 @@ every expected stage checkpoint before it writes a manifest. It refuses an
 incomplete history without creating diagnostic artifacts, never trains or
 overwrites checkpoints, and preserves existing round-level artifacts while it
 regenerates only diagnostic summaries and plots.
+
+Among feedback rounds and temporal refinements that pass both frozen holdout
+gates, the training champion is the lexicographic minimum of the fixed active
+quotient, holdout relative residual, and fixed null scaled leakage. The summary
+persists the metric tuple for every accepted candidate. Stage names and execution
+order are deterministic tie-breakers only; they are not model-selection
+preferences.
 
 ## Post-Curriculum Temporal Refinement
 
@@ -387,11 +397,12 @@ conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.p
   --config tests/<case>/sweep_test/config.json
 ```
 
-4. Run the post-training physical diagnostic. The script chooses the
-   `adaptive_temporal_refinement/` checkpoint when the feedback summary records
-   it as enabled, otherwise it falls back to `temporal_refinement/` and then to
-   the final feedback round. For the q15 benchmark instance, it compares no-CD,
-   Kipu/DQFM `l=1`, and the learned sparse AGP.
+4. Run the post-training physical diagnostic. For current summaries, the script
+   uses the accepted training champion recorded in `selected_run`; this champion
+   is ranked only by the frozen projected metrics described above. Historical
+   summaries without that field retain their legacy adaptive, temporal, then
+   final-round fallback. For the q15 benchmark instance, the diagnostic compares
+   no-CD, Kipu/DQFM `l=1`, and the learned sparse AGP.
 
 ```bash
 conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_physical_validation.py \
@@ -654,24 +665,26 @@ and `0.00212781`, and the fine evolution reaches peak bond 57 below the cap 64.
 This passes the q20 full-support physical-validation gate, but it does not by
 itself certify global support sufficiency in the full `4**20` basis.
 
-The q156 retained deployment uses the top 2048 terms, which retain `0.9555395`
-of the trained coefficient RMS norm. Its 24-step/bond-32/cutoff-`1e-9` and
-48-step/bond-64/cutoff-`1e-10` results agree for all three protocols. The final
-fine-resolution comparison is:
+The q156 retained deployment uses all 32,768 learned terms from a 257-point
+resampling of the frozen round-20 checkpoint. Resampling performs no optimizer
+steps and preserves the learned support, gates, scale, and schedule. Its
+24-versus-48-step and bond-32-versus-64 convergence pairs pass independently.
+The final fine-resolution comparison is:
 
 | Method | Final energy | Energy error | Ground fidelity |
 |---|---:|---:|---:|
-| no CD | -26.2569071 | 183.343093 | 3.85877e-37 |
-| Kipu/DQFM l=1 | -97.7452309 | 111.854769 | 1.42713e-16 |
-| learned sparse AGP | -188.153516 | 21.4464841 | 0.0207493 |
+| no CD | -26.2623879 | 183.3376121 | 4.00991e-37 |
+| Kipu/DQFM l=1 | -97.7266362 | 111.8733638 | 1.41209e-16 |
+| learned sparse AGP | -201.8513231 | 7.7486769 | 0.2591563 |
 
-This certifies numerical convergence of the historical 2048-term deployment
-ablation under the configured ladder. Under the current full learned-support
-rule, it does not pass physical validation for the trained `K=32768` PINN
-operator. The full support has been evaluated at one coarse MPS resolution, but
-has not yet passed a successive-resolution ladder; canonical q156 full-model
-physical validation is therefore `not tested`. Dense-statevector validation
-also remains unavailable at q156.
+The learned timestep-pair changes are `0.0186256` in energy and `0.000729451`
+in fidelity. The state-pair changes are `2.62134e-6` and `3.03579e-7`.
+Full-source identity, MPO action, norm, compression, timestep, and state gates
+all pass. The 257-point provenance-correct export has the same canonical
+physical hash as the export used by this ladder, so no physical input changed.
+This certifies converged deployment of the complete trained output, not
+sufficiency relative to Pauli strings outside that output. Dense-statevector
+validation remains unavailable at q156.
 
 ## Non-Retained Probe-Loss Variant
 

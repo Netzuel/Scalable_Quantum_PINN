@@ -63,7 +63,32 @@ The training entrypoint automatically trains the missing SiLU baseline, runs
 all 20 fixed-K feedback rounds, performs both temporal refinements, and exports
 the canonical summaries and figures.
 
+The retained q156 physical deployment resamples the frozen round-20 checkpoint
+on 257 time points without further optimization:
+
+```bash
+conda run -n torch-mps python scripts/diagnostics/agp_resample_checkpoint.py \
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q156/sweep_test/config.json \
+  --trained-run tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q156/sweep_test/runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/agp_32768_residual_69855_add_3072_rounds_20/rounds/round_20 \
+  --output-dir tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q156/sweep_test/runs/fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/agp_32768_residual_69855_add_3072_rounds_20/rounds/round_20/deployment_attribution/dense_257_export_v2 \
+  --num-points 257 --device cpu
+```
+
 See `RESULTS.md` for the retained run metrics and certification status.
+
+## Q-Aware Training Candidate
+
+`config_q_aware_candidate.json` is an isolated, untrained v2 candidate. It uses
+reference-normalized residual training, target-normalized gate budgets,
+per-qubit resource policies, pre-training immutable probes, and deterministic
+locality/spatial stratification for both the residual reservoir and support
+swaps. Its output namespace is separate from the retained benchmark.
+
+The earlier v1 q-aware run completed, but it is diagnostic only: its probe
+manifest was persisted after baseline training, and a corrected learned-
+schedule evaluation of round 19 fails both frozen projected gates. It was not
+sent to tensor-network validation and was not promoted.
+
 ## Tensor-Network Validation
 
 Install the optional pinned backend and run the convergence ladder:
@@ -81,15 +106,15 @@ convergence (24 versus 48 steps at MPS bond 64) from state convergence (bonds
 32 versus 64 at 48 steps). MPO compression, source completeness, sampled
 operator action, timestep convergence, and state convergence must all pass.
 
-The retained MPS summary and PDF are written under the round-20 checkpoint:
+The retained MPS summary and PDF are written under the validated dense export:
 
 ```text
-mpo_validation/Models_Data/mps_physical_validation_summary.json
-mpo_validation/Images/physical_method_comparison_table.pdf
+rounds/round_20/deployment_attribution/dense_257_export/mpo_validation/Models_Data/mps_physical_validation_summary.json
+rounds/round_20/deployment_attribution/dense_257_export/mpo_validation/Images/physical_method_comparison_table.pdf
 ```
 
-The fine full-support result reaches `E(T)=-201.390146` and ground fidelity
-`0.2394617`, versus `E_0=-209.6`. This is a convergence-gated scalable
+The fine full-support result reaches `E(T)=-201.851323` and ground fidelity
+`0.2591563`, versus `E_0=-209.6`. This is a convergence-gated scalable
 dynamical validation, not an exact q156 statevector and not a proof that Pauli
 strings outside the trained AGP support are negligible.
 

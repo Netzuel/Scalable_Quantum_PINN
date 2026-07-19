@@ -14,7 +14,12 @@ for path in (SCRIPTS_DIR, TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from models import ProjectedSparseAGPPINN, ScalableAGPPINN, TrainableSiLU
+from models import (
+    ProjectedSparseAGPPINN,
+    ScalableAGPPINN,
+    TrainableSiLU,
+    projected_residual_objective,
+)
 from projected_sparse_training_common import (
     build_projected_support,
     export_results,
@@ -32,6 +37,43 @@ from utils import (
 )
 
 class SparsePauliTests(unittest.TestCase):
+    def test_reference_normalized_residual_is_invariant_to_common_scale(self):
+        base = projected_residual_objective(
+            torch.tensor(2.0),
+            torch.tensor(8.0),
+            mode="reference_normalized",
+        )
+        scaled = projected_residual_objective(
+            torch.tensor(18.0),
+            torch.tensor(72.0),
+            mode="reference_normalized",
+        )
+
+        torch.testing.assert_close(base, torch.tensor(0.25))
+        torch.testing.assert_close(scaled, base)
+
+    def test_reference_normalized_residual_stops_reference_gradient(self):
+        residual = torch.tensor(2.0, requires_grad=True)
+        reference = torch.tensor(8.0, requires_grad=True)
+
+        objective = projected_residual_objective(
+            residual,
+            reference,
+            mode="reference_normalized",
+        )
+        objective.backward()
+
+        torch.testing.assert_close(residual.grad, torch.tensor(0.125))
+        self.assertIsNone(reference.grad)
+
+    def test_projected_residual_objective_rejects_unknown_mode(self):
+        with self.assertRaisesRegex(ValueError, "residual objective"):
+            projected_residual_objective(
+                torch.tensor(1.0),
+                torch.tensor(1.0),
+                mode="ground_truth_guided",
+            )
+
     def test_body_state_can_warm_start_trainable_activation_from_fixed_silu(self):
         source = torch.nn.Sequential(
             torch.nn.Linear(1, 4),

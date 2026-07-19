@@ -1104,12 +1104,17 @@ def train_coupled_round(
 
     loss_weights = ProjectedSparseLossWeights(
         residual=settings.residual_weight,
+        residual_objective=settings.residual_objective,
         agp_l2=settings.agp_l2_weight,
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
         agp_curvature=settings.agp_curvature_weight,
         schedule_monotonic=settings.schedule_monotonic_weight,
         schedule_correction_l2=settings.schedule_correction_l2_weight,
+        calibration_budget=settings.calibration_budget_weight,
+        calibration_budget_normalization=settings.calibration_budget_normalization,
+        calibration_binary=settings.calibration_binary_weight,
+        calibration_scale_l2=settings.calibration_scale_l2_weight,
     )
     tau = torch.linspace(0.0, 1.0, settings.num_points, device=device).view(-1, 1)
     t = config.t_initial + config.physical_time * tau
@@ -1849,6 +1854,8 @@ def main() -> None:
         rounds=rounds,
         add_residual_terms=add_residual_terms,
         unseen_batches_after_final_iteration=unseen_residual_batches,
+        q=base_settings.model.n_qubits,
+        capacity=4**base_settings.model.n_qubits,
     )
 
     if residual_top_k <= len(residual_labels):

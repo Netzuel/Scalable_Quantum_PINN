@@ -11,23 +11,108 @@ for path in (SCRIPTS_DIR, ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from models import ProjectedSparseLossWeights
+from models import ProjectedSparseLossWeights, calibration_budget_penalty
 from agp_residual_calibration import build_gate_initial_logits, calibrated_agp_coefficients
 from projected_sparse_training_common import (
     ProjectedRunSettings,
     ProjectedTrainingConfig,
     build_projected_support,
+    default_config_payload,
     enable_projected_agp_calibration,
     enable_projected_trainable_schedule,
     make_optimizer,
     make_projected_model,
     projected_trainable_state,
     restore_projected_trainable_state,
+    settings_from_payload,
 )
+from agp_baseline_train import settings_for_support
+from agp_evaluate_holdout import load_body_weights as load_evaluate_holdout_weights
+from agp_holdout_study import load_body_weights as load_holdout_study_weights
 from utils import SparsePauliOperator
 
 
 class AGPJointCalibrationTests(unittest.TestCase):
+    def test_calibration_budget_can_normalize_by_target(self):
+        active_sum = torch.tensor(6.0)
+
+        support_normalized = calibration_budget_penalty(
+            active_sum,
+            target_active_terms=2,
+            support_terms=8,
+            mode="support",
+        )
+        target_normalized = calibration_budget_penalty(
+            active_sum,
+            target_active_terms=2,
+            support_terms=8,
+            mode="target",
+        )
+
+        torch.testing.assert_close(support_normalized, torch.tensor(0.25))
+        torch.testing.assert_close(target_normalized, torch.tensor(4.0))
+
+    def test_normalization_modes_are_configurable_and_backward_compatible(self):
+        fallback = ProjectedTrainingConfig(system="unit", n_qubits=9)
+        default_settings = settings_from_payload(default_config_payload(fallback), fallback)
+
+        self.assertEqual(default_settings.residual_objective, "absolute")
+        self.assertEqual(default_settings.calibration_budget_normalization, "support")
+
+        payload = default_config_payload(fallback)
+        payload["training"]["loss"]["residual_objective"] = "reference_normalized"
+        payload["agp_calibration"]["budget_normalization"] = "target"
+        configured = settings_from_payload(payload, fallback)
+
+        self.assertEqual(configured.residual_objective, "reference_normalized")
+        self.assertEqual(configured.calibration_budget_normalization, "target")
+
+    def test_baseline_settings_preserve_normalized_objective_modes(self):
+        fallback = ProjectedTrainingConfig(system="unit", n_qubits=9)
+        payload = default_config_payload(fallback)
+        payload["training"]["loss"]["residual_objective"] = "reference_normalized"
+        payload["agp_calibration"]["budget_normalization"] = "target"
+
+        settings = settings_for_support(payload, agp_terms=32)
+
+        self.assertEqual(settings.residual_objective, "reference_normalized")
+        self.assertEqual(settings.calibration_budget_normalization, "target")
+
+    def test_per_qubit_active_budget_is_resolved_against_model_capacity(self):
+        model, settings = self._model_and_settings()
+        settings = ProjectedRunSettings(
+            **{
+                **settings.__dict__,
+                "calibration_target_active_terms": {
+                    "mode": "per_qubit",
+                    "per_qubit": 3.0,
+                    "minimum": 1,
+                },
+            }
+        )
+
+        enable_projected_agp_calibration(model, settings)
+
+        self.assertEqual(model.agp_target_active_terms, len(model.agp_labels))
+        self.assertEqual(model.agp_target_active_budget["requested"], 6)
+        self.assertEqual(model.agp_target_active_budget["realized"], len(model.agp_labels))
+        self.assertEqual(model.agp_target_active_budget["clipping_reasons"], ("capacity",))
+
+    def test_config_preserves_per_qubit_active_budget_spec(self):
+        fallback = ProjectedTrainingConfig(system="unit", n_qubits=9)
+        payload = default_config_payload(fallback)
+        spec = {
+            "mode": "per_qubit",
+            "per_qubit": 102.4,
+            "minimum": 2048,
+            "maximum": 32768,
+        }
+        payload["agp_calibration"]["target_active_terms"] = spec
+
+        settings = settings_from_payload(payload, fallback)
+
+        self.assertEqual(settings.calibration_target_active_terms, spec)
+
     def _model_and_settings(self):
         h0 = SparsePauliOperator({"XI": -1.0, "IX": -1.0}, n_qubits=2)
         h1 = SparsePauliOperator({"ZI": -1.0, "IZ": -1.0, "ZZ": -0.5}, n_qubits=2)
@@ -139,6 +224,50 @@ class AGPJointCalibrationTests(unittest.TestCase):
             if name.startswith("schedule_body.")
         ]
         self.assertTrue(any(grad is not None for grad in schedule_grads))
+
+    def test_holdout_checkpoint_loaders_restore_the_trainable_schedule(self):
+        source, settings = self._model_and_settings()
+        settings = ProjectedRunSettings(
+            **{
+                **settings.__dict__,
+                "schedule_trainable_enabled": True,
+                "schedule_hidden_width": 6,
+                "schedule_hidden_layers": 1,
+                "schedule_activation": "tanh",
+                "schedule_correction_amplitude": 2.4,
+            }
+        )
+        enable_projected_trainable_schedule(source, settings)
+        with torch.no_grad():
+            for parameter in source.schedule_body.parameters():
+                parameter.fill_(0.125)
+
+        checkpoint = {
+            "model_state_dict": source.state_dict(),
+            "agp_labels": list(source.agp_labels),
+            "config": {
+                "training": {
+                    "schedule_trainable_enabled": True,
+                    "schedule_hidden_width": settings.schedule_hidden_width,
+                    "schedule_hidden_layers": settings.schedule_hidden_layers,
+                    "schedule_activation": settings.schedule_activation,
+                    "schedule_base": settings.schedule_base,
+                    "schedule_correction_amplitude": settings.schedule_correction_amplitude,
+                }
+            },
+        }
+        sample_t = torch.tensor([[0.5]])
+        expected_lambda = source.schedule(sample_t)[0]
+
+        for loader in (load_holdout_study_weights, load_evaluate_holdout_weights):
+            with self.subTest(loader=loader.__module__):
+                restored, _ = self._model_and_settings()
+                loader(restored, checkpoint)
+
+                self.assertTrue(restored.has_trainable_schedule())
+                torch.testing.assert_close(restored.schedule(sample_t)[0], expected_lambda)
+                for key, expected in source.schedule_body.state_dict().items():
+                    torch.testing.assert_close(restored.schedule_body.state_dict()[key], expected)
 
     def test_gate_initial_logits_select_top_rms_terms(self):
         logits = build_gate_initial_logits(

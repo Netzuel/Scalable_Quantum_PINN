@@ -2,11 +2,79 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import torch
+
+
+CURRENT_FIXED_UNSEEN_MANIFEST_SCHEMA = 2
+
+
+def fixed_unseen_manifest_contract(payload: dict[str, object]) -> tuple[bool, str]:
+    """Validate immutable probe provenance and optimizer-lifecycle evidence."""
+
+    schema_version = payload.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or schema_version < CURRENT_FIXED_UNSEEN_MANIFEST_SCHEMA
+    ):
+        return False, "legacy_fixed_unseen_manifest"
+    if schema_version != CURRENT_FIXED_UNSEEN_MANIFEST_SCHEMA:
+        return False, "unsupported_fixed_unseen_manifest_schema"
+    stored_hash = payload.get("manifest_sha256")
+    if not isinstance(stored_hash, str) or not stored_hash:
+        return False, "missing_manifest_sha256"
+    hashed_payload = {
+        key: value
+        for key, value in payload.items()
+        if key != "manifest_sha256"
+    }
+    encoded = json.dumps(
+        hashed_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    if stored_hash != hashlib.sha256(encoded).hexdigest():
+        return False, "invalid_fixed_unseen_manifest_hash"
+
+    eligible = payload.get("certification_eligible")
+    provenance = payload.get("provenance")
+    reason = payload.get("certification_reason")
+    lifecycle = payload.get("training_lifecycle")
+    if not isinstance(lifecycle, dict):
+        return False, (
+            "missing_pretraining_lifecycle"
+            if eligible is True
+            else "missing_diagnostic_lifecycle"
+        )
+    if (
+        eligible is True
+        and provenance == "pre_training_fixed_probe"
+        and reason == "pre_training_fixed_probe"
+    ):
+        if lifecycle != {
+            "probe_selection_phase": "before_optimizer_step",
+            "baseline_checkpoint_present": False,
+        }:
+            return False, "invalid_pretraining_lifecycle"
+        return True, "pre_training_fixed_probe"
+    if (
+        eligible is False
+        and provenance == "diagnostic_backfill"
+        and reason == "historical_diagnostic_backfill"
+    ):
+        if lifecycle != {
+            "probe_selection_phase": "historical_after_training",
+            "baseline_checkpoint_present": True,
+        }:
+            return False, "invalid_diagnostic_lifecycle"
+        return True, "historical_diagnostic_backfill"
+    return False, "invalid_fixed_unseen_provenance"
 
 
 @dataclass(frozen=True)
@@ -17,6 +85,9 @@ class FixedUnseenProbeConfig:
     reference_rms_threshold: float = 1.0e-12
     seed: int = 0
     candidate_multiplier: int = 4
+    reservation_mode: str = "pre_feedback_global"
+    active_resource_budget: dict[str, object] | None = None
+    null_resource_budget: dict[str, object] | None = None
 
 
 def select_fixed_unseen_probes(
@@ -59,6 +130,59 @@ def select_fixed_unseen_probes(
             else "insufficient_candidates"
         ),
     }
+
+
+def partition_fixed_unseen_candidates(
+    labels: Sequence[str],
+    reference_rms: np.ndarray,
+    *,
+    excluded_labels: Collection[str],
+    config: FixedUnseenProbeConfig,
+    feedback_excluded_labels: Collection[str] = (),
+) -> tuple[dict[str, object], list[str]]:
+    """Reserve immutable probes before exposing candidates to feedback training."""
+
+    if config.enabled:
+        probe = select_fixed_unseen_probes(
+            labels,
+            reference_rms,
+            excluded_labels=excluded_labels,
+            config=config,
+        )
+    else:
+        probe = {
+            "active_labels": [],
+            "null_labels": [],
+            "active_reference_rms": [],
+            "null_reference_rms": [],
+            "requested_active_terms": config.active_terms,
+            "requested_null_terms": config.null_terms,
+            "status": "disabled",
+        }
+    reserved = set(probe["active_labels"]) | set(probe["null_labels"])
+    feedback_excluded = {str(label) for label in feedback_excluded_labels}
+    feedback_labels = [
+        str(label)
+        for label in labels
+        if str(label) not in reserved and str(label) not in feedback_excluded
+    ]
+    probe.update(
+        {
+            "reservation_mode": "pre_feedback_global",
+            "enabled": bool(config.enabled),
+            "reference_rms_threshold": float(config.reference_rms_threshold),
+            "seed": int(config.seed),
+            "candidate_multiplier": int(config.candidate_multiplier),
+            "candidate_terms": len(labels),
+            "excluded_terms": len({str(label) for label in excluded_labels}),
+            "feedback_excluded_terms": len(feedback_excluded),
+            "reserved_terms": len(reserved),
+            "feedback_candidate_terms": len(feedback_labels),
+            "active_resource_budget": config.active_resource_budget,
+            "null_resource_budget": config.null_resource_budget,
+        }
+    )
+    return probe, feedback_labels
 
 
 def norm_sq_subset(values: torch.Tensor, indices: Sequence[int]) -> torch.Tensor:

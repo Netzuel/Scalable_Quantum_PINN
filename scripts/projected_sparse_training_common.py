@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import sys
+from collections.abc import Mapping
 from collections import defaultdict
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -18,7 +19,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from models import ProjectedSparseAGPPINN, ProjectedSparseLossWeights
+from models import ProjectedSparseAGPExportModel, ProjectedSparseAGPPINN, ProjectedSparseLossWeights
+try:
+    from agp_resource_policy import resolve_resource_budget
+    from agp_stratified_support import stratified_ranked_selection
+except ModuleNotFoundError:  # pragma: no cover - package-style imports in tests
+    from scripts.agp_resource_policy import resolve_resource_budget
+    from scripts.agp_stratified_support import stratified_ranked_selection
 from utils import (
     FULL_PAULI_EXACT_MAX_QUBITS,
     SafeMPSSOAP,
@@ -95,6 +102,7 @@ class ProjectedRunSettings:
     adaptive_max_agp_terms: int | None = None
     top_coefficients: int = 8
     residual_weight: float = 1.0
+    residual_objective: str = "absolute"
     agp_l2_weight: float = 1e-8
     residual_block_normalization: str = "none"
     agp_smoothness_weight: float = 0.0
@@ -109,7 +117,7 @@ class ProjectedRunSettings:
     schedule_monotonic_weight: float = 0.0
     schedule_correction_l2_weight: float = 0.0
     calibration_enabled: bool = False
-    calibration_target_active_terms: int | None = None
+    calibration_target_active_terms: int | dict[str, object] | None = None
     calibration_gate_temperature: float = 1.0
     calibration_initial_gamma: float = 1.0
     calibration_active_logit: float = 4.0
@@ -117,6 +125,7 @@ class ProjectedRunSettings:
     calibration_gamma_lr: float | None = None
     calibration_gate_lr: float | None = None
     calibration_budget_weight: float = 0.0
+    calibration_budget_normalization: str = "support"
     calibration_binary_weight: float = 0.0
     calibration_scale_l2_weight: float = 0.0
     path_images: str = "Images/"
@@ -205,6 +214,7 @@ def default_config_payload(config: ProjectedTrainingConfig) -> dict[str, object]
             },
             "loss": {
                 "residual": 1.0,
+                "residual_objective": "absolute",
                 "agp_l2": 1e-8,
                 "residual_block_normalization": "none",
                 "agp_smoothness": 0.0,
@@ -230,6 +240,7 @@ def default_config_payload(config: ProjectedTrainingConfig) -> dict[str, object]
             "gamma_lr": None,
             "gate_lr": None,
             "budget_weight": 0.0,
+            "budget_normalization": "support",
             "binary_weight": 0.0,
             "scale_l2_weight": 0.0,
         },
@@ -289,6 +300,17 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
     max_agp_terms_raw = support_adaptive.get("max_agp_terms") if isinstance(support_adaptive, dict) else None
     adaptive_default = config.n_qubits > FULL_PAULI_EXACT_MAX_QUBITS
 
+    residual_objective = str(training_loss.get("residual_objective", "absolute")).strip().lower()
+    if residual_objective not in {"absolute", "reference_normalized"}:
+        raise ValueError(
+            "training.loss.residual_objective must be 'absolute' or 'reference_normalized'."
+        )
+    budget_normalization = str(calibration.get("budget_normalization", "support")).strip().lower()
+    if budget_normalization not in {"support", "target"}:
+        raise ValueError(
+            "agp_calibration.budget_normalization must be 'support' or 'target'."
+        )
+
     return ProjectedRunSettings(
         model=config,
         epochs=int(training_parameters.get("epochs", 25)),
@@ -312,6 +334,7 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
         adaptive_max_agp_terms=int(max_agp_terms_raw) if max_agp_terms_raw is not None else None,
         top_coefficients=int(training_export.get("top_coefficients", 8)),
         residual_weight=float(training_loss.get("residual", 1.0)),
+        residual_objective=residual_objective,
         agp_l2_weight=float(training_loss.get("agp_l2", 1e-8)),
         residual_block_normalization=str(training_loss.get("residual_block_normalization", "none")),
         agp_smoothness_weight=float(training_loss.get("agp_smoothness", 0.0)),
@@ -348,9 +371,13 @@ def optional_float_payload(payload: dict[str, object], key: str) -> float | None
 
 def calibration_kwargs(calibration: dict[str, object]) -> dict[str, object]:
     target = calibration.get("target_active_terms")
+    if isinstance(target, dict):
+        target_value: int | dict[str, object] | None = dict(target)
+    else:
+        target_value = int(target) if target is not None else None
     return {
         "calibration_enabled": bool(calibration.get("enabled", False)),
-        "calibration_target_active_terms": int(target) if target is not None else None,
+        "calibration_target_active_terms": target_value,
         "calibration_gate_temperature": float(calibration.get("gate_temperature", 1.0)),
         "calibration_initial_gamma": float(calibration.get("initial_gamma", 1.0)),
         "calibration_active_logit": float(calibration.get("active_logit", 4.0)),
@@ -358,6 +385,9 @@ def calibration_kwargs(calibration: dict[str, object]) -> dict[str, object]:
         "calibration_gamma_lr": optional_float_payload(calibration, "gamma_lr"),
         "calibration_gate_lr": optional_float_payload(calibration, "gate_lr"),
         "calibration_budget_weight": float(calibration.get("budget_weight", 0.0)),
+        "calibration_budget_normalization": str(
+            calibration.get("budget_normalization", "support")
+        ).strip().lower(),
         "calibration_binary_weight": float(calibration.get("binary_weight", 0.0)),
         "calibration_scale_l2_weight": float(calibration.get("scale_l2_weight", 0.0)),
     }
@@ -434,12 +464,25 @@ def enable_projected_agp_calibration(
         target = int(calibration_state["target_active_terms"])
     if target is None:
         target = len(model.agp_labels)
-    target = max(1, min(int(target), len(model.agp_labels)))
+    target_budget = resolve_resource_budget(
+        target,
+        q=model.n_qubits,
+        capacity=len(model.agp_labels),
+        name="agp_calibration.target_active_terms",
+    )
+    target = max(1, target_budget.realized)
+    target_budget_payload = target_budget.to_dict()
+    if target != target_budget.realized:
+        target_budget_payload["realized"] = target
+        target_budget_payload["clipping_reasons"] = tuple(target_budget.clipping_reasons) + (
+            "model_minimum",
+        )
     gate_temperature = float(settings.calibration_gate_temperature)
     if calibration_state is not None and "gate_temperature" in calibration_state:
         gate_temperature = float(calibration_state["gate_temperature"])
     model.agp_gate_temperature = gate_temperature
     model.agp_target_active_terms = int(target)
+    model.agp_target_active_budget = target_budget_payload
     device = next(model.parameters()).device
     log_gamma_value = math.log(max(float(settings.calibration_initial_gamma), 1e-12))
     gate_logits = initial_gate_logits_for_labels(
@@ -576,6 +619,57 @@ def load_body_state_compatible(body: torch.nn.Module, state: dict[str, torch.Ten
             "Incompatible body checkpoint state. "
             f"missing={bad_missing} unexpected={bad_unexpected}"
         )
+
+
+def load_projected_checkpoint_weights(
+    model: ProjectedSparseAGPPINN,
+    checkpoint: Mapping[str, object],
+) -> None:
+    """Restore every trainable projected-AGP component used by evaluation."""
+
+    raw_state = checkpoint.get("model_state_dict")
+    if not isinstance(raw_state, Mapping):
+        raise TypeError("Projected checkpoint must contain model_state_dict.")
+    state = {str(key): value for key, value in raw_state.items()}
+    device = next(model.parameters()).device
+
+    body_state = {
+        key.removeprefix("body."): value.to(device)
+        for key, value in state.items()
+        if key.startswith("body.") and isinstance(value, torch.Tensor)
+    }
+    load_body_state_compatible(model.body, body_state)
+
+    checkpoint_config = checkpoint.get("config", {})
+    checkpoint_config = checkpoint_config if isinstance(checkpoint_config, Mapping) else {}
+    training_metadata = checkpoint_config.get("training", {})
+    training_metadata = training_metadata if isinstance(training_metadata, Mapping) else {}
+    schedule_body = {
+        key.removeprefix("schedule_body."): value.to(device)
+        for key, value in state.items()
+        if key.startswith("schedule_body.") and isinstance(value, torch.Tensor)
+    }
+    if schedule_body:
+        model.enable_trainable_schedule(
+            hidden_width=int(training_metadata.get("schedule_hidden_width", 16)),
+            hidden_layers=int(training_metadata.get("schedule_hidden_layers", 1)),
+            activation=str(training_metadata.get("schedule_activation", "tanh")),
+            base=str(training_metadata.get("schedule_base", "sinusoidal_sin2")),
+            correction_amplitude=float(training_metadata.get("schedule_correction_amplitude", 2.4)),
+        )
+        model.schedule_body.load_state_dict(schedule_body)
+
+    log_gamma = state.get("agp_log_gamma")
+    gate_logits = state.get("agp_gate_logits")
+    if isinstance(log_gamma, torch.Tensor) and isinstance(gate_logits, torch.Tensor):
+        support_metadata = checkpoint_config.get("support", {})
+        support_metadata = support_metadata if isinstance(support_metadata, Mapping) else {}
+        calibration = support_metadata.get("agp_calibration", {})
+        calibration = calibration if isinstance(calibration, Mapping) else {}
+        model.agp_gate_temperature = float(calibration.get("gate_temperature", 1.0))
+        model.agp_target_active_terms = int(calibration.get("target_active_terms", len(model.agp_labels)))
+        model.agp_log_gamma = torch.nn.Parameter(log_gamma.detach().to(device).float().reshape(()))
+        model.agp_gate_logits = torch.nn.Parameter(gate_logits.detach().to(device).float().flatten())
 
 
 def restore_projected_trainable_state(
@@ -835,6 +929,25 @@ def make_projected_model(
     ).to(device)
 
 
+def make_projected_export_model(
+    config: ProjectedTrainingConfig,
+    agp_labels: Iterable[str],
+    device: torch.device,
+) -> ProjectedSparseAGPExportModel:
+    """Build only the network surface required to resample a checkpoint."""
+
+    return ProjectedSparseAGPExportModel(
+        config.n_qubits,
+        list(agp_labels),
+        hidden_layers=config.hidden_layers,
+        hidden_width=config.hidden_width,
+        activation=config.activation,
+        layer_type=config.layer_type,
+        t_min=config.t_initial,
+        t_max=config.t_final,
+    ).to(device)
+
+
 def transfer_output_rows(
     old_layer: torch.nn.Module,
     new_layer: torch.nn.Module,
@@ -1029,6 +1142,7 @@ def plan_fixed_k_support_swap(
     max_swaps: int,
     candidate_pool_size: int,
     protect_top_fraction: float = 0.0,
+    stratification: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Plan a fixed-K AGP support swap from weak active terms to hard candidates."""
 
@@ -1064,6 +1178,19 @@ def plan_fixed_k_support_swap(
         current_agp_labels=labels,
         candidate_pool_size=candidate_pool_size,
     )
+    candidate_pool = list(candidates)
+    stratification_provenance: dict[str, object] = {"enabled": False}
+    if stratification and bool(stratification.get("enabled", False)):
+        selection = stratified_ranked_selection(
+            candidates,
+            requested,
+            q=h0.n_qubits,
+            locality_quotas=stratification.get("locality_quotas", {}),
+            spatial_bins=int(stratification.get("spatial_bins", 1)),
+            seed=int(stratification.get("seed", 0)),
+        )
+        candidates = list(selection.selected_rows)
+        stratification_provenance = selection.provenance
     added: list[str] = []
     seen = set(labels)
     for row in candidates:
@@ -1085,8 +1212,9 @@ def plan_fixed_k_support_swap(
         "new_agp_labels": new_labels,
         "removed_labels": removed,
         "added_labels": added,
-        "candidate_labels": [str(row["label"]) for row in candidates],
+        "candidate_labels": [str(row["label"]) for row in candidate_pool],
         "candidate_rows": candidates[: max(len(added), 32)],
+        "stratification": stratification_provenance,
         "protected_label_count": len(protected),
         "protect_top_fraction": float(protect_top_fraction),
         "reason": "planned" if swap_count else "no_candidates",
@@ -1642,6 +1770,47 @@ def plot_support_summary(metadata: dict[str, object], images_dir: Path) -> None:
     plt.close(fig)
 
 
+def sample_projected_export_payload(
+    model: ProjectedSparseAGPPINN,
+    tau: torch.Tensor,
+    t: torch.Tensor,
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Evaluate one projected checkpoint using the canonical export semantics."""
+
+    with torch.no_grad():
+        prediction = model(t)
+        agp_coefficients = prediction["agp_coefficients"].detach().cpu()
+        raw_agp_coefficients = prediction.get(
+            "raw_agp_coefficients", prediction["agp_coefficients"]
+        ).detach().cpu()
+        d_lambda_dt = prediction["d_lambda_dt"].detach().cpu()
+        hcd_coefficients = d_lambda_dt * agp_coefficients
+        calibrated = model.has_agp_calibration()
+        coefficient_definition = (
+            "d_lambda_dt * gamma * g_P * C_P(t)"
+            if calibrated
+            else "d_lambda_dt * C_P(t)"
+        )
+        return {
+            "t": t.detach().cpu(),
+            "tau": tau.detach().cpu(),
+            "pauli_labels": list(model.agp_labels),
+            "agp_coefficients": agp_coefficients,
+            "raw_agp_coefficients": raw_agp_coefficients,
+            "counterdiabatic_coefficients": hcd_coefficients,
+            "counterdiabatic_coefficient_definition": coefficient_definition,
+            "lambda": prediction["lambda"].detach().cpu(),
+            "d_lambda_dt": d_lambda_dt,
+            "schedule": "trainable_bounded_envelope" if model.has_trainable_schedule() else "sinusoidal_sin2",
+            "schedule_base": str(getattr(model, "schedule_base", "sinusoidal_sin2")),
+            "schedule_correction_amplitude": float(getattr(model, "schedule_correction_amplitude", 0.0)),
+            "calibration_gamma": float(model.agp_calibration_gamma().detach().cpu()) if calibrated else 1.0,
+            "calibration_gates": model.agp_calibration_gates().detach().cpu() if calibrated else None,
+            "support_metadata": dict(metadata or {}),
+        }
+
+
 def export_results(
     model: ProjectedSparseAGPPINN,
     tau: torch.Tensor,
@@ -1653,19 +1822,22 @@ def export_results(
     *,
     top_k: int,
 ) -> None:
-    with torch.no_grad():
-        prediction = model(t)
-        agp_coefficients = prediction["agp_coefficients"].detach().cpu()
-        raw_agp_coefficients = prediction.get("raw_agp_coefficients", prediction["agp_coefficients"]).detach().cpu()
-        d_lambda_dt = prediction["d_lambda_dt"].detach().cpu()
-        hcd_coefficients = d_lambda_dt * agp_coefficients
-        tau_cpu = tau.detach().cpu()
-        t_cpu = t.detach().cpu()
+    export_payload = sample_projected_export_payload(model, tau, t, metadata)
+    agp_coefficients = export_payload["agp_coefficients"]
+    d_lambda_dt = export_payload["d_lambda_dt"]
+    hcd_coefficients = export_payload["counterdiabatic_coefficients"]
+    tau_cpu = export_payload["tau"]
+    t_cpu = export_payload["t"]
+    if not all(
+        isinstance(value, torch.Tensor)
+        for value in (agp_coefficients, d_lambda_dt, hcd_coefficients, tau_cpu, t_cpu)
+    ):
+        raise TypeError("Projected export payload contains non-tensor numerical fields.")
 
     ranked = rank_coefficients(hcd_coefficients, model.agp_labels)
     least_terms = list(reversed([row for row in ranked if row["order"] > 0]))[:top_k]
     calibrated = model.has_agp_calibration()
-    coefficient_definition = "d_lambda_dt * gamma * g_P * C_P(t)" if calibrated else "d_lambda_dt * C_P(t)"
+    coefficient_definition = str(export_payload["counterdiabatic_coefficient_definition"])
     importance_payload = {
         "coefficient_kind": "joint_calibrated_projected_counterdiabatic_hamiltonian" if calibrated else "projected_counterdiabatic_hamiltonian",
         "coefficient_definition": coefficient_definition,
@@ -1679,26 +1851,7 @@ def export_results(
         json.dump(importance_payload, handle, indent=2)
         handle.write("\n")
 
-    torch.save(
-        {
-            "t": t_cpu,
-            "tau": tau_cpu,
-            "pauli_labels": model.agp_labels,
-            "agp_coefficients": agp_coefficients,
-            "raw_agp_coefficients": raw_agp_coefficients,
-            "counterdiabatic_coefficients": hcd_coefficients,
-            "counterdiabatic_coefficient_definition": coefficient_definition,
-            "lambda": prediction["lambda"].detach().cpu(),
-            "d_lambda_dt": d_lambda_dt,
-            "schedule": "trainable_bounded_envelope" if model.has_trainable_schedule() else "sinusoidal_sin2",
-            "schedule_base": str(getattr(model, "schedule_base", "sinusoidal_sin2")),
-            "schedule_correction_amplitude": float(getattr(model, "schedule_correction_amplitude", 0.0)),
-            "calibration_gamma": float(model.agp_calibration_gamma().detach().cpu()) if calibrated else 1.0,
-            "calibration_gates": model.agp_calibration_gates().detach().cpu() if calibrated else None,
-            "support_metadata": metadata,
-        },
-        data_dir / "final_agp_coefficients.pt",
-    )
+    torch.save(export_payload, data_dir / "final_agp_coefficients.pt")
 
     plot_loss_history(history, images_dir)
     export_plot_numerics(
@@ -1816,6 +1969,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
     )
     loss_weights = ProjectedSparseLossWeights(
         residual=settings.residual_weight,
+        residual_objective=settings.residual_objective,
         agp_l2=settings.agp_l2_weight,
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
@@ -1823,6 +1977,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
         schedule_monotonic=settings.schedule_monotonic_weight,
         schedule_correction_l2=settings.schedule_correction_l2_weight,
         calibration_budget=settings.calibration_budget_weight,
+        calibration_budget_normalization=settings.calibration_budget_normalization,
         calibration_binary=settings.calibration_binary_weight,
         calibration_scale_l2=settings.calibration_scale_l2_weight,
     )
@@ -1901,6 +2056,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
                 "gate_temperature": float(getattr(model, "agp_gate_temperature", 1.0)),
                 "uses_ground_truth_observables": False,
                 "objective": "projected_euler_lagrange_residual_with_trainable_scale_and_gates",
+                "target_active_budget": dict(getattr(model, "agp_target_active_budget", {})),
             }
 
         optimizer, optimizer_info = make_optimizer(model, settings)

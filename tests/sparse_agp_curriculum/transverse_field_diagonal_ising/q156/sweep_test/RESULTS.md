@@ -41,6 +41,30 @@ The run therefore reports the absolute unseen residual and per-term residual
 instead of dividing by zero. At round 20 the unseen residual per term is
 `2.23418e-9`.
 
+## Q-Aware Candidate Diagnosis
+
+The separately named q-aware v1 candidate completed 20 rounds plus both
+temporal refinements, but it is not certification-eligible. Its fixed-probe
+manifest was written after the baseline checkpoint and therefore fails the
+current lifecycle contract with `missing_pretraining_lifecycle`.
+
+The original evaluator also failed to restore the learned schedule. After that
+loader defect was corrected, a round-19 diagnostic over all 69,855 generated
+residual labels gave:
+
+| Metric | Value | Required | Status |
+|---|---:|---:|---|
+| Generated holdout relative residual | 0.3049245 | <= 0.10 | fail |
+| Fixed-active unseen relative residual | 1.3637672 | <= 1.0 | fail |
+| Moving unseen relative residual | 1.3826552 | diagnostic | diagnostic |
+| Fixed-null scaled leakage | 4.69132e-4 | diagnostic | diagnostic |
+
+The candidate was therefore rejected before tensor-network evolution. The
+retained training checkpoint and curriculum remain unchanged. The isolated v2
+configuration fixes the evaluator, probe lifecycle, formal-probe exclusion,
+q-aware resource accounting, and residual/support stratification, but it has
+not been trained.
+
 ## Exact Final-Hamiltonian Reference
 
 The final diagonal Ising problem has:
@@ -66,16 +90,16 @@ used.
 |---|---:|---:|---:|---:|---:|
 | no CD | -26.2623879 | 183.3376121 | 4.00991e-37 | 0.970088 | 0.841646 |
 | Kipu/DQFM l=1 | -97.7266362 | 111.8733638 | 1.41209e-16 | 0.846403 | 0.424950 |
-| learned sparse AGP | -201.3901459 | 8.2098541 | 0.2394617 | 0.049607 | 0.040647 |
+| learned sparse AGP | -201.8513231 | 7.7486769 | 0.2591563 | 0.045929 | 0.039075 |
 
 The numerical ladder changes one approximation axis at a time:
 
 | Gate | Coarse/fine settings | PINN energy difference | PINN fidelity difference | Status |
 |---|---|---:|---:|---|
-| Timestep | 24/48 steps, MPS bond 64 | 0.0460534 | 0.00158305 | pass |
-| State bond | bonds 32/64, 48 steps | 2.34444e-6 | 2.89228e-7 | pass |
+| Timestep | 24/48 steps, MPS bond 64 | 0.0186256 | 0.000729451 | pass |
+| State bond | bonds 32/64, 48 steps | 2.62134e-6 | 3.03579e-7 | pass |
 
-The learned dynamic MPO has peak bond 95, and the fine learned trajectory
+The learned dynamic MPO has peak bond 102, and the fine learned trajectory
 reaches the configured MPS bond cap of 64. Learned-source completeness passes,
 the sampled learned-MPO action error is zero, and the maximum reported static
 action errors are `2.39139e-5` for no CD and `4.40030e-5` for nested l=1,
@@ -83,6 +107,14 @@ below the configured `1e-3` threshold. All required q156 tensor-network gates
 therefore pass. This validates the numerical deployment of the complete
 trained output; it is not an exact q156 statevector or a proof of sufficiency
 relative to Pauli strings outside the learned support.
+
+The retained physical source is a 257-point resampling of the frozen round-20
+checkpoint with zero optimization steps. Its provenance-correct export has the
+same canonical physical hash as the export used by the completed tensor-network
+ladder: `a1cdb1ce8c8b80121f883a1453614bcde20efd5c9c7698aad916c2155447b951`.
+Relative to the previous 16-point deployment, the denser representation raises
+fidelity from `0.2394617` to `0.2591563` and reduces energy error from
+`8.2098541` to `7.7486769`; it changes deployment accuracy, not the trained AGP.
 
 ## Learned-Support Deployment Diagnostic
 
@@ -176,8 +208,8 @@ Models_Data/holdout_feedback_summary_residual_69855.json
 The retained canonical tensor-network outputs are:
 
 ```text
-rounds/round_20/mpo_validation/Models_Data/mps_physical_validation_summary.json
-rounds/round_20/mpo_validation/Images/physical_method_comparison_table.pdf
+rounds/round_20/deployment_attribution/dense_257_export/mpo_validation/Models_Data/mps_physical_validation_summary.json
+rounds/round_20/deployment_attribution/dense_257_export/mpo_validation/Images/physical_method_comparison_table.pdf
 ```
 
 The historical support-deployment ablations remain under:
