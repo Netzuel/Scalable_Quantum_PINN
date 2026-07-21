@@ -686,6 +686,23 @@ This certifies converged deployment of the complete trained output, not
 sufficiency relative to Pauli strings outside that output. Dense-statevector
 validation remains unavailable at q156.
 
+### Non-Retained q156 Block-Balanced Residual Variant
+
+A q-aware candidate replaced the aggregate projected objective with the mean
+per-qubit reference-normalized residual plus a CVaR-style tail over the worst
+15% qubit blocks. It completed the full fixed-K, 20-round curriculum with
+`K=32768`, but no checkpoint passed the frozen-active projected gate: the best
+reported post-curriculum value was `1.35409` against the required `1.0`.
+
+The deterministic round-20 endpoint was nevertheless evaluated as a
+diagnostic using all 32,768 learned terms. At 48 steps and MPS bond 64 it gave
+`E(T)=-146.48933` and ground fidelity `1.23696e-9`, compared with
+`E(T)=-201.8513231` and fidelity `0.2591563` for the retained q156 benchmark.
+The 24-to-48-step energy difference was also far outside tolerance. This loss
+variant is therefore recorded as rejected and is not part of the current
+benchmark methodology. Its experimental code, configuration, and generated
+artifacts were removed; only this written diagnosis is retained.
+
 ## Non-Retained Probe-Loss Variant
 
 The current retained methodology does not include the previously tested

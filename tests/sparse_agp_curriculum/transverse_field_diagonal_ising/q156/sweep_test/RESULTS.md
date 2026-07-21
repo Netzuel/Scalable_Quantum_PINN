@@ -65,6 +65,45 @@ configuration fixes the evaluator, probe lifecycle, formal-probe exclusion,
 q-aware resource accounting, and residual/support stratification, but it has
 not been trained.
 
+## Block-Balanced Candidate Diagnosis
+
+The q-aware v2 curriculum was trained end to end with a block-balanced
+reference-normalized objective. Each loss evaluation combined the mean
+per-qubit residual with the worst 15% qubit-block tail. The run kept
+`K=32768`, completed all 20 rounds, realized 67,297 generated residual strings,
+and retained 3,021 final unseen terms.
+
+| Checkpoint | Training relative residual | Holdout relative residual | Frozen-active relative residual | Gate status |
+|---|---:|---:|---:|---|
+| Round 20 | 6.86894e-4 | 6.84697e-4 | 1.57992 | fail |
+| Temporal refinement | 1.01447e-3 | 1.07421e-3 | 1.48088 | fail |
+| Adaptive refinement | 3.67005e-3 | 1.03489e-3 | 1.35409 | fail |
+
+No checkpoint passed both the generated-holdout threshold (`0.10`) and the
+frozen-active threshold (`1.0`), so no projected champion was selected. Exact
+ground-state information was not used for training or checkpoint selection.
+
+For diagnosis only, the deterministic round-20 endpoint was resampled at 257
+time points with zero optimizer steps and evolved with all 32,768 learned AGP
+terms:
+
+| Resolution | Steps | MPS bond | Final energy | Energy error | Ground fidelity |
+|---|---:|---:|---:|---:|---:|
+| Time coarse | 24 | 64 | -116.5807631 | 93.0192369 | 3.40274e-14 |
+| State coarse | 48 | 32 | -146.4896411 | 63.1103589 | 1.23538e-9 |
+| Fine diagnostic | 48 | 64 | -146.4893298 | 63.1106702 | 1.23696e-9 |
+
+The all-term MPO source-completeness and action gates passed. The fine
+trajectory completed, but exceeded the configured 21,600-second resource cap
+(`29,680` seconds) and was therefore ineligible for formal convergence. Its
+numerical agreement with the bond-32 trajectory is close, while the 24-to-48
+step energy shift is about `29.91`, far above the `0.1` tolerance. The
+candidate is also substantially worse than the retained full-support result
+(`E(T)=-201.8513231`, fidelity `0.2591563`). It was rejected and the retained
+q156 benchmark was restored unchanged. Its implementation, candidate JSON, and
+generated artifacts were removed; this Markdown diagnosis is the retained
+experiment record.
+
 ## Exact Final-Hamiltonian Reference
 
 The final diagonal Ising problem has:

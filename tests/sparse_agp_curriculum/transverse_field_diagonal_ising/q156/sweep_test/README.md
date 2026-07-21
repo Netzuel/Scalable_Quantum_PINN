@@ -89,6 +89,20 @@ manifest was persisted after baseline training, and a corrected learned-
 schedule evaluation of round 19 fails both frozen projected gates. It was not
 sent to tensor-network validation and was not promoted.
 
+## Rejected Block-Balanced Candidate
+
+The completed candidate did not produce an eligible champion. Round 20 reached
+training and generated-holdout relative residuals of `6.86894e-4` and
+`6.84697e-4`, but its frozen-active residual was `1.57992`, above the `1.0`
+gate. Temporal and adaptive refinement remained above that gate at `1.48088`
+and `1.35409`. A diagnostic-only full-support TDVP run of the deterministic
+round-20 endpoint reached `E(T)=-146.48933` and fidelity `1.23696e-9` at 48
+steps and bond 64, far worse than the retained benchmark below. The candidate
+is therefore rejected and `config.json` remains the canonical methodology. Its
+experimental implementation, candidate configuration, generated run, and
+temporary plots were removed. Only the Markdown methodology and result record
+is retained.
+
 ## Tensor-Network Validation
 
 Install the optional pinned backend and run the convergence ladder:
