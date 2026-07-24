@@ -23,12 +23,103 @@ from projected_sparse_training_common import (
     enable_projected_agp_calibration,
     enable_projected_trainable_schedule,
     make_projected_model,
+    make_projected_export_model,
+    projected_trainable_state,
+    restore_projected_trainable_state,
     settings_from_payload,
 )
 from utils import load_pauli_hamiltonian_pair
 
 
 class AGPCheckpointResamplingTests(unittest.TestCase):
+    def test_factor_graph_checkpoint_state_rebuilds_deterministic_export_surface(self):
+        model_config = ProjectedTrainingConfig(
+            system="TransverseIsingDriverProblem",
+            n_qubits=2,
+            hidden_layers=1,
+            hidden_width=12,
+            activation="silu",
+            layer_type="linear",
+            coefficient_architecture="hamiltonian_pauli_factor_graph",
+            graph_node_width=10,
+            graph_message_layers=2,
+            graph_term_width=16,
+            graph_latent_rank=8,
+            graph_time_fourier_order=2,
+            graph_term_chunk_size=2,
+        )
+        payload = default_config_payload(model_config)
+        settings = settings_from_payload(payload, model_config)
+        h0, h1 = load_pauli_hamiltonian_pair(
+            ROOT / model_config.hamiltonian_source,
+            system=model_config.system,
+            n_qubits=model_config.n_qubits,
+            distance=model_config.distance,
+        )
+        support = build_projected_support(
+            h0,
+            h1,
+            agp_top_k=4,
+            intermediate_top_k=16,
+            residual_top_k=16,
+        )
+        trained = make_projected_model(h0, h1, support, model_config, torch.device("cpu"))
+        state = projected_trainable_state(trained)
+        exported = make_projected_export_model(
+            model_config,
+            trained.agp_labels,
+            torch.device("cpu"),
+        )
+
+        restore_projected_trainable_state(exported, state, settings=settings)
+        times = torch.linspace(0.0, 1.0, 5).view(-1, 1)
+
+        self.assertEqual(state["coefficient_architecture"], "hamiltonian_pauli_factor_graph")
+        torch.testing.assert_close(exported(times)["agp_coefficients"], trained(times)["agp_coefficients"])
+
+    def test_graph_checkpoint_state_rebuilds_deterministic_export_surface(self):
+        model_config = ProjectedTrainingConfig(
+            system="TransverseIsingDriverProblem",
+            n_qubits=2,
+            hidden_layers=1,
+            hidden_width=8,
+            activation="silu",
+            layer_type="linear",
+            coefficient_architecture="hamiltonian_pauli_graph",
+            graph_node_width=8,
+            graph_message_layers=1,
+            graph_latent_rank=4,
+            graph_term_chunk_size=2,
+        )
+        payload = default_config_payload(model_config)
+        settings = settings_from_payload(payload, model_config)
+        h0, h1 = load_pauli_hamiltonian_pair(
+            ROOT / model_config.hamiltonian_source,
+            system=model_config.system,
+            n_qubits=model_config.n_qubits,
+            distance=model_config.distance,
+        )
+        support = build_projected_support(
+            h0,
+            h1,
+            agp_top_k=4,
+            intermediate_top_k=16,
+            residual_top_k=16,
+        )
+        trained = make_projected_model(h0, h1, support, model_config, torch.device("cpu"))
+        state = projected_trainable_state(trained)
+        exported = make_projected_export_model(
+            model_config,
+            trained.agp_labels,
+            torch.device("cpu"),
+        )
+
+        restore_projected_trainable_state(exported, state, settings=settings)
+        times = torch.linspace(0.0, 1.0, 5).view(-1, 1)
+
+        self.assertEqual(state["coefficient_architecture"], "hamiltonian_pauli_graph")
+        torch.testing.assert_close(exported(times)["agp_coefficients"], trained(times)["agp_coefficients"])
+
     def test_resampling_preserves_model_and_schedule_semantics(self):
         model_config = ProjectedTrainingConfig(
             system="TransverseIsingDriverProblem",
@@ -137,6 +228,11 @@ class AGPCheckpointResamplingTests(unittest.TestCase):
         self.assertEqual(exported["pauli_labels"], model.agp_labels)
         self.assertEqual(tuple(exported["t"].shape), (9, 1))
         torch.testing.assert_close(exported["counterdiabatic_coefficients"], expected["d_lambda_dt"] * expected["agp_coefficients"])
+        torch.testing.assert_close(exported["d_lambda_d_tau"], expected["d_lambda_d_tau"])
+        torch.testing.assert_close(
+            exported["d_lambda_dt"],
+            exported["d_lambda_d_tau"] / model_config.physical_time,
+        )
         torch.testing.assert_close(exported["calibration_gates"], model.agp_calibration_gates())
         self.assertAlmostEqual(
             exported["calibration_gamma"],

@@ -5,12 +5,12 @@ to learn sparse adiabatic gauge potentials (AGPs) for arbitrary qubit counts
 `q`, without dense `2**q x 2**q` matrices and without enumerating the full
 `4**q` Pauli basis for large systems.
 
-The current retained q15 study is a benchmark instance of this methodology, not
-the methodology itself. Its role is to provide a physically checkable
-above-exact-output testbed where final energy, fidelity, and simple observables
-can be compared against known ground-truth diagnostics after training. For
-larger `q`, the same training pipeline is used with different configuration
-values, but full-basis or full-state validation may no longer be accessible.
+The current retained benchmark is the independently trained q15/q20/q25
+normalized variational-action family under
+`tests/sparse_agp_curriculum/transverse_field_diagonal_ising/*/sweep_test/size_intensive_pinn/`.
+The three sizes are benchmark instances of one general methodology, not the
+methodology itself. q15 provides an exact-statevector reference; q20 and q25
+provide convergence-gated, all-support tensor-network validation.
 
 For `q > 8`, the full Pauli basis is not treated as a computational object in
 this repository. The trainable AGP support size `K`, the residual holdout pool
@@ -51,22 +51,22 @@ A_lambda(t) = sum_{P in S_AGP} C_P(t) P
 `H_initial`, `H_final`, the schedule parameterization, the qubit count `q`, and
 the sparse Pauli decompositions are supplied by the active test configuration.
 
-The current retained q15 benchmark instance uses a transverse-driver to
-diagonal Ising-problem path:
+The current retained benchmark family uses a transverse-driver to diagonal
+Ising-problem path:
 
 ```text
 H_initial = - sum_i X_i
 H_final   = sum_i h_i Z_i + sum_i J_i Z_i Z_{i+1}
 H_AD(lambda) = (1 - lambda) H_initial + lambda H_final
 T = 1
-q = 15
+q in {15, 20, 25}
 ```
 
-For this q15 instance, the final Hamiltonian is diagonal, so the exact final
-ground energy and ground-state observables are accessible. That accessibility
-is diagnostic-only and is not assumed in the general methodology. The training
-loop does not use the final ground-state energy, final fidelity, or exact final
-observables.
+For this family, the final Hamiltonian is diagonal, so exact final ground
+energies and bitstrings are accessible. q15 dynamics are exact statevector
+dynamics; q20 and q25 dynamics use tensor networks. Ground references and
+physical metrics are diagnostic-only and are not assumed in the general
+methodology or used by the training loop.
 
 ## Sparse AGP Support
 
@@ -78,12 +78,12 @@ Q = generated residual holdout terms
 i = holdout-feedback curriculum iterations
 ```
 
-The current retained q15 benchmark instance uses:
+The retained family scales the budgets from the q15 anchor:
 
 ```text
-K = 32768 trainable AGP outputs
-Q = 65536 generated residual holdout terms
-i = 15 holdout-feedback curriculum iterations
+q = 15: K = 32768, Q = 65536,  i = 15
+q = 20: K = 58368, Q = 116736, i = 20
+q = 25: K = 91136, Q = 182272, i = 25
 ```
 
 The initial AGP support is selected from a bounded nested-commutator Krylov pool
@@ -139,12 +139,13 @@ follows the constrained-envelope idea used in Section 2.1 of arXiv:2604.18506:
 a fixed smooth reference schedule plus a bounded neural correction that vanishes
 at the boundaries.
 
-For the current q15 benchmark instance:
+For the q15 member of the retained benchmark:
 
 ```text
-lambda_0(t) = sin^2(pi t / 2T)
-tau = t / T
-lambda(t) = lambda_0(t) + tau^2 (1 - tau)^2 A_sched tanh(u_theta(tau))
+tau = (t - t_initial) / T in [0, 1]
+lambda_0(tau) = sin^2(pi tau / 2)
+lambda(tau) = lambda_0(tau) + tau^2 (1 - tau)^2 A_sched tanh(u_theta(tau))
+d lambda / dt = (1 / T) d lambda / d tau
 A_sched = 2.4
 u_theta network = MLP(width=32, hidden_layers=2, activation=tanh)
 ```
@@ -161,7 +162,17 @@ The schedule is trained from the baseline stage through every curriculum round
 using only the residual objective and schedule regularizers. It does not use
 final ground-state energy, final fidelity, or exact final observables.
 
-## Loss Used During Training
+The physical evolution can equivalently be written in normalized time as
+
+```text
+i d|psi>/d tau = [T H_AD(lambda(tau)) + (d lambda/d tau) A_lambda(tau)] |psi>.
+```
+
+The implementation exports `d_lambda_d_tau`, `d_lambda_dt`, `T`, and the direct
+counterdiabatic coefficients separately, and validates the chain-rule identity
+before exact or tensor-network evolution.
+
+## Current Training Loss
 
 The current sparse PINN loss is based on the Euler-Lagrange residual
 
@@ -169,15 +180,27 @@ The current sparse PINN loss is based on the Euler-Lagrange residual
 R(A) = [i dH_AD/dlambda - [A_lambda, H_AD], H_AD].
 ```
 
-Training minimizes the squared norm of this residual in a selected Pauli
-coordinate residual basis. The current setup also trains:
+The current benchmark supplements the squared projected residual norm with the
+reference-normalized variational AGP action:
+
+```text
+G(A) = i dH_AD/dlambda - [A_lambda, H_AD]
+L_action = ||G(A)||_2^2 / max(||i dH_AD/dlambda||_2^2, eps)
+L_total = L_projected + 0.1 L_action + L_regularization
+```
+
+The fixed weight `beta_action=0.1` was declared before physical evaluation.
+The action is evaluated in sparse Pauli coordinates; it does not require a
+dense Hilbert-space matrix. The current setup also trains:
 
 - a global AGP scale;
 - soft Pauli gates that select an active subset of the learned support;
 - the bounded schedule correction described above.
 
 Those calibration variables are trained jointly from the baseline stage through
-each curriculum round using only the projected residual objective and regularizers.
+each curriculum round using only `L_total`. Exact energy, fidelity, exact
+observables, and cross-system checkpoints are excluded from training and model
+selection.
 
 ## Holdout-Feedback Curriculum
 
@@ -198,7 +221,7 @@ directions plus their one-commutator closure with the Hamiltonian support. This
 gives the method exploratory capability without increasing the output budget or
 using final-state ground truth during training.
 
-For the current retained q15 benchmark instance:
+For the q15 anchor:
 
 ```text
 add_residual_terms_per_iteration = 3072
@@ -334,8 +357,8 @@ spectral gap, are tracked under
 targets support energy and bitstring-probability validation at large `q`, but
 they do not make the full time-dependent statevector or exact AGP accessible.
 
-For the current retained q15 benchmark instance, the accepted
-adaptive-refinement residual diagnostics were:
+For the previous q15 benchmark, the accepted adaptive-refinement residual
+diagnostics were:
 
 ```text
 training relative residual = 0.003279208
@@ -359,14 +382,13 @@ optional baseline entrypoint = scripts/agp_baseline_train.py
 optional cleanup entrypoint = scripts/agp_restart.py
 ```
 
-The current retained q15 benchmark instance is:
+The current retained benchmark configurations are:
 
 ```text
-config = tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
-current run root =
-  tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/runs/
-  fixed_k_holdout_feedback_trainable_schedule_w96_l4_pau_support_swap_adaptive_temporal_refinement_v1/
-  agp_32768_residual_65536_add_3072_rounds_15/
+q15 config = tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/size_intensive_pinn/config.json
+q20 config = tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/size_intensive_pinn/config.json
+q25 config = tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q25/sweep_test/size_intensive_pinn/config.json
+run namespace = runs/size_extensive_variational_action_v6/
 ```
 
 From a cleaned `tests/<case>/sweep_test/` folder, the full retained pipeline is:
@@ -423,9 +445,11 @@ ground-energy reference and marks unavailable dynamical energies/fidelities as
    the configured `q`. When a physical table is available, the deciding retained
    metrics are final energy error and ground-state fidelity, with local
    observables such as `<Z_i>` and `<Z_i Z_{i+1}>` RMSEs as consistency checks.
-   For larger `q`, the diagonal-Ising final energy and ground bitstring remain
-   exact, but full statevector evolution is not available. The candidate must
-   still be reported at the correct certification level using
+   For q15, use exact statevector evolution. For q20 and q25, use the
+   convergence-gated tensor-network ladder with all learned terms. At larger
+   `q`, the diagonal-Ising final energy and ground bitstring remain exact, but
+   full statevector evolution is not available. The benchmark must still be
+   reported at the correct certification level using
    `AGP_CERTIFICATION_CRITERIA.md`.
 
 Generated run artifacts are local and ignored by git. The repository stores the
@@ -434,32 +458,32 @@ code, configuration, tests, and this methodology record; it does not commit
 
 ## Current Benchmark Instance And Certification Status
 
-The current retained physical benchmark instance is q15. It is evidence that
-the general methodology can produce a physically useful sparse AGP on an
-above-exact-output problem, but it is not a full certification of the support
-against the unrestricted `4**15` basis. Under `AGP_CERTIFICATION_CRITERIA.md`,
-the current q15 status is:
+The current retained physical benchmark is the normalized variational-action
+v6 q15/q20/q25 family. Each system was trained independently from scratch at
+`T=1`; q15 used exact statevector evolution and q20/q25 passed independent
+timestep and MPS-bond convergence with every learned AGP term deployed.
 
-| Gate | Status | Evidence |
-|---|---|---|
-| Training residual | pass | adaptive temporal-refinement training relative residual `0.003279208` |
-| Holdout residual | pass | adaptive temporal-refinement holdout relative residual `0.055878535`, within the practical `0.05` to `0.10` target band |
-| Unseen residual quotient | not tested | quotient invalid because the AGP=0 reference residual on the sampled unseen subset is zero |
-| Fixed `probe_gate` / `probe_watch` / `probe_test` residuals | not tested | the current retained pipeline does not yet define fixed disjoint probe bases |
-| K-sweep plateau | not tested | current retained run uses `K = 32768`; no formal nearby-K plateau is stored for this adaptive-refinement benchmark |
-| Q-sweep plateau | not tested | current validation uses `Q = 65536`; no formal larger-Q plateau is stored |
-| Top-term stability across K and seeds | not tested | no formal top-term overlap study is stored for the retained adaptive-refinement run |
-| Prune-and-retest | not tested | deployment truncates to the top 2048 terms for statevector validation, but no formal residual prune sweep is stored |
-| Physical validation | pass | learned AGP improves energy error, fidelity, and local observable RMSEs against no-CD and Kipu/DQFM `l=1` |
+| q | K | Final energy | Exact energy | Energy error | Ground fidelity | Validation |
+|---:|---:|---:|---:|---:|---:|---|
+| 15 | 32,768 | -19.1160784 | -19.25 | 0.1339216 | 0.9768832 | exact statevector |
+| 20 | 58,368 | -25.8392797 | -26.00 | 0.1607203 | 0.9764755 | certified all-K TN |
+| 25 | 91,136 | -32.4501703 | -32.75 | 0.2998297 | 0.9547459 | certified all-K TN |
 
-The correct claim level for the current q15 benchmark instance is therefore:
+All three sizes exceed `0.95` fidelity. The q15-to-q20 fidelity drop is
+`0.0004077`; q20-to-q25 drops by `0.0217296`. The latter remains a known
+scaling limitation and exceeds the original `0.01` smoothness diagnostic. It
+does not invalidate the user-approved benchmark promotion, but it must remain
+visible in future comparisons.
+
+The correct claim level for the retained family is:
 
 ```text
-Projected sparse AGP experiment with strong q15 physical validation.
+Retained projected sparse AGP benchmark with exact q15 and converged all-K
+q20/q25 physical validation.
 ```
 
-It should not be described as a certified globally sufficient support for the
-full Pauli basis.
+It must not be described as a certified globally sufficient support in the
+unrestricted `4**q` Pauli basis.
 
 ## Physical Validation
 
@@ -475,7 +499,8 @@ At any `q`, use an exact ground energy and ground-state manifold whenever the
 operator structure permits it. Canonical tensor-network validation must keep
 the complete learned AGP support fixed across its numerical convergence ladder.
 
-After training, the q15 statevector diagnostic compares:
+The q15 exact statevector validator and the general physical-comparison tools
+support:
 
 ```text
 no_cd
@@ -483,16 +508,18 @@ kipu_dqfm_l1
 learned_sparse_agp
 ```
 
-The q15 statevector path is intentionally a benchmark diagnostic, not a scalable
-large-q library path.
+The q15 statevector path is intentionally a benchmark diagnostic, not a
+scalable large-q library path. The retained v6 benchmark evaluates only the
+learned PINN AGP in its q15/q20/q25 scaling study so that every size uses the
+same protocol row. Its physical results are the table in the preceding section.
 
-The latest retained adaptive-temporal benchmark result is:
+The immediately preceding retained q15 adaptive-temporal benchmark result was:
 
 | Method | Energy error | Ground fidelity | `<Z_i>` RMSE | `<Z_i Z_{i+1}>` RMSE |
 |---|---:|---:|---:|---:|
 | no CD | 16.8582 | 0.000287 | 0.9700 | 0.8411 |
 | Kipu/DQFM l=1 | 10.1628 | 0.02594 | 0.8441 | 0.4119 |
-| learned sparse AGP + learned schedule + fixed-K support swap + adaptive temporal refinement | 0.1873 | 0.9601 | 0.0144 | 0.0140 |
+| previous learned sparse AGP | 0.1873 | 0.9601 | 0.0144 | 0.0140 |
 
 The previous retained temporal-refinement benchmark had:
 
@@ -503,8 +530,8 @@ ground fidelity = 0.9549
 <Z_i Z_{i+1}> RMSE = 0.0124
 ```
 
-Adaptive temporal refinement therefore improved the primary retained physical
-benchmark targets:
+Adaptive temporal refinement improved that historical benchmark over its
+uniform temporal-refinement predecessor:
 
 ```text
 energy error improvement ~= 20.9%
@@ -524,7 +551,8 @@ energy error = 0.2740
 ground fidelity = 0.9478
 ```
 
-The current benchmark improves over that no-temporal-refinement run:
+That historical adaptive benchmark improved over its no-temporal-refinement
+run:
 
 ```text
 energy error improvement ~= 31.6%
@@ -538,7 +566,7 @@ energy error = 0.7002
 ground fidelity = 0.8675
 ```
 
-The current benchmark improves substantially over that older no-swap PAU run:
+It also improved substantially over the older no-swap PAU run:
 
 ```text
 energy error improvement ~= 73.2%
@@ -568,19 +596,21 @@ schedule.
 
 ## Current Interpretation
 
-The current retained q15 benchmark instance shows that the jointly learned
-sparse AGP and schedule are much more physically useful than no-CD and the
-first-order nested-commutator approximator on a physically checkable
-above-exact-output problem. The adaptive temporal-refinement stage is retained
-because it improved final energy and ground fidelity beyond the uniform
-temporal-refinement benchmark without using final-state observables in training.
+The retained normalized variational-action benchmark improves q15 fidelity from
+`0.9646510` to `0.9768832` and q20 fidelity from `0.9377128` to `0.9764755`
+relative to the preceding benchmark configurations. The independently trained
+q25 instance reaches `0.9547459`. This is evidence that penalizing the
+reference-normalized gauge-generator norm adds useful physical information
+beyond the projected Euler-Lagrange residual without using final-state targets.
 
 It does not certify that the selected support is globally sufficient out of the
 full `4**q` basis. It also does not prove that a lower projected residual always
 maps to a better final physical state.
 
-The next methodological improvements should therefore add physical robustness
-or attribution controls without using benchmark-only ground-truth targets.
+The q20-to-q25 drop shows that the size-scaling problem is reduced but not
+solved. Future improvements must preserve the v6 gains while addressing that
+drop without increasing `T`, using cross-system initialization, or introducing
+benchmark ground truth into training.
 
 ## Scalable MPS Dynamical Validation
 
@@ -646,8 +676,8 @@ final-energy difference = 1.401e-4
 ground-fidelity difference = 2.658e-5
 ```
 
-The retained q20 grouped product-formula validation deploys all 32,768 learned
-terms from the completed
+The previous q20 comparison benchmark deployed all 32,768 learned terms from
+the completed
 `Q=81,920` adaptive-temporal checkpoint. These map to 1,828 occupied-qubit
 support groups, with no coefficient threshold. Its 24-step/bond-32/cutoff-
 `1e-9` and 48-step/bond-64/cutoff-`1e-10` results pass the configured
@@ -665,9 +695,11 @@ and `0.00212781`, and the fine evolution reaches peak bond 57 below the cap 64.
 This passes the q20 full-support physical-validation gate, but it does not by
 itself certify global support sufficiency in the full `4**20` basis.
 
-The q156 retained deployment uses all 32,768 learned terms from a 257-point
-resampling of the frozen round-20 checkpoint. Resampling performs no optimizer
-steps and preserves the learned support, gates, scale, and schedule. Its
+The q156 legacy retained deployment uses all 32,768 learned terms from a
+257-point resampling of its frozen round-20 checkpoint. It has not yet been
+retrained with the normalized variational-action v6 objective. Resampling
+performs no optimizer steps and preserves the learned support, gates, scale,
+and schedule. Its
 24-versus-48-step and bond-32-versus-64 convergence pairs pass independently.
 The final fine-resolution comparison is:
 
@@ -697,7 +729,7 @@ reported post-curriculum value was `1.35409` against the required `1.0`.
 The deterministic round-20 endpoint was nevertheless evaluated as a
 diagnostic using all 32,768 learned terms. At 48 steps and MPS bond 64 it gave
 `E(T)=-146.48933` and ground fidelity `1.23696e-9`, compared with
-`E(T)=-201.8513231` and fidelity `0.2591563` for the retained q156 benchmark.
+`E(T)=-201.8513231` and fidelity `0.2591563` for the legacy q156 benchmark.
 The 24-to-48-step energy difference was also far outside tolerance. This loss
 variant is therefore recorded as rejected and is not part of the current
 benchmark methodology. Its experimental code, configuration, and generated
@@ -732,6 +764,36 @@ physical benchmark:
 |---|---:|---:|---:|---:|
 | learned sparse AGP with `L_probe` | 3.9766 | 0.3005 | 0.2785 | 0.2118 |
 
-That rejected probe-loss result is superseded by the current retained benchmark
+That rejected probe-loss result is superseded by the retained v6 benchmark
 above. It was also worse than the older no-swap PAU benchmark, which had energy
 error `0.7002` and ground fidelity `0.8675`.
+
+## Retained Normalized Variational-Action Benchmark
+
+The current size-scaled conventional PINN supplements the projected
+Euler-Lagrange residual with
+
+```text
+G = i dH_AD/dlambda - [A_lambda, H_AD]
+L_action = ||G||_2^2 / max(||i dH_AD/dlambda||_2^2, eps)
+L_total = L_projected + 0.1 L_action + L_regularization.
+```
+
+The weight `0.1` was fixed before physical evaluation. No exact energy,
+ground-state fidelity, observable target, or cross-system checkpoint entered
+training or checkpoint selection. Every system was trained independently from
+scratch at `T=1`; q15 used exact statevector validation and q20/q25 used
+convergence-gated all-`K` TDVP.
+
+| q | K | Final energy | Exact energy | Energy error | Ground fidelity | Validation |
+|---:|---:|---:|---:|---:|---:|---|
+| 15 | 32,768 | -19.1160784 | -19.25 | 0.1339216 | 0.9768832 | exact statevector |
+| 20 | 58,368 | -25.8392797 | -26.00 | 0.1607203 | 0.9764755 | certified TN |
+| 25 | 91,136 | -32.4501703 | -32.75 | 0.2998297 | 0.9547459 | certified TN |
+
+All three sizes exceed `0.95` fidelity. The q15-to-q20 drop is `0.0004077`,
+but the q20-to-q25 drop is `0.0217296`, above the original `0.01` smoothness
+diagnostic. On 2026-07-24, the user promoted this methodology because it
+materially improves the preceding q15 and q20 benchmarks and remains above
+`0.95` at q25. The q20-to-q25 drop remains a mandatory reported limitation and
+a priority for the next methodology iteration.

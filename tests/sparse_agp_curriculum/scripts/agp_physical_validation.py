@@ -404,13 +404,72 @@ def commutator_terms(
     return SparsePauliOperator(dict(out), n_qubits=n_qubits).terms
 
 
-def learned_term_selection(coefficient_path: Path, max_terms: int) -> dict[str, object]:
+def learned_term_selection(
+    coefficient_path: Path,
+    max_terms: int,
+    *,
+    expected_total_time: float | None = None,
+    allow_duration_reparameterization: bool = False,
+) -> dict[str, object]:
     payload = torch.load(coefficient_path, map_location="cpu")
     labels = [str(label) for label in payload["pauli_labels"]]
     coefficients = np.asarray(payload["counterdiabatic_coefficients"], dtype=np.float64)
+    agp_coefficients = np.asarray(payload.get("agp_coefficients", []), dtype=np.float64)
     tau_grid = np.asarray(payload["tau"], dtype=np.float64).reshape(-1)
     lambda_grid = np.asarray(payload.get("lambda", []), dtype=np.float64).reshape(-1)
     d_lambda_dt_grid = np.asarray(payload.get("d_lambda_dt", []), dtype=np.float64).reshape(-1)
+    d_lambda_d_tau_grid = np.asarray(
+        payload.get("d_lambda_d_tau", []), dtype=np.float64
+    ).reshape(-1)
+    time_normalization = payload.get("time_normalization", {})
+    time_normalization = dict(time_normalization) if isinstance(time_normalization, Mapping) else {}
+    exported_duration = time_normalization.get("physical_duration")
+    if exported_duration is not None:
+        exported_duration = float(exported_duration)
+        if (
+            d_lambda_d_tau_grid.shape == tau_grid.shape
+            and d_lambda_dt_grid.shape == tau_grid.shape
+            and not np.allclose(
+                d_lambda_dt_grid,
+                d_lambda_d_tau_grid / exported_duration,
+                atol=1.0e-6,
+                rtol=1.0e-5,
+            )
+        ):
+            raise ValueError(
+                "Learned AGP export violates d_lambda_dt=d_lambda_d_tau/T."
+            )
+        if expected_total_time is not None and not np.isclose(
+            exported_duration,
+            float(expected_total_time),
+            atol=1.0e-12,
+            rtol=0.0,
+        ):
+            if not allow_duration_reparameterization:
+                raise ValueError(
+                    "Learned AGP export physical duration does not match the requested evolution."
+                )
+            target_duration = float(expected_total_time)
+            if target_duration <= 0.0:
+                raise ValueError("Reparameterized physical duration must be positive.")
+            if agp_coefficients.shape != coefficients.shape:
+                raise ValueError(
+                    "Duration reparameterization requires exported agp_coefficients."
+                )
+            if d_lambda_d_tau_grid.shape != tau_grid.shape:
+                raise ValueError(
+                    "Duration reparameterization requires exported d_lambda_d_tau."
+                )
+            coefficients = agp_coefficients * (d_lambda_d_tau_grid / target_duration)[:, None]
+            d_lambda_dt_grid = d_lambda_d_tau_grid / target_duration
+            time_normalization.update(
+                {
+                    "source_physical_duration": exported_duration,
+                    "physical_duration": target_duration,
+                    "duration_reparameterized": True,
+                    "chain_rule": "d_lambda_dt=d_lambda_d_tau/T",
+                }
+            )
     rms = np.sqrt(np.mean(coefficients * coefficients, axis=0))
     ranking = np.argsort(-rms)
     selected_idx = ranking[: min(int(max_terms), len(ranking))]
@@ -420,6 +479,10 @@ def learned_term_selection(coefficient_path: Path, max_terms: int) -> dict[str, 
         "tau": tau_grid,
         "lambda": lambda_grid if lambda_grid.shape == tau_grid.shape else None,
         "d_lambda_dt": d_lambda_dt_grid if d_lambda_dt_grid.shape == tau_grid.shape else None,
+        "d_lambda_d_tau": (
+            d_lambda_d_tau_grid if d_lambda_d_tau_grid.shape == tau_grid.shape else None
+        ),
+        "time_normalization": dict(time_normalization),
         "labels": [labels[idx] for idx in selected_idx],
         "coefficients": coefficients[:, selected_idx],
         "selected_indices": [int(idx) for idx in selected_idx],
@@ -444,6 +507,8 @@ def subset_learned_terms(learned: Mapping[str, object], max_terms: int) -> dict[
         "tau": learned["tau"],
         "lambda": learned.get("lambda"),
         "d_lambda_dt": learned.get("d_lambda_dt"),
+        "d_lambda_d_tau": learned.get("d_lambda_d_tau"),
+        "time_normalization": learned.get("time_normalization", {}),
         "labels": labels,
         "coefficients": coefficients,
         "selected_indices": selected_indices,
@@ -847,6 +912,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--trained-run", type=Path, default=None)
     parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument(
+        "--evaluation-duration",
+        type=float,
+        default=None,
+        help="Explicitly reparameterize an exported A(tau) to this physical duration.",
+    )
     parser.add_argument("--max-learned-terms", type=int, default=None)
     parser.add_argument(
         "--learned-term-sweep",
@@ -864,6 +935,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def requested_physical_protocols(validation: Mapping[str, object]) -> tuple[str, ...]:
+    """Return the configured canonical protocols in stable execution order."""
+
+    aliases = {"nested_l1": "kipu_dqfm_l1"}
+    allowed = ("no_cd", "kipu_dqfm_l1", "learned_sparse_agp")
+    raw = validation.get("protocols", allowed)
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise TypeError("physical_validation.protocols must be a sequence.")
+    requested = {aliases.get(str(name), str(name)) for name in raw}
+    unknown = requested.difference(allowed)
+    if unknown:
+        raise ValueError(f"Unsupported physical validation protocols: {sorted(unknown)}")
+    return tuple(name for name in allowed if name in requested)
+
+
 def main() -> None:
     args = parse_args()
     config_path = args.config.resolve()
@@ -873,8 +959,12 @@ def main() -> None:
     parameters = physical.get("parameters", {}) if isinstance(physical, dict) else {}
     validation = config.get("physical_validation", {})
     validation = validation if isinstance(validation, dict) else {}
+    requested_protocols = requested_physical_protocols(validation)
     n_qubits = int(parameters.get("num_qubits", 15))
-    total_time = float(parameters.get("T", 1.0))
+    source_total_time = float(parameters.get("T", 1.0))
+    total_time = float(args.evaluation_duration if args.evaluation_duration is not None else source_total_time)
+    if total_time <= 0.0:
+        raise ValueError("Physical evaluation duration must be positive.")
     steps = int(args.steps if args.steps is not None else validation.get("evolution_steps", 96))
     variant_specs = build_learned_variant_specs(
         validation,
@@ -935,7 +1025,12 @@ def main() -> None:
     coefficient_path = trained_run / "Models_Data" / "final_agp_coefficients.pt"
     if not coefficient_path.is_file():
         raise FileNotFoundError(f"Missing trained AGP coefficients: {coefficient_path}")
-    learned_full = learned_term_selection(coefficient_path, max(spec.max_terms for spec in variant_specs))
+    learned_full = learned_term_selection(
+        coefficient_path,
+        max(spec.max_terms for spec in variant_specs),
+        expected_total_time=total_time,
+        allow_duration_reparameterization=args.evaluation_duration is not None,
+    )
 
     h0_actions = build_action_cache(list(h0.terms))
     learned_cache_size = validation.get("learned_action_cache_size")
@@ -946,6 +1041,8 @@ def main() -> None:
 
     results: dict[str, dict[str, float]] = {}
     for protocol in ("no_cd", "kipu_dqfm_l1"):
+        if protocol not in requested_protocols:
+            continue
         print(f"evolve_protocol={protocol} steps={steps}")
         psi = evolve_state(
             protocol=protocol,
@@ -968,7 +1065,7 @@ def main() -> None:
     learned_variant_results: dict[str, dict[str, float]] = {}
     learned_variant_inputs: dict[str, dict[str, object]] = {}
     default_learned: dict[str, object] | None = None
-    for spec in variant_specs:
+    for spec in variant_specs if "learned_sparse_agp" in requested_protocols else ():
         learned = subset_learned_terms(learned_full, spec.max_terms)
         print(
             f"evolve_protocol={spec.name} steps={steps} "
@@ -1002,17 +1099,22 @@ def main() -> None:
             default_learned = learned
             results["learned_sparse_agp"] = dict(row)
 
-    if "learned_sparse_agp" not in results:
+    if "learned_sparse_agp" in requested_protocols and "learned_sparse_agp" not in results:
         default_spec = variant_specs[0]
         default_learned = subset_learned_terms(learned_full, default_spec.max_terms)
         learned_variant_inputs[default_spec.name] = default_learned
         results["learned_sparse_agp"] = dict(learned_variant_results[default_spec.name])
 
-    best_learned_variant = select_best_learned_variant(learned_variant_results, metric=selection_metric)
-    if best_learned_variant["name"] != "learned_sparse_agp":
+    best_learned_variant = (
+        select_best_learned_variant(learned_variant_results, metric=selection_metric)
+        if learned_variant_results
+        else {"name": None, "metric": selection_metric, "value": None}
+    )
+    if best_learned_variant["name"] not in {None, "learned_sparse_agp"}:
         results["learned_sparse_agp_best"] = dict(learned_variant_results[str(best_learned_variant["name"])])
-    add_no_cd_quotients(results)
-    add_quotients_vs_no_cd(learned_variant_results, results["no_cd"])
+    if "no_cd" in results:
+        add_no_cd_quotients(results)
+        add_quotients_vs_no_cd(learned_variant_results, results["no_cd"])
 
     assert default_learned is not None
     learned_variant_validation_identities = {
@@ -1051,7 +1153,10 @@ def main() -> None:
             "exported_lambda_grid" if default_learned.get("lambda") is not None else "sinusoidal_sin2"
         ),
         "total_time": total_time,
+        "source_total_time": source_total_time,
+        "duration_reparameterized": bool(args.evaluation_duration is not None),
         "steps": steps,
+        "protocols": list(requested_protocols),
         "ground_energy": ground_energy,
         "ground_bitstring": ground_bitstring,
         "ground_state_degeneracy": int(len(ground_indices)),

@@ -8,10 +8,14 @@ Training code, diagnostics, and reusable helpers belong under the repository-lev
 `scripts/` folder. Framework-specific entrypoints may live beside their study
 configurations when they are not reusable outside that benchmark family.
 
-The retained fixed-support sparse-AGP curriculum studies are grouped under:
+The retained normalized variational-action v6 benchmark configurations are:
 
-- `sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/`
-- `sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/`
+- `sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/size_intensive_pinn/`
+- `sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/size_intensive_pinn/`
+- `sparse_agp_curriculum/transverse_field_diagonal_ising/q25/sweep_test/size_intensive_pinn/`
+
+Legacy retained references and shared benchmark-family code remain under:
+
 - `sparse_agp_curriculum/transverse_field_diagonal_ising/q156/sweep_test/`
 - `sparse_agp_curriculum/scripts/`
 

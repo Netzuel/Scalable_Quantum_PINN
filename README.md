@@ -38,14 +38,14 @@ the largest missing residual strings are added to the AGP output support, and
 the expanded model is retrained. Existing output rows are transferred by Pauli
 label, while newly added strings are initialized fresh.
 
-The PINN emits:
+The current retained PINN emits:
 
 ```text
 lambda(t)
 A_lambda(t) = sum_{P in selected_support} a_P(t) P
 ```
 
-and trains against the Euler-Lagrange residual
+and trains against both the projected Euler-Lagrange residual
 
 ```text
 [ i dH_AD/dlambda - [A_lambda, H_AD], H_AD ] = 0
@@ -53,6 +53,18 @@ and trains against the Euler-Lagrange residual
 
 directly in sparse Pauli-coordinate space. No dense `2**N x 2**N` matrices are
 constructed by the library code.
+
+The retained v6 objective also penalizes the reference-normalized variational
+AGP action:
+
+```text
+G(A) = i dH_AD/dlambda - [A_lambda, H_AD]
+L_action = ||G(A)||^2 / max(||i dH_AD/dlambda||^2, eps)
+L_total = L_projected + 0.1 L_action + L_regularization
+```
+
+The weight `0.1` is fixed before physical evaluation. Exact final energy,
+ground-state fidelity, and observables remain post-training diagnostics only.
 
 For the low-size exact regime, `FullPauliAGPPINN` emits:
 
@@ -137,41 +149,60 @@ grouped together:
 ```text
 tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/
 tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/
+tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q25/sweep_test/
 tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q156/sweep_test/
 ```
 
-Each study contains `config.json`, a README, and ignored local `runs/` artifacts.
-Reusable curriculum code remains under the repository-level `scripts/`; the
-transverse-Ising Hamiltonian, validation, grid, and figure entrypoints live under
+The current normalized variational-action benchmark configurations are the
+`size_intensive_pinn/config.json` files under q15, q20, and q25. Each system is
+trained independently from scratch at `T=1`; q15 uses exact statevector
+validation and q20/q25 use convergence-gated tensor-network validation with all
+learned terms. The q156 configuration remains a legacy validated reference and
+has not yet been retrained with v6.
+
+Each study contains a README and ignored local `runs/` artifacts. Reusable
+curriculum code remains under the repository-level `scripts/`; scenario
+validation and figure entrypoints live under
 `tests/sparse_agp_curriculum/scripts/`.
 
 Default fixed-`K` curriculum:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_holdout_feedback.py \
-  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/size_intensive_pinn/config.json
 ```
 
 Baseline only:
 
 ```bash
 conda run --no-capture-output -n torch-mps python scripts/agp_baseline_train.py \
-  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/size_intensive_pinn/config.json
 ```
 
 Clean generated artifacts for one configured study:
 
 ```bash
 conda run -n torch-mps python scripts/agp_restart.py \
-  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q20/sweep_test/size_intensive_pinn/config.json
 ```
 
 The q15 study adds a statevector physical-validation diagnostic:
 
 ```bash
 conda run --no-capture-output -n torch-mps python tests/sparse_agp_curriculum/scripts/agp_physical_validation.py \
-  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/config.json
+  --config tests/sparse_agp_curriculum/transverse_field_diagonal_ising/q15/sweep_test/size_intensive_pinn/config.json
 ```
+
+Current retained physical results:
+
+| q | K | Energy error | Ground fidelity | Validation |
+|---:|---:|---:|---:|---|
+| 15 | 32,768 | 0.1339216 | 0.9768832 | exact statevector |
+| 20 | 58,368 | 0.1607203 | 0.9764755 | certified all-K TN |
+| 25 | 91,136 | 0.2998297 | 0.9547459 | certified all-K TN |
+
+The q20-to-q25 fidelity drop of `0.0217296` is a known scaling limitation of
+the retained benchmark and must remain visible in future comparisons.
 
 The diagonal-Ising final Hamiltonian also has a scalable exact ground-state
 oracle that does not construct a statevector or dense Hamiltonian:

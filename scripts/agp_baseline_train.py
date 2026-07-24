@@ -67,6 +67,15 @@ def model_config_from_payload(payload: dict[str, object]) -> ProjectedTrainingCo
         hidden_width=int(general.get("n_neurons", 56)),
         activation=str(general.get("activation", "silu")),
         layer_type=str(general.get("layer_type", "quadratic")),
+        coefficient_architecture=str(
+            general.get("coefficient_architecture", "independent_outputs")
+        ).strip().lower(),
+        graph_node_width=int(general.get("graph_node_width", 32)),
+        graph_message_layers=int(general.get("graph_message_layers", 2)),
+        graph_latent_rank=int(general.get("graph_latent_rank", 32)),
+        graph_term_width=int(general.get("graph_term_width", 192)),
+        graph_time_fourier_order=int(general.get("graph_time_fourier_order", 4)),
+        graph_term_chunk_size=int(general.get("graph_term_chunk_size", 4096)),
     )
 
 
@@ -120,6 +129,7 @@ def settings_for_support(payload: dict[str, object], agp_terms: int) -> Projecte
         top_coefficients=int(export.get("top_coefficients", 16)),
         residual_weight=float(loss.get("residual", 1.0)),
         residual_objective=residual_objective,
+        variational_action_weight=float(loss.get("variational_action", 0.0)),
         agp_l2_weight=float(loss.get("agp_l2", 1e-8)),
         residual_block_normalization=str(loss.get("residual_block_normalization", "none")),
         agp_smoothness_weight=float(loss.get("agp_smoothness", 0.0)),
@@ -155,6 +165,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path, payload: dict[st
     loss_weights = ProjectedSparseLossWeights(
         residual=settings.residual_weight,
         residual_objective=settings.residual_objective,
+        variational_action=settings.variational_action_weight,
         agp_l2=settings.agp_l2_weight,
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,

@@ -109,6 +109,12 @@ def schedule_parameters_identity(learned: Mapping[str, object]) -> str:
                 if learned.get("d_lambda_dt") is None
                 else np.asarray(learned["d_lambda_dt"], dtype=np.float64)
             ),
+            "d_lambda_d_tau": (
+                None
+                if learned.get("d_lambda_d_tau") is None
+                else np.asarray(learned["d_lambda_d_tau"], dtype=np.float64)
+            ),
+            "time_normalization": learned.get("time_normalization"),
         }
     )
 

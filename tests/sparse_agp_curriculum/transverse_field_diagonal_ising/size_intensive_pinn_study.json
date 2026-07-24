@@ -1,0 +1,49 @@
+{
+  "methodology": "size_extensive_normalized_variational_action_conventional_pinn_v6",
+  "benchmark_status": "retained_current",
+  "promotion_decision": {
+    "status": "promoted",
+    "date": "2026-07-24",
+    "basis": "User-approved promotion because the methodology improves the retained q15 and q20 physical benchmarks and every independently trained q15/q20/q25 run exceeds 0.95 ground-state fidelity.",
+    "known_limitation": "The q20-to-q25 fidelity drop is 0.0217296 and remains above the predeclared 0.01 smoothness diagnostic."
+  },
+  "description": "Current fixed-duration conventional PINN benchmark with normalized time, quadratically scaled K/Q/active budgets, linearly scaled per-round exploration, and beta_action=0.1 multiplying the reference-normalized variational-action auxiliary loss.",
+  "configs": {
+    "15": "q15/sweep_test/size_intensive_pinn/config.json",
+    "20": "q20/sweep_test/size_intensive_pinn/config.json",
+    "25": "q25/sweep_test/size_intensive_pinn/config.json"
+  },
+  "scaling": {
+    "agp_terms": "ceil_1024(32768*(q/15)^2)",
+    "residual_terms": "2*K(q)",
+    "curriculum_rounds": "q",
+    "active_terms": "ceil_256(2048*(q/15)^2)",
+    "residual_additions_per_round": "ceil_1024(3072*q/15)",
+    "support_swaps_per_round": "ceil_256(256*q/15)",
+    "fixed_probe_terms": "ceil_512(4096*q/15)",
+    "duration": "1",
+    "fine_steps": "48"
+  },
+  "training_constraints": {
+    "coefficient_architecture": "independent_outputs",
+    "cross_system_initialization": false,
+    "ground_truth_in_training_or_checkpoint_selection": false,
+    "support_swap_locality_penalty_power": 0.0,
+    "residual_objective": "absolute",
+    "variational_action_weight": 0.1,
+    "variational_action_normalization": "mean_squared_generator_over_mean_squared_i_dH_dlambda",
+    "python_hash_seed": 0
+  },
+  "physical_validation": {
+    "protocols": ["learned_sparse_agp"],
+    "all_learned_terms_required": true,
+    "q15_exact_statevector_reference_when_feasible": true,
+    "q_greater_than_15_backend": "convergence_gated_tensor_network_tdvp"
+  },
+  "acceptance": {
+    "role": "reported_scaling_diagnostic_not_current_promotion_status",
+    "minimum_ground_fidelity": 0.95,
+    "maximum_adjacent_fidelity_drop": 0.01
+  },
+  "results_dir": "size_intensive_pinn_results"
+}

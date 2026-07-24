@@ -1,5 +1,6 @@
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +22,13 @@ for path in (SCRIPTS_DIR, FRAMEWORK_SCRIPTS_DIR):
 
 from agp_holdout_feedback import payload_with_feedback_baseline_neural
 from agp_baseline_train import settings_for_support
+from agp_size_intensive_study import (
+    assess_acceptance,
+    execution_flags_for_q,
+    result_row as size_study_result_row,
+    run_command as run_size_study_command,
+    validate_config as validate_size_study_config,
+)
 from agp_qubit_grid_benchmark import (
     DEFAULT_GRID_ROOT,
     grid_config,
@@ -31,6 +39,47 @@ from models import PadeActivation
 
 
 class AGPBenchmarkLayoutTests(unittest.TestCase):
+    def test_size_intensive_acceptance_requires_threshold_and_no_size_drop(self):
+        passing = assess_acceptance(
+            [
+                {"q": 15, "ground_state_fidelity": 0.970},
+                {"q": 20, "ground_state_fidelity": 0.965},
+                {"q": 25, "ground_state_fidelity": 0.960},
+            ],
+            minimum_fidelity=0.95,
+            maximum_adjacent_drop=0.01,
+        )
+        failing = assess_acceptance(
+            [
+                {"q": 15, "ground_state_fidelity": 0.970},
+                {"q": 20, "ground_state_fidelity": 0.955},
+                {"q": 25, "ground_state_fidelity": 0.949},
+            ],
+            minimum_fidelity=0.95,
+            maximum_adjacent_drop=0.01,
+        )
+
+        self.assertEqual(passing["status"], "pass")
+        self.assertEqual(failing["status"], "fail")
+
+    def test_size_intensive_manifest_marks_v6_as_current_benchmark(self):
+        manifest = json.loads(
+            (
+                ISING_SCENARIO_DIR / "size_intensive_pinn_study.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            manifest["methodology"],
+            "size_extensive_normalized_variational_action_conventional_pinn_v6",
+        )
+        self.assertEqual(manifest["benchmark_status"], "retained_current")
+        self.assertEqual(manifest["promotion_decision"]["status"], "promoted")
+        self.assertEqual(
+            manifest["training_constraints"]["variational_action_weight"],
+            0.1,
+        )
+
     @staticmethod
     def _grid_payload(q: int):
         return grid_config(
@@ -65,6 +114,130 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         environment = mocked_run.call_args.kwargs["env"]
         self.assertEqual(environment["PYTHONHASHSEED"], "0")
 
+    def test_size_study_subprocesses_use_stable_python_hash_seed(self):
+        with patch("agp_size_intensive_study.subprocess.run") as mocked_run:
+            run_size_study_command(["python", "example.py"], cwd=ROOT)
+
+        self.assertEqual(mocked_run.call_args.kwargs["env"]["PYTHONHASHSEED"], "0")
+
+    def test_size_study_never_cleans_or_retrains_declared_retained_anchor(self):
+        manifest = {"retained_anchor_q": 15}
+
+        self.assertEqual(
+            execution_flags_for_q(manifest, 15, clean=True, train=True),
+            {"clean": False, "train": False},
+        )
+        self.assertEqual(
+            execution_flags_for_q(manifest, 20, clean=True, train=True),
+            {"clean": True, "train": True},
+        )
+
+    def test_size_study_uses_exact_full_support_result_for_q15(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            trained_run = root / "runs" / "candidate"
+            summary_path = trained_run / "Models_Data" / "physical_validation_summary.json"
+            summary_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "physical": {"parameters": {"num_qubits": 15}},
+                        "holdout_feedback": {"base_agp_terms": 8},
+                        "physical_validation": {"trained_run": "runs/candidate"},
+                        "tensor_network_validation": {
+                            "trained_run": "runs/candidate",
+                            "output_dir": "mpo_validation",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "results": {
+                            "learned_sparse_agp": {
+                                "learned_terms": 8,
+                                "final_energy": -2.9,
+                                "ground_energy": -3.0,
+                                "energy_error": 0.1,
+                                "ground_state_fidelity": 0.97,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            row = size_study_result_row(config_path)
+
+        self.assertEqual(row["certification"], "exact_statevector")
+        self.assertTrue(row["full_support"])
+        self.assertEqual(row["ground_state_fidelity"], 0.97)
+
+    def test_size_study_rejects_nonunit_physical_duration(self):
+        source = (
+            ISING_SCENARIO_DIR
+            / "q20"
+            / "sweep_test"
+            / "size_intensive_pinn"
+            / "config.json"
+        )
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        payload["physical"]["parameters"]["T"] = 2.0
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "config.json"
+            candidate.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "fixed physical duration T=1"):
+                validate_size_study_config(candidate)
+
+    def test_projected_settings_propagate_variational_action_weight(self):
+        source = (
+            ISING_SCENARIO_DIR
+            / "q20"
+            / "sweep_test"
+            / "size_intensive_pinn"
+            / "config.json"
+        )
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        payload["training"]["loss"]["variational_action"] = 0.125
+
+        explicit = settings_for_support(payload, 32)
+        del payload["training"]["loss"]["variational_action"]
+        default = settings_for_support(payload, 32)
+
+        self.assertEqual(explicit.variational_action_weight, 0.125)
+        self.assertEqual(default.variational_action_weight, 0.0)
+
+    def test_q20_size_candidate_uses_isolated_variational_action_run(self):
+        config_path = (
+            ISING_SCENARIO_DIR
+            / "q20"
+            / "sweep_test"
+            / "size_intensive_pinn"
+            / "config.json"
+        )
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["physical"]["parameters"]["T"], 1.0)
+        self.assertGreater(payload["training"]["loss"]["variational_action"], 0.0)
+        self.assertEqual(payload["size_intensive_scaling"]["version"], "v6_action")
+        self.assertIn(
+            "variational_action_v6",
+            payload["holdout_feedback"]["output_root"],
+        )
+        self.assertIn(
+            payload["holdout_feedback"]["output_root"],
+            payload["tensor_network_validation"]["trained_run"],
+        )
+        payload["training"]["loss"]["variational_action"] = 0.0
+        with tempfile.TemporaryDirectory() as directory:
+            invalid = Path(directory) / "config.json"
+            invalid.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "positive variational-action"):
+                validate_size_study_config(invalid)
+
     def test_grid_defaults_inside_ising_scenario(self):
         self.assertEqual(
             DEFAULT_GRID_ROOT,
@@ -98,6 +271,48 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         self.assertTrue(expected_common.issubset({path.name for path in SCRIPTS_DIR.glob("*.py")}))
         self.assertTrue(FRAMEWORK_SCRIPTS_DIR.is_dir())
         self.assertEqual(expected_framework, {path.name for path in FRAMEWORK_SCRIPTS_DIR.glob("*.py")})
+
+    def test_q15_q20_graph_candidates_are_isolated_and_methodology_matched(self):
+        for q, residual_terms, rounds in ((15, 65536, 15), (20, 81920, 20)):
+            candidate = ISING_SCENARIO_DIR / f"q{q}" / "sweep_test" / "hamiltonian_pauli_graph"
+            payload = json.loads((candidate / "config.json").read_text(encoding="utf-8"))
+            general = payload["neural"]["general"]
+            feedback = payload["holdout_feedback"]
+
+            self.assertEqual(general["coefficient_architecture"], "hamiltonian_pauli_graph")
+            self.assertEqual(feedback["base_agp_terms"], 32768)
+            self.assertEqual(feedback["holdout_residual_top_k"], residual_terms)
+            self.assertEqual(feedback["iterations"], rounds)
+            self.assertFalse(feedback["allow_legacy_baseline_reuse"])
+            self.assertEqual(feedback["baseline_root"], "runs/baselines")
+            self.assertTrue(str(feedback["output_root"]).startswith("runs/"))
+
+    def test_q15_q20_factor_graph_candidates_are_isolated_and_methodology_matched(self):
+        for q, residual_terms, rounds in ((15, 65536, 15), (20, 81920, 20)):
+            candidate = (
+                ISING_SCENARIO_DIR
+                / f"q{q}"
+                / "sweep_test"
+                / "hamiltonian_pauli_factor_graph"
+            )
+            payload = json.loads((candidate / "config.json").read_text(encoding="utf-8"))
+            general = payload["neural"]["general"]
+            feedback = payload["holdout_feedback"]
+            acceptance = payload["candidate_acceptance"]
+
+            self.assertEqual(
+                general["coefficient_architecture"], "hamiltonian_pauli_factor_graph"
+            )
+            self.assertGreaterEqual(general["graph_latent_rank"], 96)
+            self.assertGreaterEqual(general["graph_term_width"], 128)
+            self.assertEqual(feedback["base_agp_terms"], 32768)
+            self.assertEqual(feedback["holdout_residual_top_k"], residual_terms)
+            self.assertEqual(feedback["iterations"], rounds)
+            self.assertFalse(feedback["allow_legacy_baseline_reuse"])
+            self.assertTrue(str(feedback["output_root"]).startswith("runs/"))
+            self.assertEqual(acceptance["minimum_q15_ground_fidelity"], 0.95)
+            self.assertEqual(acceptance["minimum_q20_ground_fidelity"], 0.95)
+            self.assertFalse(acceptance["uses_ground_truth_during_training_or_selection"])
 
     def test_tests_tree_contains_only_unit_tests_and_benchmark_configs(self):
         allowed_python = {
@@ -149,7 +364,7 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
         self.assertTrue(obsolete.isdisjoint(present))
 
     def test_retained_ising_studies_share_one_scenario_folder(self):
-        expected = {"q15", "q20", "q156"}
+        expected = {"q15", "q20", "q25", "q156"}
         present = {
             path.name
             for path in ISING_SCENARIO_DIR.iterdir()
@@ -162,6 +377,53 @@ class AGPBenchmarkLayoutTests(unittest.TestCase):
             self.assertFalse(
                 (ROOT / "tests" / "sparse_agp_curriculum" / study).exists()
             )
+
+    def test_size_extensive_active_support_configs_follow_declared_scaling_law(self):
+        expected = {
+            15: {
+                "K": 32768, "Q": 65536, "rounds": 15, "active": 2048,
+                "add": 3072, "swap": 256, "probe": 4096, "T": 1.0, "steps": 48,
+            },
+            20: {
+                "K": 58368, "Q": 116736, "rounds": 20, "active": 3840,
+                "add": 4096, "swap": 512, "probe": 5632, "T": 1.0, "steps": 48,
+            },
+            25: {
+                "K": 91136, "Q": 182272, "rounds": 25, "active": 5888,
+                "add": 5120, "swap": 512, "probe": 7168, "T": 1.0, "steps": 48,
+            },
+        }
+        for q, values in expected.items():
+            candidate = ISING_SCENARIO_DIR / f"q{q}" / "sweep_test" / "size_intensive_pinn"
+            payload = json.loads((candidate / "config.json").read_text(encoding="utf-8"))
+            feedback = payload["holdout_feedback"]
+            validation = payload["tensor_network_validation"]
+
+            self.assertTrue((candidate / "README.md").is_file())
+            self.assertEqual(payload["physical"]["parameters"]["num_qubits"], q)
+            self.assertEqual(payload["physical"]["parameters"]["T"], values["T"])
+            self.assertEqual(
+                payload["neural"]["general"]["coefficient_architecture"],
+                "independent_outputs",
+            )
+            self.assertEqual(feedback["base_agp_terms"], values["K"])
+            self.assertEqual(feedback["holdout_residual_top_k"], values["Q"])
+            self.assertEqual(feedback["iterations"], values["rounds"])
+            self.assertEqual(feedback["add_residual_terms_per_iteration"], values["add"])
+            self.assertFalse(feedback["allow_legacy_baseline_reuse"])
+            self.assertEqual(feedback["fixed_unseen_probes"]["active_terms"], values["probe"])
+            self.assertEqual(feedback["fixed_unseen_probes"]["null_terms"], values["probe"])
+            self.assertEqual(feedback["support_swap"]["terms_per_iteration"], values["swap"])
+            self.assertEqual(feedback["support_swap"]["locality_penalty_power"], 0.0)
+            self.assertEqual(payload["training"]["loss"]["residual_objective"], "absolute")
+            self.assertNotIn("residual_block_normalization", payload["training"]["loss"])
+            self.assertEqual(payload["agp_calibration"]["target_active_terms"], values["active"])
+            self.assertEqual(validation["protocols"], ["learned_sparse_agp"])
+            self.assertEqual(validation["resolutions"][-1]["steps"], values["steps"])
+            self.assertTrue(
+                all(row["learned_terms"] == values["K"] for row in validation["resolutions"])
+            )
+            self.assertTrue(payload["size_intensive_scaling"]["no_cross_system_initialization"])
 
     def test_documentation_lives_under_docs(self):
         self.assertTrue((ROOT / "docs").is_dir())

@@ -1,0 +1,300 @@
+{
+  "physical": {
+    "parameters": {
+      "system": "TransverseIsingDriverProblem",
+      "num_qubits": 20,
+      "distance": "1_0",
+      "hamiltonian_source": "Hamiltonians_to_use/pauli_decompositions/index.json",
+      "t_initial": 0.0,
+      "T": 1.0,
+      "tau_range": [0.0, 1.0],
+      "schedule": "trainable_bounded_envelope_sin2"
+    }
+  },
+  "neural": {
+    "model": "ProjectedSparseAGPPINN",
+    "general": {
+      "n_inputs": 1,
+      "n_outputs": "agp_top_k",
+      "n_hidden": 4,
+      "n_neurons": 96,
+      "activation": "pau",
+      "layer_type": "quadratic",
+      "coefficient_architecture": "independent_outputs"
+    }
+  },
+  "default_pipeline": {
+    "name": "q20_fixed_k_holdout_feedback_physical_validation",
+    "entrypoint": "scripts/agp_holdout_feedback.py",
+    "agp_terms": 58368,
+    "description": "Normalized variational-action conventional PINN v6 at q20: K=58368, active budget 3840, Q=116736, twenty feedback rounds, beta_action=0.1, normalized time tau, and fixed T=1."
+  },
+  "support_sweep": {
+    "agp_terms": [58368],
+    "output_root": "runs/baselines",
+    "intermediate_top_k": 58368,
+    "residual_top_k": 4096,
+    "residual_projection": "largest_generated_commutator_terms",
+    "agp_support_selection": {
+      "strategy": "nested_commutator_krylov_pool",
+      "max_depth": 8,
+      "max_frontier": 131072
+    },
+    "adaptive": {
+      "enabled": false,
+      "stages": 1,
+      "growth_terms_per_stage": 0
+    }
+  },
+  "holdout_feedback": {
+    "base_agp_terms": 58368,
+    "holdout_residual_top_k": 116736,
+    "iterations": 20,
+    "add_residual_terms_per_iteration": 4096,
+    "unseen_residual_batches_after_final_iteration": 1,
+    "epochs_per_iteration": 1000,
+    "lr": 1e-5,
+    "device": "auto",
+    "min_rms": 0.0,
+    "holdout_threshold": 0.10,
+    "unseen_threshold": 1.0,
+    "fixed_unseen_probes": {
+      "enabled": true,
+      "active_terms": 5632,
+      "null_terms": 5632,
+      "reference_rms_threshold": 1e-12,
+      "seed": 11,
+      "candidate_multiplier": 8
+    },
+    "baseline_root": "runs/baselines",
+    "allow_legacy_baseline_reuse": false,
+    "baseline_neural": {
+      "n_hidden": 4,
+      "n_neurons": 96,
+      "activation": "silu",
+      "layer_type": "quadratic",
+      "description": "Train or reuse the retained SiLU baseline checkpoint, then warm-start the PAU feedback model from that checkpoint. This makes the PAU benchmark reproducible from a cleaned q20 folder."
+    },
+    "support_swap": {
+      "enabled": true,
+      "terms_per_iteration": 512,
+      "start_round": 2,
+      "candidate_pool_multiplier": 16,
+      "protect_top_fraction": 0.02,
+      "new_gate_logit": 2.0,
+      "locality_penalty_power": 0.0,
+      "description": "Fixed-K support-swap curriculum: after each trained round, replace weak low-importance AGP strings with hard residual-derived candidates while keeping K unchanged."
+    },
+    "temporal_refinement": {
+      "enabled": true,
+      "epochs": 2500,
+      "num_points": 64,
+      "lr": 3e-6,
+      "optimizer": "AdamW",
+      "run_dir": "temporal_refinement",
+      "description": "Final post-curriculum continuation on the fixed round-20 AGP support and residual basis. It increases the time collocation grid while keeping PAU weights, learned schedule, gamma, and gates trainable; no final ground-state energy, fidelity, or observable targets are used."
+    },
+    "adaptive_temporal_refinement": {
+      "enabled": true,
+      "epochs": 1500,
+      "dense_points": 257,
+      "num_points": 64,
+      "lr": 1.5e-6,
+      "optimizer": "AdamW",
+      "run_dir": "adaptive_temporal_refinement",
+      "weight_power": 0.5,
+      "min_weight": 0.25,
+      "max_weight": 4.0,
+      "difficulty": "residual_x_cd_norm",
+      "description": "Final self-supervised continuation after temporal_refinement. It scores a dense time grid with the projected Euler-Lagrange residual, concentrates the training collocation grid near hard times, and keeps the AGP support fixed; no final ground-state energy, fidelity, or observable targets are used."
+    },
+    "keep_round_images": false,
+    "output_root": "runs/size_extensive_variational_action_v6"
+  },
+  "agp_calibration": {
+    "enabled": true,
+    "gamma_lr": 0.01,
+    "gate_lr": 0.01,
+    "initial_gamma": 1.0,
+    "target_active_terms": 3840,
+    "gate_temperature": 1.0,
+    "active_logit": 4.0,
+    "inactive_logit": -8.0,
+    "budget_weight": 1.0,
+    "binary_weight": 0.001,
+    "scale_l2_weight": 0.0001,
+    "description": "Joint curriculum training of a global AGP scale and soft Pauli gates against the projected Euler-Lagrange residual. It is active from the baseline run through every holdout-feedback round and does not use final ground-state energy, fidelity, or observable targets."
+  },
+  "training": {
+    "device": "auto",
+    "optimizer": "AdamW",
+    "parameters": {
+      "epochs": 5000,
+      "num_points": 16,
+      "lr": 0.0001,
+      "random_seed": 11
+    },
+    "loss": {
+      "residual": 1.0,
+      "residual_objective": "absolute",
+      "variational_action": 0.1,
+      "agp_l2": 1e-8,
+      "schedule_monotonic": 10.0,
+      "schedule_correction_l2": 0.0001
+    },
+    "export": {
+      "path_images": "Images/",
+      "path_data": "Models_Data/",
+      "top_coefficients": 32,
+      "plot_quantity": "d_lambda_dt_times_C_P",
+      "format": "pdf"
+    }
+  },
+  "schedule_optimization": {
+    "enabled": true,
+    "base": "sinusoidal_sin2",
+    "correction_amplitude": 2.4,
+    "hidden_width": 32,
+    "hidden_layers": 2,
+    "activation": "tanh",
+    "lr": 0.001,
+    "description": "Trainable scheduling function lambda(t)=lambda_0(t)+tau^2(1-tau)^2*A_sched*tanh(u_NN(t)), with lambda_0 equal to the current sin^2 schedule and A_sched=2.4 chosen to keep lambda within [0,1] for this base schedule. Endpoint values and endpoint derivatives are enforced by construction."
+  },
+  "physical_validation": {
+    "enabled": false,
+    "entrypoint": "tests/sparse_agp_curriculum/scripts/agp_physical_validation.py",
+    "protocols": ["learned_sparse_agp"],
+    "schedule": "sinusoidal_sin2",
+    "statevector_qubits": 20,
+    "evolution_steps": 96,
+    "prefer_residual_calibrated": false,
+    "learned_top_terms": 2048,
+    "learned_top_terms_sweep": [1024, 2048],
+    "learned_scale_sweep": [1.0],
+    "learned_action_cache_size": 8,
+    "selection_metric": "energy_error",
+    "description": "Legacy reduced-support statevector diagnostic retained for provenance. The project validation policy uses tensor networks for q>15, so this is disabled for canonical q20 evaluation."
+  },
+  "tensor_network_validation": {
+    "enabled": true,
+    "entrypoint": "tests/sparse_agp_curriculum/scripts/agp_mps_validation.py",
+    "trained_run": "runs/size_extensive_variational_action_v6/agp_58368_residual_116736_add_4096_rounds_20/adaptive_temporal_refinement",
+    "output_dir": "mpo_validation",
+    "protocols": ["learned_sparse_agp"],
+    "exact_final_ground_reference": "tests/sparse_agp_curriculum/ground_truth/diagonal_ising/ground_states_q2_q156.json",
+    "mpo_backend": {
+      "name": "tenpy_tdvp_mpo",
+      "integrator": "tdvp",
+      "representation": "joint_time_full_support",
+      "qubit_order_candidates": ["native", "spectral"],
+      "temporal_grid_points": 257,
+      "temporal_retained_norm": 0.9999,
+      "action_probe_seed": 11,
+      "action_probe_product_states": 1,
+      "action_probe_random_mps": 0,
+      "action_probe_exact_work_cap": 10000000,
+      "action_probe_dynamic_samples": 3,
+      "coefficient_error_max": 1e-6,
+      "action_error_max": 0.001,
+      "time_window_size": 4,
+      "adaptive_time_windows": true,
+      "time_axis_position": 10,
+      "mpo_workspace_cap_bytes": 17179869184,
+      "lanczos_max": 20,
+      "resource_caps": {"max_build_seconds": 10800, "max_peak_memory_gb": 24}
+    },
+    "resolutions": [
+      {
+        "name": "operator_preflight",
+        "preflight_only": true,
+        "steps": 4,
+        "max_bond": 8,
+        "learned_terms": 58368,
+        "cutoff": 1e-8,
+        "mpo_max_bond": 1024,
+        "mpo_cutoff": 0.0,
+        "mps_max_bond": 8,
+        "mps_cutoff": 1e-8,
+        "lanczos_max": 12,
+        "time_window_size": 4,
+        "adaptive_time_windows": false,
+        "time_axis_position": 10,
+        "max_build_seconds": 2400
+      },
+      {
+        "name": "time_coarse",
+        "steps": 24,
+        "max_bond": 64,
+        "learned_terms": 58368,
+        "cutoff": 1e-10,
+        "mpo_max_bond": 1024,
+        "mpo_cutoff": 0.0,
+        "mps_max_bond": 64,
+        "mps_cutoff": 1e-10,
+        "time_window_size": 4,
+        "adaptive_time_windows": true,
+        "time_axis_position": 10,
+        "max_build_seconds": 10800
+      },
+      {
+        "name": "state_coarse",
+        "steps": 48,
+        "max_bond": 32,
+        "learned_terms": 58368,
+        "cutoff": 1e-9,
+        "mpo_max_bond": 1024,
+        "mpo_cutoff": 0.0,
+        "mps_max_bond": 32,
+        "mps_cutoff": 1e-9,
+        "time_window_size": 4,
+        "adaptive_time_windows": true,
+        "time_axis_position": 10,
+        "max_build_seconds": 10800
+      },
+      {
+        "name": "fine",
+        "steps": 48,
+        "max_bond": 64,
+        "learned_terms": 58368,
+        "cutoff": 1e-10,
+        "mpo_max_bond": 1024,
+        "mpo_cutoff": 0.0,
+        "mps_max_bond": 64,
+        "mps_cutoff": 1e-10,
+        "time_window_size": 4,
+        "adaptive_time_windows": true,
+        "time_axis_position": 10,
+        "max_build_seconds": 10800
+      }
+    ],
+    "convergence_pairs": {
+      "timestep": ["time_coarse", "fine"],
+      "state": ["state_coarse", "fine"]
+    },
+    "operator_grouping": "support",
+    "coefficient_threshold": 0.0,
+    "convergence_energy_atol": 0.05,
+    "convergence_fidelity_atol": 0.01,
+    "progress": true,
+    "description": "PINN-only full-support q20 TeNPy TDVP validation of the retained beta_action=0.1 benchmark using all 58368 learned AGP terms at fixed T=1 with independent timestep and MPS-bond convergence pairs."
+  },
+  "summary": {
+    "top_k_overlap": 32,
+    "path_images": "runs/support_sweep_summary/Images/",
+    "path_data": "runs/support_sweep_summary/Models_Data/",
+    "runs_dir": "runs/"
+  },
+  "size_intensive_scaling": {
+    "version": "v6_action",
+    "agp_terms_formula": "ceil_1024(32768*(q/15)^2)",
+    "residual_terms_formula": "2*K(q)",
+    "curriculum_rounds_formula": "q",
+    "active_terms_formula": "ceil_256(2048*(q/15)^2)",
+    "duration_formula": "1",
+    "no_cross_system_initialization": true,
+    "acceptance": {
+      "minimum_ground_fidelity": 0.95,
+      "maximum_adjacent_fidelity_drop": 0.01
+    }
+  }
+}

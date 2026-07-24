@@ -62,6 +62,10 @@ LEGEND_FS = 8
 LINE_WIDTH = 1.5
 TICK_LENGTH = 4.0
 TICK_WIDTH = 0.8
+SHARED_GRAPH_ARCHITECTURES = {
+    "hamiltonian_pauli_graph",
+    "hamiltonian_pauli_factor_graph",
+}
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,31 @@ class ProjectedTrainingConfig:
     hidden_width: int = 56
     activation: str = "silu"
     layer_type: str = "quadratic"
+    coefficient_architecture: str = "independent_outputs"
+    graph_node_width: int = 32
+    graph_message_layers: int = 2
+    graph_latent_rank: int = 32
+    graph_term_width: int = 192
+    graph_time_fourier_order: int = 4
+    graph_term_chunk_size: int = 4096
+
+    def __post_init__(self) -> None:
+        architecture = str(self.coefficient_architecture).strip().lower()
+        if architecture not in {"independent_outputs", *SHARED_GRAPH_ARCHITECTURES}:
+            raise ValueError(
+                "coefficient_architecture must be 'independent_outputs' or a supported "
+                "Hamiltonian-Pauli graph architecture."
+            )
+        object.__setattr__(self, "coefficient_architecture", architecture)
+        if min(
+            self.graph_node_width,
+            self.graph_latent_rank,
+            self.graph_term_width,
+            self.graph_term_chunk_size,
+        ) < 1:
+            raise ValueError("Graph widths, latent rank, and term chunk size must be positive.")
+        if self.graph_message_layers < 0 or self.graph_time_fourier_order < 0:
+            raise ValueError("Graph message-layer and Fourier orders must be non-negative.")
 
     @property
     def t_final(self) -> float:
@@ -103,6 +132,7 @@ class ProjectedRunSettings:
     top_coefficients: int = 8
     residual_weight: float = 1.0
     residual_objective: str = "absolute"
+    variational_action_weight: float = 0.0
     agp_l2_weight: float = 1e-8
     residual_block_normalization: str = "none"
     agp_smoothness_weight: float = 0.0
@@ -186,6 +216,13 @@ def default_config_payload(config: ProjectedTrainingConfig) -> dict[str, object]
                 "n_neurons": config.hidden_width,
                 "activation": config.activation,
                 "layer_type": config.layer_type,
+                "coefficient_architecture": config.coefficient_architecture,
+                "graph_node_width": config.graph_node_width,
+                "graph_message_layers": config.graph_message_layers,
+                "graph_latent_rank": config.graph_latent_rank,
+                "graph_term_width": config.graph_term_width,
+                "graph_time_fourier_order": config.graph_time_fourier_order,
+                "graph_term_chunk_size": config.graph_term_chunk_size,
             },
         },
         "support": {
@@ -215,6 +252,7 @@ def default_config_payload(config: ProjectedTrainingConfig) -> dict[str, object]
             "loss": {
                 "residual": 1.0,
                 "residual_objective": "absolute",
+                "variational_action": 0.0,
                 "agp_l2": 1e-8,
                 "residual_block_normalization": "none",
                 "agp_smoothness": 0.0,
@@ -282,6 +320,14 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
     if model_name != "ProjectedSparseAGPPINN":
         raise ValueError(f"Unsupported model {model_name!r}; this runner expects ProjectedSparseAGPPINN.")
 
+    coefficient_architecture = str(
+        neural_general.get("coefficient_architecture", fallback.coefficient_architecture)
+    ).strip().lower()
+    if coefficient_architecture not in {"independent_outputs", *SHARED_GRAPH_ARCHITECTURES}:
+        raise ValueError(
+            "neural.general.coefficient_architecture must be 'independent_outputs' or a "
+            "supported Hamiltonian-Pauli graph architecture."
+        )
     config = ProjectedTrainingConfig(
         system=str(physical_parameters.get("system", fallback.system)),
         n_qubits=int(physical_parameters.get("num_qubits", fallback.n_qubits)),
@@ -293,7 +339,29 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
         hidden_width=int(neural_general.get("n_neurons", fallback.hidden_width)),
         activation=str(neural_general.get("activation", fallback.activation)),
         layer_type=str(neural_general.get("layer_type", fallback.layer_type)),
+        coefficient_architecture=coefficient_architecture,
+        graph_node_width=int(neural_general.get("graph_node_width", fallback.graph_node_width)),
+        graph_message_layers=int(
+            neural_general.get("graph_message_layers", fallback.graph_message_layers)
+        ),
+        graph_latent_rank=int(neural_general.get("graph_latent_rank", fallback.graph_latent_rank)),
+        graph_term_width=int(neural_general.get("graph_term_width", fallback.graph_term_width)),
+        graph_time_fourier_order=int(
+            neural_general.get("graph_time_fourier_order", fallback.graph_time_fourier_order)
+        ),
+        graph_term_chunk_size=int(
+            neural_general.get("graph_term_chunk_size", fallback.graph_term_chunk_size)
+        ),
     )
+    if min(
+        config.graph_node_width,
+        config.graph_latent_rank,
+        config.graph_term_width,
+        config.graph_term_chunk_size,
+    ) < 1:
+        raise ValueError("Graph widths, latent rank, and term chunk size must be positive.")
+    if config.graph_message_layers < 0 or config.graph_time_fourier_order < 0:
+        raise ValueError("Graph message-layer and Fourier orders must be non-negative.")
     if config.physical_time <= 0.0:
         raise ValueError("The physical time T must be positive.")
 
@@ -335,6 +403,7 @@ def settings_from_payload(payload: dict[str, object], fallback: ProjectedTrainin
         top_coefficients=int(training_export.get("top_coefficients", 8)),
         residual_weight=float(training_loss.get("residual", 1.0)),
         residual_objective=residual_objective,
+        variational_action_weight=float(training_loss.get("variational_action", 0.0)),
         agp_l2_weight=float(training_loss.get("agp_l2", 1e-8)),
         residual_block_normalization=str(training_loss.get("residual_block_normalization", "none")),
         agp_smoothness_weight=float(training_loss.get("agp_smoothness", 0.0)),
@@ -542,6 +611,7 @@ def projected_trainable_state(model: ProjectedSparseAGPPINN) -> dict[str, object
     state: dict[str, object] = {
         "body": {key: value.detach().cpu() for key, value in model.body.state_dict().items()},
         "agp_labels": list(model.agp_labels),
+        "coefficient_architecture": str(getattr(model, "coefficient_architecture", "independent_outputs")),
     }
     if model.has_trainable_schedule():
         state["schedule"] = {
@@ -571,6 +641,20 @@ def projected_trainable_state_from_checkpoint(checkpoint_path: Path) -> dict[str
         },
         "agp_labels": [str(label) for label in checkpoint["agp_labels"]],
     }
+    checkpoint_config = checkpoint.get("config", {})
+    checkpoint_config = checkpoint_config if isinstance(checkpoint_config, dict) else {}
+    training_config = checkpoint_config.get("training", {})
+    training_config = training_config if isinstance(training_config, dict) else {}
+    model_config = training_config.get("model", {})
+    model_config = model_config if isinstance(model_config, dict) else {}
+    physical_config = checkpoint_config.get("physical", {})
+    physical_config = physical_config if isinstance(physical_config, dict) else {}
+    state["coefficient_architecture"] = str(
+        model_config.get(
+            "coefficient_architecture",
+            physical_config.get("coefficient_architecture", "independent_outputs"),
+        )
+    )
     if "agp_log_gamma" in model_state and "agp_gate_logits" in model_state:
         metadata = checkpoint.get("config", {}).get("support", {})
         metadata = metadata if isinstance(metadata, dict) else {}
@@ -924,6 +1008,13 @@ def make_projected_model(
         hidden_width=config.hidden_width,
         activation=config.activation,
         layer_type=config.layer_type,
+        coefficient_architecture=config.coefficient_architecture,
+        graph_node_width=config.graph_node_width,
+        graph_message_layers=config.graph_message_layers,
+        graph_latent_rank=config.graph_latent_rank,
+        graph_term_width=config.graph_term_width,
+        graph_time_fourier_order=config.graph_time_fourier_order,
+        graph_term_chunk_size=config.graph_term_chunk_size,
         t_min=config.t_initial,
         t_max=config.t_final,
     ).to(device)
@@ -936,6 +1027,18 @@ def make_projected_export_model(
 ) -> ProjectedSparseAGPExportModel:
     """Build only the network surface required to resample a checkpoint."""
 
+    h0: SparsePauliOperator | None = None
+    h1: SparsePauliOperator | None = None
+    if config.coefficient_architecture in SHARED_GRAPH_ARCHITECTURES:
+        hamiltonian_path = Path(config.hamiltonian_source)
+        if not hamiltonian_path.is_absolute():
+            hamiltonian_path = ROOT / hamiltonian_path
+        h0, h1 = load_pauli_hamiltonian_pair(
+            hamiltonian_path,
+            system=config.system,
+            n_qubits=config.n_qubits,
+            distance=config.distance,
+        )
     return ProjectedSparseAGPExportModel(
         config.n_qubits,
         list(agp_labels),
@@ -943,6 +1046,15 @@ def make_projected_export_model(
         hidden_width=config.hidden_width,
         activation=config.activation,
         layer_type=config.layer_type,
+        coefficient_architecture=config.coefficient_architecture,
+        h_initial=h0,
+        h_final=h1,
+        graph_node_width=config.graph_node_width,
+        graph_message_layers=config.graph_message_layers,
+        graph_latent_rank=config.graph_latent_rank,
+        graph_term_width=config.graph_term_width,
+        graph_time_fourier_order=config.graph_time_fourier_order,
+        graph_term_chunk_size=config.graph_term_chunk_size,
         t_min=config.t_initial,
         t_max=config.t_final,
     ).to(device)
@@ -982,6 +1094,9 @@ def transfer_projected_weights(old_model: ProjectedSparseAGPPINN, new_model: Pro
         if key in new_state and new_state[key].shape == value.shape:
             new_state[key].copy_(value.to(new_state[key].device))
     new_model.body.load_state_dict(new_state)
+
+    if getattr(old_model, "coefficient_architecture", "independent_outputs") in SHARED_GRAPH_ARCHITECTURES:
+        return
 
     old_body = old_model.body
     new_body = new_model.body
@@ -1142,6 +1257,7 @@ def plan_fixed_k_support_swap(
     max_swaps: int,
     candidate_pool_size: int,
     protect_top_fraction: float = 0.0,
+    locality_penalty_power: float = 0.0,
     stratification: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Plan a fixed-K AGP support swap from weak active terms to hard candidates."""
@@ -1169,8 +1285,20 @@ def plan_fixed_k_support_swap(
         coefficient_importance,
         protect_top_fraction=protect_top_fraction,
     )
+    locality_power = max(0.0, float(locality_penalty_power))
+
+    def locality_adjusted(score: float, label: str) -> float:
+        return float(score) / max(float(pauli_weight(label)), 1.0) ** locality_power
+
     removable = [label for label in labels if label not in protected]
-    removable = sorted(removable, key=lambda label: (scores.get(label, 0.0), pauli_weight(label), label))
+    removable = sorted(
+        removable,
+        key=lambda label: (
+            locality_adjusted(scores.get(label, 0.0), label),
+            -pauli_weight(label),
+            label,
+        ),
+    )
     candidates = hard_residual_agp_candidates(
         residual_spectrum=residual_spectrum,
         h0=h0,
@@ -1179,6 +1307,22 @@ def plan_fixed_k_support_swap(
         candidate_pool_size=candidate_pool_size,
     )
     candidate_pool = list(candidates)
+    if locality_power > 0.0:
+        for row in candidates:
+            row["raw_score"] = float(row["score"])
+            row["locality_adjusted_score"] = locality_adjusted(
+                float(row["score"]), str(row["label"])
+            )
+            row["score"] = float(row["locality_adjusted_score"])
+        candidates = sorted(
+            candidates,
+            key=lambda row: (
+                float(row["locality_adjusted_score"]),
+                -pauli_weight(str(row["label"])),
+                str(row["label"]),
+            ),
+            reverse=True,
+        )
     stratification_provenance: dict[str, object] = {"enabled": False}
     if stratification and bool(stratification.get("enabled", False)):
         selection = stratified_ranked_selection(
@@ -1217,6 +1361,7 @@ def plan_fixed_k_support_swap(
         "stratification": stratification_provenance,
         "protected_label_count": len(protected),
         "protect_top_fraction": float(protect_top_fraction),
+        "locality_penalty_power": locality_power,
         "reason": "planned" if swap_count else "no_candidates",
     }
 
@@ -1278,7 +1423,8 @@ def remap_trainable_state_for_agp_labels(
 
     remapped = {str(key): _clone_trainable_state_value(value) for key, value in state.items()}
     body = remapped.get("body")
-    if isinstance(body, dict):
+    architecture = str(remapped.get("coefficient_architecture", "independent_outputs"))
+    if isinstance(body, dict) and architecture not in SHARED_GRAPH_ARCHITECTURES:
         for key, value in list(body.items()):
             if isinstance(value, torch.Tensor) and value.shape[:1] == (len(old_labels),):
                 body[key] = _remap_output_axis_tensor(
@@ -1322,7 +1468,13 @@ def train_stage(
         loss.backward()
         optimizer.step()
         row = {"epoch": float(global_epoch), "stage": float(stage), "stage_epoch": float(local_epoch)}
-        row.update({key: float(value.detach().cpu().item()) for key, value in diagnostics.items()})
+        diagnostic_items = list(diagnostics.items())
+        diagnostic_values = torch.stack(
+            [value.detach().real.float().reshape(()) for _, value in diagnostic_items]
+        ).cpu().tolist()
+        row.update(
+            {key: float(value) for (key, _), value in zip(diagnostic_items, diagnostic_values)}
+        )
         history.append(row)
         if global_epoch == 0 or local_epoch == epochs - 1:
             print(
@@ -1785,6 +1937,7 @@ def sample_projected_export_payload(
             "raw_agp_coefficients", prediction["agp_coefficients"]
         ).detach().cpu()
         d_lambda_dt = prediction["d_lambda_dt"].detach().cpu()
+        d_lambda_d_tau = prediction["d_lambda_d_tau"].detach().cpu()
         hcd_coefficients = d_lambda_dt * agp_coefficients
         calibrated = model.has_agp_calibration()
         coefficient_definition = (
@@ -1801,7 +1954,13 @@ def sample_projected_export_payload(
             "counterdiabatic_coefficients": hcd_coefficients,
             "counterdiabatic_coefficient_definition": coefficient_definition,
             "lambda": prediction["lambda"].detach().cpu(),
+            "d_lambda_d_tau": d_lambda_d_tau,
             "d_lambda_dt": d_lambda_dt,
+            "time_normalization": {
+                "definition": "tau=(t-t_initial)/T",
+                "physical_duration": float(model.t_max - model.t_min),
+                "chain_rule": "d_lambda_dt=d_lambda_d_tau/T",
+            },
             "schedule": "trainable_bounded_envelope" if model.has_trainable_schedule() else "sinusoidal_sin2",
             "schedule_base": str(getattr(model, "schedule_base", "sinusoidal_sin2")),
             "schedule_correction_amplitude": float(getattr(model, "schedule_correction_amplitude", 0.0)),
@@ -1970,6 +2129,7 @@ def run_training(settings: ProjectedRunSettings, run_dir: Path) -> dict[str, flo
     loss_weights = ProjectedSparseLossWeights(
         residual=settings.residual_weight,
         residual_objective=settings.residual_objective,
+        variational_action=settings.variational_action_weight,
         agp_l2=settings.agp_l2_weight,
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,

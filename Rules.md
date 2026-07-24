@@ -30,9 +30,40 @@ adiabatic gauge potential for
 
 ```text
 H_AD(lambda) = (1 - lambda) H_initial + lambda H_final,
-A_lambda(t) = sum_{P in S_AGP} C_P(t) P,
-H_CD(t) = H_AD(lambda(t)) + dot(lambda)(t) A_lambda(t).
+tau = (t - t_initial) / T in [0, 1],
+A_lambda(tau) = sum_{P in S_AGP} C_P(tau) P,
+d lambda / dt = (1 / T) d lambda / d tau,
+H_CD(tau) = H_AD(lambda(tau)) + (1 / T)(d lambda / d tau) A_lambda(tau).
 ```
+
+The neural input and all schedule collocation grids use normalized time `tau`.
+Physical dynamics may use a duration `T`, but every derivative entering the
+physical counterdiabatic Hamiltonian must include the chain-rule factor `1/T`.
+Exports must distinguish `d_lambda_d_tau` from `d_lambda_dt`; a checkpoint
+trained for one `T` cannot be silently evaluated at another `T`.
+
+### Fixed Physical Duration For CD Benchmark Claims
+
+The canonical counterdiabatic benchmark duration is fixed at `T=1` for every
+qubit count, Hamiltonian instance, architecture, support size, and candidate
+methodology. Comparisons and promotion decisions must evaluate all methods at
+this same finite physical duration.
+
+- Do not optimize, sweep, enlarge, or post-hoc reparameterize `T` to improve a
+  reported fidelity or energy error.
+- A larger `T` approaches the ordinary adiabatic limit and can improve no-CD
+  evolution without improving the learned AGP. It is therefore not evidence of
+  better counterdiabatic control or better scaling with system size.
+- Duration-scaling experiments must not be rerun as part of methodology search
+  or benchmark promotion. Existing duration diagnostics are historical
+  ablations only and remain non-retained.
+- Normalized time remains mandatory: `tau=(t-t_initial)/T` and
+  `d/dt=(1/T)d/dtau`. With the canonical `T=1`, the factor is numerically one
+  but must remain explicit in code and exports.
+- A separate physical study may define a non-unit duration only when duration
+  itself is the declared scientific variable. Such a study is outside the
+  canonical CD benchmark, must compare every method at the same predeclared
+  `T`, and cannot replace or promote against the `T=1` result.
 
 The training residual is evaluated in Pauli-coordinate space:
 
@@ -70,6 +101,12 @@ tests, and described at the correct certification level.
 
 - Training must remain self-supervised through the AGP residual and declared
   regularizers.
+- The current retained benchmark objective is
+  `L_total = L_projected + 0.1 L_action + L_regularization`, where
+  `L_action` is the squared sparse-Pauli norm of
+  `i dH_AD/dlambda - [A_lambda,H_AD]` divided by the squared norm of
+  `i dH_AD/dlambda` with a numerical floor. Future benchmark candidates must
+  compare against this normalized variational-action v6 baseline.
 - Exact final energy, exact ground-state fidelity, exact observables, and other
   benchmark ground truth must not enter training or hyperparameter selection
   unless the experiment is explicitly labelled as supervised.

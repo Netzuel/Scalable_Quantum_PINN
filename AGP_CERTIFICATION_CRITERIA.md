@@ -425,6 +425,12 @@ approximate state-evolution metrics,
 or known small-q dense/full-basis comparisons.
 ```
 
+Canonical CD certification uses the fixed finite duration `T=1`. The candidate,
+no-CD baseline, and comparator methods must use exactly the same duration.
+Increasing or optimizing `T` is an adiabatic-runtime ablation and cannot pass a
+counterdiabatic-quality, model-improvement, or size-scaling gate. A result
+evaluated only after changing `T` is `not comparable` to the retained benchmark.
+
 For large `q`, these checks may be approximate. If they are unavailable, report
 that the result is residual-certified only, not physically validated.
 

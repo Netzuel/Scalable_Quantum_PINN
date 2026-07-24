@@ -1,7 +1,9 @@
 # q156 Sparse AGP Curriculum
 
-This folder applies the common sparse-AGP benchmark methodology to the
-156-qubit driver-to-problem transverse Ising path:
+This folder records the legacy validated q156 benchmark. It predates the
+normalized variational-action v6 methodology and has not yet been retrained
+under the current benchmark. It applies the earlier sparse-AGP curriculum to
+the 156-qubit driver-to-problem transverse Ising path:
 
 ```text
 H_initial = - sum_i X_i
@@ -23,7 +25,7 @@ swaps 256 weak AGP strings for residual-derived candidates while keeping
 the requested `Q_max=81920`; after round 20, 4319 generated terms remain
 outside the 65536-term training residual basis for the final unseen diagnostic.
 
-The model matches the retained general benchmark: a width-96, four-hidden-layer
+The model matches the retained architecture but uses the preceding loss: a width-96, four-hidden-layer
 quadratic/QRes coefficient network, a SiLU warm start, trainable PAU
 activations, jointly learned scale/gates/bounded schedule, and uniform plus
 adaptive temporal refinement.

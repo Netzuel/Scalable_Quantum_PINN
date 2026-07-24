@@ -1,5 +1,11 @@
 # q15 Sparse AGP Physical Validation
 
+The current retained q15 benchmark is
+`size_intensive_pinn/config.json`, which adds the normalized
+variational-action loss with `beta_action=0.1`. The root `config.json` and the
+historical results described later in this file are the preceding benchmark
+kept for provenance.
+
 This folder runs a q15 sparse AGP curriculum above the exact-output regime
 (`q > 8`) while keeping the trainable AGP support fixed:
 
@@ -21,8 +27,7 @@ The schedule correction is trained jointly with the AGP and calibration
 variables. The envelope enforces `lambda(0)=0`, `lambda(T)=1`, and zero endpoint
 derivatives by construction.
 
-The current retained neural architecture is configured entirely in
-`config.json`: a quadratic/QRes AGP coefficient network with width 96, four
+The shared neural architecture is a quadratic/QRes AGP coefficient network with width 96, four
 hidden layers, and trainable PAU activations, plus a trainable schedule MLP with
 width 32, two hidden layers, and tanh activations. The PAU feedback stage
 warm-starts from the retained width-96 SiLU baseline checkpoint.
@@ -35,13 +40,13 @@ Feedback keeps the AGP support size fixed at `K=32768`. Each round evaluates a
 larger residual holdout basis, adds the highest-RMS unseen residual equations
 to the training residual basis, swaps 256 weak AGP strings for hard
 residual-derived candidates, remaps retained output rows by Pauli label, and
-fine-tunes the same coefficient functions. After round 15, the current retained
-benchmark runs a temporal-refinement continuation and then an adaptive
+fine-tunes the same coefficient functions. After round 15, the curriculum runs
+a temporal-refinement continuation and then an adaptive
 temporal-refinement continuation on the fixed support and residual basis. The
 adaptive stage scores a dense time grid with projected residual quantities and
 concentrates the final collocation grid near harder times.
 
-The current residual-feedback budget uses `intermediate_top_k = 32768`,
+The preceding configuration's residual-feedback budget uses `intermediate_top_k = 32768`,
 `Q = 65536`, and `add_residual_terms_per_iteration = 3072`. The final trained
 round therefore uses 50176 residual equations and keeps a 15360-term unseen
 residual batch for the final diagnostic.
@@ -121,7 +126,7 @@ kipu_dqfm_l1
 learned_sparse_agp
 ```
 
-The current retained learned AGP checkpoint is selected from the
+The preceding learned AGP checkpoint is selected from the
 `adaptive_temporal_refinement/` sub-run when the feedback summary records it;
 otherwise the script falls back to `temporal_refinement/` and then to the final
 feedback round.
@@ -139,7 +144,7 @@ it is not a scalable library path.
 
 ## Tensor-Network Validation And Calibration
 
-The tensor-network backend is calibrated against the retained q15 statevector
+The tensor-network backend was calibrated against the preceding q15 statevector
 before it is used at larger q:
 
 ```bash

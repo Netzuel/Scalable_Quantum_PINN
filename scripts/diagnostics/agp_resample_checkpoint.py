@@ -56,7 +56,7 @@ def physical_export_sha256(payload: Mapping[str, object]) -> str:
     labels = payload.get("pauli_labels")
     if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)):
         raise TypeError("A physical AGP export requires an ordered pauli_labels sequence.")
-    digest = hashlib.sha256(b"projected_sparse_agp_physical_export_v1\0")
+    digest = hashlib.sha256(b"projected_sparse_agp_physical_export_v2\0")
     digest.update(
         json.dumps(
             [str(label) for label in labels],
@@ -68,6 +68,7 @@ def physical_export_sha256(payload: Mapping[str, object]) -> str:
         "tau",
         "t",
         "lambda",
+        "d_lambda_d_tau",
         "d_lambda_dt",
         "raw_agp_coefficients",
         "agp_coefficients",

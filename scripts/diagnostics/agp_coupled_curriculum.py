@@ -1105,6 +1105,7 @@ def train_coupled_round(
     loss_weights = ProjectedSparseLossWeights(
         residual=settings.residual_weight,
         residual_objective=settings.residual_objective,
+        variational_action=settings.variational_action_weight,
         agp_l2=settings.agp_l2_weight,
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,

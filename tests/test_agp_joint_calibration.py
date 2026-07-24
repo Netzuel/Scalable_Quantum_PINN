@@ -67,6 +67,64 @@ class AGPJointCalibrationTests(unittest.TestCase):
         self.assertEqual(configured.residual_objective, "reference_normalized")
         self.assertEqual(configured.calibration_budget_normalization, "target")
 
+    def test_graph_architecture_configuration_is_opt_in_and_round_trips(self):
+        fallback = ProjectedTrainingConfig(system="unit", n_qubits=9)
+        default_settings = settings_from_payload(default_config_payload(fallback), fallback)
+        self.assertEqual(default_settings.model.coefficient_architecture, "independent_outputs")
+
+        payload = default_config_payload(fallback)
+        payload["neural"]["general"].update(
+            {
+                "coefficient_architecture": "hamiltonian_pauli_graph",
+                "graph_node_width": 24,
+                "graph_message_layers": 2,
+                "graph_latent_rank": 12,
+                "graph_term_chunk_size": 1024,
+            }
+        )
+        configured = settings_from_payload(payload, fallback)
+
+        self.assertEqual(configured.model.coefficient_architecture, "hamiltonian_pauli_graph")
+        self.assertEqual(configured.model.graph_node_width, 24)
+        self.assertEqual(configured.model.graph_message_layers, 2)
+        self.assertEqual(configured.model.graph_latent_rank, 12)
+        self.assertEqual(configured.model.graph_term_chunk_size, 1024)
+
+    def test_unknown_coefficient_architecture_is_rejected(self):
+        fallback = ProjectedTrainingConfig(system="unit", n_qubits=9)
+        payload = default_config_payload(fallback)
+        payload["neural"]["general"]["coefficient_architecture"] = "ground_truth_lookup"
+
+        with self.assertRaisesRegex(ValueError, "coefficient_architecture"):
+            settings_from_payload(payload, fallback)
+
+    def test_factor_graph_architecture_configuration_round_trips(self):
+        fallback = ProjectedTrainingConfig(system="unit", n_qubits=9)
+        payload = default_config_payload(fallback)
+        payload["neural"]["general"].update(
+            {
+                "coefficient_architecture": "hamiltonian_pauli_factor_graph",
+                "graph_node_width": 80,
+                "graph_message_layers": 4,
+                "graph_term_width": 160,
+                "graph_latent_rank": 96,
+                "graph_time_fourier_order": 3,
+                "graph_term_chunk_size": 2048,
+            }
+        )
+
+        configured = settings_from_payload(payload, fallback)
+
+        self.assertEqual(
+            configured.model.coefficient_architecture, "hamiltonian_pauli_factor_graph"
+        )
+        self.assertEqual(configured.model.graph_node_width, 80)
+        self.assertEqual(configured.model.graph_message_layers, 4)
+        self.assertEqual(configured.model.graph_term_width, 160)
+        self.assertEqual(configured.model.graph_latent_rank, 96)
+        self.assertEqual(configured.model.graph_time_fourier_order, 3)
+        self.assertEqual(configured.model.graph_term_chunk_size, 2048)
+
     def test_baseline_settings_preserve_normalized_objective_modes(self):
         fallback = ProjectedTrainingConfig(system="unit", n_qubits=9)
         payload = default_config_payload(fallback)
@@ -224,6 +282,35 @@ class AGPJointCalibrationTests(unittest.TestCase):
             if name.startswith("schedule_body.")
         ]
         self.assertTrue(any(grad is not None for grad in schedule_grads))
+
+    def test_trainable_schedule_exposes_normalized_derivative_and_chain_rule(self):
+        unit_model, settings = self._model_and_settings()
+        long_model, _ = self._model_and_settings()
+        long_model.t_max = 2.0
+        settings = ProjectedRunSettings(
+            **{
+                **settings.__dict__,
+                "schedule_trainable_enabled": True,
+                "schedule_hidden_width": 6,
+                "schedule_hidden_layers": 1,
+                "schedule_correction_amplitude": 2.4,
+            }
+        )
+        enable_projected_trainable_schedule(unit_model, settings)
+        enable_projected_trainable_schedule(long_model, settings)
+        long_model.load_state_dict(unit_model.state_dict())
+
+        tau = torch.tensor([[0.37]])
+        unit = unit_model(tau)
+        long = long_model(2.0 * tau)
+
+        torch.testing.assert_close(unit["lambda"], long["lambda"])
+        torch.testing.assert_close(unit["d_lambda_d_tau"], long["d_lambda_d_tau"])
+        torch.testing.assert_close(unit["d_lambda_dt"], 2.0 * long["d_lambda_dt"])
+        torch.testing.assert_close(
+            unit["d_lambda_dt"],
+            unit["d_lambda_d_tau"] / (unit_model.t_max - unit_model.t_min),
+        )
 
     def test_holdout_checkpoint_loaders_restore_the_trainable_schedule(self):
         source, settings = self._model_and_settings()

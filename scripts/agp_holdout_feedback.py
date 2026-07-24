@@ -108,6 +108,7 @@ class SupportSwapSettings:
     candidate_pool_multiplier: int = 16
     protect_top_fraction: float = 0.02
     new_gate_logit: float = 2.0
+    locality_penalty_power: float = 0.0
     resource_budget: dict[str, object] | None = None
     stratification: dict[str, object] | None = None
 
@@ -863,6 +864,7 @@ def support_swap_settings_from_feedback(
         candidate_pool_multiplier=max(1, int(raw.get("candidate_pool_multiplier", 16))),
         protect_top_fraction=max(0.0, float(raw.get("protect_top_fraction", 0.02))),
         new_gate_logit=float(raw.get("new_gate_logit", 2.0)),
+        locality_penalty_power=max(0.0, float(raw.get("locality_penalty_power", 0.0))),
         resource_budget=resource_payload,
         stratification=stratification,
     )
@@ -1289,6 +1291,7 @@ def train_feedback_round(
     loss_weights = ProjectedSparseLossWeights(
         residual=settings.residual_weight,
         residual_objective=settings.residual_objective,
+        variational_action=settings.variational_action_weight,
         agp_l2=settings.agp_l2_weight,
         residual_block_normalization=settings.residual_block_normalization,
         agp_smoothness=settings.agp_smoothness_weight,
@@ -2484,6 +2487,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     adaptive_temporal_settings = adaptive_temporal_refinement_settings_from_feedback(feedback)
     output_root_arg = args.output_root if args.output_root is not None else Path(str(feedback.get("output_root", "runs/holdout_feedback")))
     baseline_root_arg = args.baseline_root if args.baseline_root is not None else Path(str(feedback.get("baseline_root", "runs/baselines")))
+    allow_legacy_baseline_reuse = bool(feedback.get("allow_legacy_baseline_reuse", True))
     keep_round_images = bool(args.keep_round_images or feedback.get("keep_round_images", False))
     holdout_threshold = float(
         args.holdout_threshold if args.holdout_threshold is not None else feedback.get("holdout_threshold", 0.10)
@@ -2514,7 +2518,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     base_run = baseline_root / f"agp_{base_agp_terms}"
     legacy_base_run = RUN_DIR / "runs" / f"agp_{base_agp_terms}"
     base_checkpoint = base_run / "Models_Data" / "training_checkpoint.pt"
-    if not base_checkpoint.is_file() and legacy_base_run != base_run:
+    if allow_legacy_baseline_reuse and not base_checkpoint.is_file() and legacy_base_run != base_run:
         legacy_checkpoint = legacy_base_run / "Models_Data" / "training_checkpoint.pt"
         if legacy_checkpoint.is_file():
             print(f"use_legacy_baseline source={legacy_base_run.relative_to(RUN_DIR)}")
@@ -3025,6 +3029,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     * support_swap_settings.candidate_pool_multiplier
                 ),
                 protect_top_fraction=support_swap_settings.protect_top_fraction,
+                locality_penalty_power=support_swap_settings.locality_penalty_power,
                 stratification=support_swap_settings.stratification,
             )
             support_swap_plan["resource_budget"] = support_swap_settings.resource_budget

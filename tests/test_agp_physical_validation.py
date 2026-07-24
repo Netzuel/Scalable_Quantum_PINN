@@ -35,6 +35,8 @@ from agp_physical_validation import (
     build_action_cache,
     build_learned_variant_specs,
     final_run_from_summary,
+    learned_term_selection,
+    requested_physical_protocols,
     select_best_learned_variant,
     variational_l1_agp,
 )
@@ -44,6 +46,60 @@ from utils import SparsePauliOperator, transverse_field_ising_problem
 
 
 class AGPPhysicalValidationTests(unittest.TestCase):
+    def test_learned_export_can_be_explicitly_reparameterized_to_new_duration(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "coefficients.pt"
+            torch.save(
+                {
+                    "pauli_labels": ["Y"],
+                    "agp_coefficients": torch.tensor([[1.0], [1.0]]),
+                    "counterdiabatic_coefficients": torch.tensor([[0.0], [1.0]]),
+                    "tau": torch.tensor([0.0, 1.0]),
+                    "lambda": torch.tensor([0.0, 1.0]),
+                    "d_lambda_d_tau": torch.tensor([0.0, 2.0]),
+                    "d_lambda_dt": torch.tensor([0.0, 1.0]),
+                    "time_normalization": {"physical_duration": 2.0},
+                },
+                path,
+            )
+
+            learned = learned_term_selection(
+                path,
+                1,
+                expected_total_time=4.0,
+                allow_duration_reparameterization=True,
+            )
+
+        np.testing.assert_allclose(learned["coefficients"], [[0.0], [0.5]])
+        self.assertEqual(learned["time_normalization"]["source_physical_duration"], 2.0)
+        self.assertEqual(learned["time_normalization"]["physical_duration"], 4.0)
+        self.assertTrue(learned["time_normalization"]["duration_reparameterized"])
+
+    def test_learned_export_rejects_inconsistent_normalized_time_chain_rule(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "coefficients.pt"
+            torch.save(
+                {
+                    "pauli_labels": ["Y"],
+                    "counterdiabatic_coefficients": torch.tensor([[0.0], [0.0]]),
+                    "tau": torch.tensor([0.0, 1.0]),
+                    "lambda": torch.tensor([0.0, 1.0]),
+                    "d_lambda_d_tau": torch.tensor([0.0, 0.0]),
+                    "d_lambda_dt": torch.tensor([0.0, 0.0]),
+                    "time_normalization": {"physical_duration": 2.0},
+                },
+                path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "physical duration"):
+                learned_term_selection(path, 1, expected_total_time=1.0)
+
+    def test_requested_physical_protocols_can_select_only_learned_agp(self):
+        self.assertEqual(
+            requested_physical_protocols({"protocols": ["learned_sparse_agp"]}),
+            ("learned_sparse_agp",),
+        )
+
     def test_hcd_context_lines_include_hamiltonians_and_energies(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

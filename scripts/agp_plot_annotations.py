@@ -188,11 +188,14 @@ def find_physical_summary_for_images_dir(images_dir: Path) -> Path | None:
     candidates: list[Path] = []
     search_roots = [run_dir]
     cursor = run_dir
-    for _ in range(3):
-        cursor = cursor.parent
-        if cursor == cursor.parent:
-            break
-        search_roots.append(cursor)
+    # Physical summaries may be siblings below the same experiment output, but
+    # a missing summary must never trigger recursive scans of /tmp or the repo.
+    if "runs" in run_dir.parts:
+        for _ in range(5):
+            cursor = cursor.parent
+            if cursor == cursor.parent or "runs" not in cursor.parts:
+                break
+            search_roots.append(cursor)
 
     seen: set[Path] = set()
     for root in search_roots:

@@ -1,5 +1,10 @@
 # Q20 Fixed-K Ising Holdout-Feedback Study
 
+The current retained q20 benchmark is
+`size_intensive_pinn/config.json`, with `K=58,368`, `Q=116,736`, and the
+normalized variational-action v6 objective. The root `config.json` and results
+below are the preceding q20 benchmark retained for provenance.
+
 This folder is the 20-qubit continuation of the accepted q15
 `TransverseIsingDriverProblem` benchmark. It uses the same Hamiltonian family,
 network, learned schedule, SiLU-to-PAU transfer, fixed-K support swaps,
@@ -18,7 +23,7 @@ The sparse Pauli decomposition is indexed by
 `Hamiltonians_to_use/pauli_decompositions/index.json` under
 `TransverseIsingDriverProblem_20_qubits_1_0`.
 
-## Retained Configuration
+## Previous Configuration
 
 ```text
 q                         = 20
@@ -106,7 +111,7 @@ backend policy uses exact statevectors only through q15 and tensor networks for
 `q > 15`. The old top-term q20 statevector configuration is retained only for
 provenance and is not the canonical validator.
 
-Physical validation is not part of the loss. The completed canonical
+Physical validation is not part of the loss. The preceding completed
 tensor-network validation targets the `residual_81920` adaptive-temporal
 checkpoint and keeps all 32,768 learned AGP terms. The learned operator is
 represented as a joint-time full-support MPO and evolved with two-site TDVP;
@@ -127,7 +132,7 @@ and 64 at 48 steps. For the PINN row, the timestep deltas are `2.34945e-4` in
 energy and `1.14153e-4` in fidelity, while the state-bond deltas are
 `2.48970e-4` and `1.14048e-5`. MPO compression, sampled action error, source
 completeness, timestep convergence, and state convergence all pass. The
-machine-readable evidence and comparison PDF are under the retained
+machine-readable evidence and comparison PDF are under that historical
 checkpoint's `mpo_validation/` directory.
 
 ## Certification Discipline

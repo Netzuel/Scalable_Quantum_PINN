@@ -1417,6 +1417,30 @@ class AGPSupportSwapTests(unittest.TestCase):
         self.assertTrue(plan["stratification"]["enabled"])
         self.assertEqual(plan["stratification"]["requested_terms"], 2)
 
+    def test_locality_aware_support_swap_removes_weak_high_body_term_first(self):
+        h0 = SparsePauliOperator({"XIII": -1.0}, n_qubits=4)
+        h1 = SparsePauliOperator({"ZIII": 1.0}, n_qubits=4)
+        current = ["XIII", "XXXX"]
+        importance = [
+            {"label": "XIII", "rms": 0.1},
+            {"label": "XXXX", "rms": 0.1},
+        ]
+        residual = [{"label": "YIII", "residual_rms": 2.0}]
+
+        plan = plan_fixed_k_support_swap(
+            current_agp_labels=current,
+            coefficient_importance=importance,
+            residual_spectrum=residual,
+            h0=h0,
+            h1=h1,
+            max_swaps=1,
+            candidate_pool_size=8,
+            locality_penalty_power=1.0,
+        )
+
+        self.assertEqual(plan["removed_labels"], ["XXXX"])
+        self.assertEqual(plan["locality_penalty_power"], 1.0)
+
     def test_trainable_state_remap_preserves_retained_output_rows_and_initializes_new_terms(self):
         old_labels = ["AA", "BB", "CC"]
         new_labels = ["BB", "CC", "DD"]
@@ -1453,6 +1477,62 @@ class AGPSupportSwapTests(unittest.TestCase):
         self.assertTrue(torch.equal(remapped["calibration"]["gate_logits"], torch.tensor([4.0, 1.5, 2.5])))
         self.assertEqual(remapped["calibration"]["agp_labels"], new_labels)
         self.assertEqual(remapped["agp_labels"], new_labels)
+
+    def test_graph_trainable_state_remap_keeps_shared_body_weights_unchanged(self):
+        old_labels = ["AA", "BB", "CC"]
+        new_labels = ["BB", "CC", "DD"]
+        shared_weight = torch.tensor([[1.0], [2.0], [3.0]])
+        state = {
+            "coefficient_architecture": "hamiltonian_pauli_graph",
+            "body": {"term_readout.weight": shared_weight.clone()},
+            "calibration": {
+                "gate_logits": torch.tensor([-8.0, 4.0, 1.5]),
+                "agp_labels": old_labels,
+            },
+            "agp_labels": old_labels,
+        }
+
+        remapped = remap_trainable_state_for_agp_labels(
+            state,
+            old_labels=old_labels,
+            new_labels=new_labels,
+            removed_labels=["AA"],
+            added_labels=["DD"],
+            new_gate_logit=2.5,
+        )
+
+        torch.testing.assert_close(remapped["body"]["term_readout.weight"], shared_weight)
+        torch.testing.assert_close(remapped["calibration"]["gate_logits"], torch.tensor([4.0, 1.5, 2.5]))
+        self.assertEqual(remapped["coefficient_architecture"], "hamiltonian_pauli_graph")
+
+    def test_factor_graph_trainable_state_remap_keeps_shared_body_weights_unchanged(self):
+        old_labels = ["AA", "BB", "CC"]
+        new_labels = ["BB", "CC", "DD"]
+        shared_weight = torch.tensor([[1.0], [2.0], [3.0]])
+        state = {
+            "coefficient_architecture": "hamiltonian_pauli_factor_graph",
+            "body": {"term_readout.weight": shared_weight.clone()},
+            "calibration": {
+                "gate_logits": torch.tensor([-8.0, 4.0, 1.5]),
+                "agp_labels": old_labels,
+            },
+            "agp_labels": old_labels,
+        }
+
+        remapped = remap_trainable_state_for_agp_labels(
+            state,
+            old_labels=old_labels,
+            new_labels=new_labels,
+            removed_labels=["AA"],
+            added_labels=["DD"],
+            new_gate_logit=2.5,
+        )
+
+        torch.testing.assert_close(remapped["body"]["term_readout.weight"], shared_weight)
+        torch.testing.assert_close(remapped["calibration"]["gate_logits"], torch.tensor([4.0, 1.5, 2.5]))
+        self.assertEqual(
+            remapped["coefficient_architecture"], "hamiltonian_pauli_factor_graph"
+        )
 
 
 if __name__ == "__main__":

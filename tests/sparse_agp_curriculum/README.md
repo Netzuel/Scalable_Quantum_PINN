@@ -7,20 +7,23 @@ physical scenario and then by qubit count. The current retained scenario uses
 H_AD(lambda) = (1 - lambda) H_initial + lambda H_final.
 ```
 
-The retained playground uses a transverse-field driver and diagonal open-chain
-Ising target at `q=15`, `q=20`, and `q=156`. The spin-HUBO scenario extends the
-same curriculum to a nonlocal mixed one-, two-, and three-spin objective at
-`q=24`. Exact statevector validation is retained through `q=15`; converged
-tensor-network validation is required above that threshold.
+The current retained playground uses a transverse-field driver and diagonal
+open-chain Ising target at `q=15`, `q=20`, and `q=25` with the normalized
+variational-action v6 objective. The q156 study remains a legacy validated
+reference. The spin-HUBO scenario extends the curriculum to a nonlocal mixed
+one-, two-, and three-spin objective at `q=24`. Exact statevector validation is
+retained through `q=15`; converged tensor-network validation is required above
+that threshold.
 
 ## Layout
 
 ```text
 sparse_agp_curriculum/
   transverse_field_diagonal_ising/
-    q15/sweep_test/    retained q=15 configuration and local runs
-    q20/sweep_test/    retained q=20 configuration and local runs
-    q156/sweep_test/   retained q=156 configuration and local runs
+    q15/sweep_test/size_intensive_pinn/  retained q=15 v6 configuration
+    q20/sweep_test/size_intensive_pinn/  retained q=20 v6 configuration
+    q25/sweep_test/size_intensive_pinn/  retained q=25 v6 configuration
+    q156/sweep_test/                    legacy q=156 validated reference
   transverse_field_spin_hubo/
     run_002_hamiltonian_341/q24/sweep_test/
                        q=24 nonlocal spin-HUBO configuration and local runs

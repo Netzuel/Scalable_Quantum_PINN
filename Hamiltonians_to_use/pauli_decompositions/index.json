@@ -13,7 +13,7 @@
   },
   "drop_tol": 1e-08,
   "format": "pauli_hamiltonian_index_v1",
-  "pair_count": 46,
+  "pair_count": 47,
   "pairs": {
     "Hidrogen_10_qubits_1_0": {
       "basis_size": 1048576,
@@ -420,6 +420,17 @@
       "initial_key": "analytic_transverse_driver_sparse_pauli",
       "initial_term_count": 20,
       "n_qubits": 20,
+      "system": "TransverseIsingDriverProblem"
+    },
+    "TransverseIsingDriverProblem_25_qubits_1_0": {
+      "basis_size": 1125899906842624,
+      "distance": "1_0",
+      "file": "TransverseIsingDriverProblem/25_qubits/distance_1_0.json",
+      "final_key": "analytic_diagonal_ising_problem_sparse_pauli",
+      "final_term_count": 49,
+      "initial_key": "analytic_transverse_driver_sparse_pauli",
+      "initial_term_count": 25,
+      "n_qubits": 25,
       "system": "TransverseIsingDriverProblem"
     },
     "TransverseIsingDriverProblem_2_qubits_1_0": {

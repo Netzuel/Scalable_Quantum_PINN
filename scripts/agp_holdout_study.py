@@ -256,6 +256,21 @@ def model_config_from_checkpoint_or_payload(
             hidden_width=int(raw.get("hidden_width", fallback.hidden_width)),
             activation=str(raw.get("activation", fallback.activation)),
             layer_type=str(raw.get("layer_type", fallback.layer_type)),
+            coefficient_architecture=str(
+                raw.get("coefficient_architecture", fallback.coefficient_architecture)
+            ).strip().lower(),
+            graph_node_width=int(raw.get("graph_node_width", fallback.graph_node_width)),
+            graph_message_layers=int(
+                raw.get("graph_message_layers", fallback.graph_message_layers)
+            ),
+            graph_latent_rank=int(raw.get("graph_latent_rank", fallback.graph_latent_rank)),
+            graph_term_width=int(raw.get("graph_term_width", fallback.graph_term_width)),
+            graph_time_fourier_order=int(
+                raw.get("graph_time_fourier_order", fallback.graph_time_fourier_order)
+            ),
+            graph_term_chunk_size=int(
+                raw.get("graph_term_chunk_size", fallback.graph_term_chunk_size)
+            ),
         )
     return fallback
 

@@ -28,6 +28,7 @@ from agp_mps_validation import (
     run_mpo_case,
     assess_mpo_compression,
     statevector_results_for_learned_terms,
+    load_optional_statevector_reference,
     validation_certification,
     cached_protocol_result,
     resolve_validation_backend,
@@ -38,6 +39,58 @@ from utils import SparsePauliOperator
 
 
 class AGPMPSValidationTests(unittest.TestCase):
+    def test_final_validation_export_refreshes_training_hcd_summary(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            trained_run = root / "trained"
+            summary_path = root / "mpo_validation" / "Models_Data" / "summary.json"
+            images_dir = root / "mpo_validation" / "Images"
+            payload = {"results": {}}
+            with (
+                patch.object(validation_module, "_save_progress") as save_progress,
+                patch.object(validation_module, "plot_physical_comparison_table") as plot_table,
+                patch.object(validation_module, "refresh_hcd_connection_summary") as refresh_hcd,
+            ):
+                validation_module.finalize_validation_artifacts(
+                    summary_path=summary_path,
+                    images_dir=images_dir,
+                    payload=payload,
+                    trained_run=trained_run,
+                )
+
+        save_progress.assert_called_once_with(summary_path, payload)
+        plot_table.assert_called_once_with(images_dir, payload)
+        refresh_hcd.assert_called_once_with(trained_run, trained_run)
+
+    def test_preflight_export_does_not_refresh_training_hcd_summary(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with (
+                patch.object(validation_module, "_save_progress"),
+                patch.object(validation_module, "plot_physical_comparison_table"),
+                patch.object(validation_module, "refresh_hcd_connection_summary") as refresh_hcd,
+            ):
+                validation_module.finalize_validation_artifacts(
+                    summary_path=root / "preflight" / "Models_Data" / "summary.json",
+                    images_dir=root / "preflight" / "Images",
+                    payload={"execution_mode": "preflight_only"},
+                    trained_run=root / "trained",
+                    refresh_training_hcd=False,
+                )
+
+        refresh_hcd.assert_not_called()
+
+    def test_missing_optional_statevector_reference_is_not_tested(self):
+        with TemporaryDirectory() as tmpdir:
+            payload, assessment = load_optional_statevector_reference(
+                "missing/statevector_summary.json",
+                base=Path(tmpdir),
+            )
+
+        self.assertIsNone(payload)
+        self.assertEqual(assessment["status"], "not_tested")
+        self.assertIn("does not exist", assessment["reason"])
+
     def test_backend_accepts_direct_time_full_support_representation(self):
         backend = resolve_validation_backend(
             {
@@ -304,6 +357,19 @@ class AGPMPSValidationTests(unittest.TestCase):
             args = validation_module.parse_args()
 
         self.assertTrue(args.preflight_only)
+
+    def test_parse_args_accepts_explicit_evaluation_duration(self):
+        argv = [
+            "agp_mps_validation.py",
+            "--config",
+            "config.json",
+            "--evaluation-duration",
+            "1.5",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = validation_module.parse_args()
+
+        self.assertEqual(args.evaluation_duration, 1.5)
 
     def test_group_hamiltonian_terms_preserves_every_pauli_coefficient(self):
         grouped = group_hamiltonian_terms_by_support(
@@ -595,6 +661,94 @@ class AGPMPSValidationTests(unittest.TestCase):
         self.assertEqual(assessment["status"], "not_tested")
         self.assertEqual(assessment["timestep"]["status"], "not_comparable")
         self.assertEqual(assessment["state"]["status"], "not_comparable")
+
+    def test_independent_mpo_convergence_can_certify_pinn_only_study(self):
+        def case(name, *, steps, mps_bond, energy, fidelity):
+            return {
+                "name": name,
+                "settings": {
+                    "steps": steps,
+                    "timestep": 2.0 / steps,
+                    "mps_max_bond": mps_bond,
+                    "mps_cutoff": 1.0e-10,
+                    "mpo_max_bond": 64,
+                    "mpo_cutoff": 1.0e-12,
+                    "time_window_size": 1,
+                    "time_axis_position": 2,
+                },
+                "results": {
+                    "learned_sparse_agp": {
+                        "final_energy": energy,
+                        "ground_state_fidelity": fidelity,
+                    }
+                },
+            }
+
+        assessment = assess_independent_mpo_convergence(
+            [
+                case("time_coarse", steps=16, mps_bond=64, energy=-3.99, fidelity=0.956),
+                case("state_coarse", steps=32, mps_bond=32, energy=-3.995, fidelity=0.958),
+                case("fine", steps=32, mps_bond=64, energy=-4.0, fidelity=0.96),
+            ],
+            convergence_pairs={
+                "timestep": ("time_coarse", "fine"),
+                "state": ("state_coarse", "fine"),
+            },
+            energy_atol=0.02,
+            fidelity_atol=0.01,
+            required_protocols=("learned_sparse_agp",),
+        )
+
+        self.assertEqual(assessment["status"], "pass", assessment)
+        self.assertEqual(
+            set(assessment["timestep"]["protocols"]), {"learned_sparse_agp"}
+        )
+
+    def test_eligible_mpo_ladder_accepts_configured_pinn_only_protocol(self):
+        import agp_mps_validation
+
+        settings = {
+            "backend": "tenpy_tdvp_mpo",
+            "integrator": "tdvp",
+            "n_qubits": 20,
+            "learned_terms": 8,
+            "full_learned_terms": 8,
+            "learned_scale": 1.0,
+            "hamiltonian_identity": "hamiltonian",
+            "ground_reference_identity": "ground",
+            "ground_bitstring": "0" * 20,
+            "schedule_identity": "schedule",
+            "schedule_parameters_identity": "schedule-parameters",
+            "checkpoint_identity": "checkpoint",
+            "coefficient_identity": "coefficient",
+            "total_time": 1.0,
+            "initial_state": "+" * 20,
+        }
+        resolutions = [
+            {
+                "name": name,
+                "ablation": False,
+                "learned_support": "full_support",
+                "settings": {**settings, "steps": steps},
+                "results": {
+                    "learned_sparse_agp": {
+                        "mps_diagnostics": {
+                            "status": "ok",
+                            "completed_steps": steps,
+                            "steps": steps,
+                        }
+                    }
+                },
+            }
+            for name, steps in (("coarse", 24), ("fine", 48))
+        ]
+
+        eligible = agp_mps_validation.eligible_mpo_resolution_ladder(
+            resolutions,
+            required_protocols=("learned_sparse_agp",),
+        )
+
+        self.assertEqual([row["name"] for row in eligible], ["coarse", "fine"])
 
     def test_direct_full_support_compression_gate_does_not_require_temporal_modes(self):
         direct_diagnostics = {

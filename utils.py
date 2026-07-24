@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import combinations, product
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -502,6 +503,293 @@ class SparsePauliOperator:
         for idx, label in enumerate(basis_labels):
             vector[idx] = self.coefficient(label)
         return vector
+
+
+@dataclass(frozen=True)
+class HamiltonianPauliGraphData:
+    """Fixed-size graph features and sparse AGP-term incidences.
+
+    The tensors are deterministic functions of the Hamiltonian pair and active
+    Pauli support. Models register them as nonpersistent buffers so checkpoints
+    contain only reusable trainable weights.
+    """
+
+    node_features: torch.Tensor
+    edge_sources: torch.Tensor
+    edge_targets: torch.Tensor
+    edge_features: torch.Tensor
+    term_indices: torch.Tensor
+    term_nodes: torch.Tensor
+    term_symbols: torch.Tensor
+    term_scalars: torch.Tensor
+
+
+@dataclass(frozen=True)
+class HamiltonianPauliFactorGraphData:
+    """Signed Hamiltonian factor graph and expressive AGP-term descriptors."""
+
+    qubit_features: torch.Tensor
+    factor_features: torch.Tensor
+    factor_indices: torch.Tensor
+    factor_qubits: torch.Tensor
+    factor_symbols: torch.Tensor
+    term_indices: torch.Tensor
+    term_qubits: torch.Tensor
+    term_symbols: torch.Tensor
+    term_scalars: torch.Tensor
+
+
+def hamiltonian_pauli_graph_data(
+    h_initial: SparsePauliOperator,
+    h_final: SparsePauliOperator,
+    agp_labels: Sequence[str],
+) -> HamiltonianPauliGraphData:
+    """Encode a sparse Hamiltonian pair and Pauli support as graph tensors."""
+
+    if h_initial.n_qubits != h_final.n_qubits:
+        raise ValueError("Initial and final Hamiltonians must use the same qubit count.")
+    q = int(h_initial.n_qubits)
+    labels = [validate_pauli_label(label, q) for label in agp_labels]
+    if not labels:
+        raise ValueError("agp_labels must be non-empty.")
+
+    operators = (h_initial, h_final, h_final - h_initial)
+    node_features = torch.zeros((q, 27), dtype=torch.float32)
+    edge_maps: list[defaultdict[tuple[int, int], float]] = [defaultdict(float) for _ in operators]
+    for operator_index, operator in enumerate(operators):
+        scale = max((abs(coefficient) for coefficient in operator.terms.values()), default=1.0)
+        scale = max(float(scale), 1e-12)
+        for label, coefficient in operator.terms.items():
+            normalized = complex(coefficient) / scale
+            support = [site for site, symbol in enumerate(label) if symbol != "I"]
+            for site in support:
+                symbol_index = _PAULI_CODE[label[site]] - 1
+                offset = operator_index * 9 + symbol_index * 3
+                node_features[site, offset] += float(normalized.real)
+                node_features[site, offset + 1] += float(normalized.imag)
+                node_features[site, offset + 2] += float(abs(normalized))
+            pair_normalization = max(len(support) * (len(support) - 1) // 2, 1)
+            edge_weight = float(abs(normalized)) / pair_normalization
+            for left, right in combinations(support, 2):
+                edge_maps[operator_index][(min(left, right), max(left, right))] += edge_weight
+
+    undirected_edges = sorted(set().union(*(set(edge_map) for edge_map in edge_maps)))
+    edge_sources: list[int] = []
+    edge_targets: list[int] = []
+    edge_features: list[list[float]] = []
+    undirected_features: dict[tuple[int, int], tuple[float, float, float]] = {}
+    for edge in undirected_edges:
+        features = tuple(float(edge_map.get(edge, 0.0)) for edge_map in edge_maps)
+        undirected_features[edge] = features
+        for source, target in (edge, (edge[1], edge[0])):
+            edge_sources.append(source)
+            edge_targets.append(target)
+            edge_features.append(list(features))
+
+    incidence_terms: list[int] = []
+    incidence_nodes: list[int] = []
+    incidence_symbols: list[int] = []
+    term_scalars = torch.zeros((len(labels), 7), dtype=torch.float32)
+    for term_index, label in enumerate(labels):
+        support = [site for site, symbol in enumerate(label) if symbol != "I"]
+        weight = len(support)
+        counts = [label.count(symbol) for symbol in "XYZ"]
+        term_scalars[term_index, 0] = float(weight) / max(q, 1)
+        if weight:
+            term_scalars[term_index, 1:4] = torch.tensor(
+                [float(count) / weight for count in counts], dtype=torch.float32
+            )
+        for site in support:
+            incidence_terms.append(term_index)
+            incidence_nodes.append(site)
+            incidence_symbols.append(_PAULI_CODE[label[site]] - 1)
+        induced = torch.zeros(3, dtype=torch.float32)
+        induced_pairs = 0
+        for left, right in combinations(support, 2):
+            features = undirected_features.get((min(left, right), max(left, right)))
+            if features is None:
+                continue
+            induced += torch.tensor(features, dtype=torch.float32)
+            induced_pairs += 1
+        if induced_pairs:
+            term_scalars[term_index, 4:7] = induced / induced_pairs
+
+    edge_feature_tensor = (
+        torch.tensor(edge_features, dtype=torch.float32)
+        if edge_features
+        else torch.empty((0, 3), dtype=torch.float32)
+    )
+    return HamiltonianPauliGraphData(
+        node_features=node_features,
+        edge_sources=torch.tensor(edge_sources, dtype=torch.long),
+        edge_targets=torch.tensor(edge_targets, dtype=torch.long),
+        edge_features=edge_feature_tensor,
+        term_indices=torch.tensor(incidence_terms, dtype=torch.long),
+        term_nodes=torch.tensor(incidence_nodes, dtype=torch.long),
+        term_symbols=torch.tensor(incidence_symbols, dtype=torch.long),
+        term_scalars=term_scalars,
+    )
+
+
+@lru_cache(maxsize=500_000)
+def _pauli_commutator_fingerprint(
+    label: str,
+    operator_signature: tuple[tuple[str, complex], ...],
+) -> tuple[float, ...]:
+    """Return fixed-width signed features for one Pauli/Hamiltonian commutator."""
+
+    q = len(label)
+    if not operator_signature:
+        return (0.0,) * 8
+    accumulated: defaultdict[str, complex] = defaultdict(complex)
+    individual_abs: list[float] = []
+    weighted_locality = 0.0
+    signed_sum = 0.0 + 0.0j
+    for h_label, h_coefficient in operator_signature:
+        item = _commutator_pauli_labels_unchecked(label, h_label)
+        if item is None:
+            continue
+        phase, output_label = item
+        value = complex(phase) * complex(h_coefficient)
+        accumulated[output_label] += value
+        magnitude = abs(value)
+        individual_abs.append(magnitude)
+        signed_sum += value
+        weighted_locality += magnitude * sum(symbol != "I" for symbol in output_label)
+    if not individual_abs:
+        return (0.0,) * 8
+    individual_l1 = sum(individual_abs)
+    individual_l2 = sum(value * value for value in individual_abs) ** 0.5
+    output_abs = [abs(value) for value in accumulated.values()]
+    output_l1 = sum(output_abs)
+    output_l2 = sum(value * value for value in output_abs) ** 0.5
+    scale = max(individual_l1, 1e-12)
+    return (
+        len(individual_abs) / max(len(operator_signature), 1),
+        float(signed_sum.real) / scale,
+        float(signed_sum.imag) / scale,
+        output_l2 / max(individual_l2, 1e-12),
+        output_l1 / scale,
+        weighted_locality / (scale * max(q, 1)),
+        len(accumulated) / max(len(individual_abs), 1),
+        max(output_abs, default=0.0) / scale,
+    )
+
+
+def hamiltonian_pauli_factor_graph_data(
+    h_initial: SparsePauliOperator,
+    h_final: SparsePauliOperator,
+    agp_labels: Sequence[str],
+) -> HamiltonianPauliFactorGraphData:
+    """Encode a signed Pauli factor graph without dense ``K x q`` tensors."""
+
+    if h_initial.n_qubits != h_final.n_qubits:
+        raise ValueError("Initial and final Hamiltonians must use the same qubit count.")
+    q = int(h_initial.n_qubits)
+    labels = [validate_pauli_label(label, q) for label in agp_labels]
+    if not labels:
+        raise ValueError("agp_labels must be non-empty.")
+
+    h_delta = h_final - h_initial
+    operators = (h_initial, h_final, h_delta)
+    scales = [
+        max((abs(coefficient) for coefficient in operator.terms.values()), default=1.0)
+        for operator in operators
+    ]
+    scales = [max(float(scale), 1e-12) for scale in scales]
+
+    qubit_features = torch.zeros((q, 27), dtype=torch.float32)
+    for operator_index, (operator, scale) in enumerate(zip(operators, scales)):
+        for label, coefficient in operator.terms.items():
+            normalized = complex(coefficient) / scale
+            for site, symbol in enumerate(label):
+                if symbol == "I":
+                    continue
+                symbol_index = _PAULI_CODE[symbol] - 1
+                offset = operator_index * 9 + symbol_index * 3
+                qubit_features[site, offset] += float(normalized.real)
+                qubit_features[site, offset + 1] += float(normalized.imag)
+                qubit_features[site, offset + 2] += float(abs(normalized))
+
+    factor_labels = sort_pauli_labels(set(h_initial.labels) | set(h_final.labels))
+    factor_features = torch.zeros((len(factor_labels), 13), dtype=torch.float32)
+    factor_indices: list[int] = []
+    factor_qubits: list[int] = []
+    factor_symbols: list[int] = []
+    for factor_index, label in enumerate(factor_labels):
+        for operator_index, (operator, scale) in enumerate(zip(operators, scales)):
+            normalized = complex(operator.coefficient(label)) / scale
+            offset = operator_index * 3
+            factor_features[factor_index, offset] = float(normalized.real)
+            factor_features[factor_index, offset + 1] = float(normalized.imag)
+            factor_features[factor_index, offset + 2] = float(abs(normalized))
+        support = [(site, symbol) for site, symbol in enumerate(label) if symbol != "I"]
+        factor_features[factor_index, 9] = len(support) / max(q, 1)
+        if support:
+            factor_features[factor_index, 10:13] = torch.tensor(
+                [label.count(symbol) / len(support) for symbol in "XYZ"], dtype=torch.float32
+            )
+        for site, symbol in support:
+            factor_indices.append(factor_index)
+            factor_qubits.append(site)
+            factor_symbols.append(_PAULI_CODE[symbol] - 1)
+
+    signatures = tuple(
+        tuple(sorted((label, complex(coefficient)) for label, coefficient in operator.terms.items()))
+        for operator in operators
+    )
+    term_indices: list[int] = []
+    term_qubits: list[int] = []
+    term_symbols: list[int] = []
+    term_scalars = torch.zeros((len(labels), 31), dtype=torch.float32)
+    for term_index, label in enumerate(labels):
+        support = [(site, symbol) for site, symbol in enumerate(label) if symbol != "I"]
+        weight = len(support)
+        term_scalars[term_index, 0] = weight / max(q, 1)
+        if weight:
+            term_scalars[term_index, 1:4] = torch.tensor(
+                [label.count(symbol) / weight for symbol in "XYZ"], dtype=torch.float32
+            )
+            support_sites = {site for site, _ in support}
+            touched = 0
+            contained = 0
+            overlap_sum = 0.0
+            for factor_label in factor_labels:
+                factor_sites = {
+                    site for site, symbol in enumerate(factor_label) if symbol != "I"
+                }
+                overlap = len(support_sites & factor_sites)
+                if overlap:
+                    touched += 1
+                    overlap_sum += overlap / max(len(factor_sites), 1)
+                if factor_sites and factor_sites <= support_sites:
+                    contained += 1
+            factor_count = max(len(factor_labels), 1)
+            term_scalars[term_index, 4] = touched / factor_count
+            term_scalars[term_index, 5] = contained / factor_count
+            term_scalars[term_index, 6] = overlap_sum / max(touched, 1)
+        for site, symbol in support:
+            term_indices.append(term_index)
+            term_qubits.append(site)
+            term_symbols.append(_PAULI_CODE[symbol] - 1)
+        fingerprint = tuple(
+            value
+            for signature in signatures
+            for value in _pauli_commutator_fingerprint(label, signature)
+        )
+        term_scalars[term_index, 7:] = torch.tensor(fingerprint, dtype=torch.float32)
+
+    return HamiltonianPauliFactorGraphData(
+        qubit_features=qubit_features,
+        factor_features=factor_features,
+        factor_indices=torch.tensor(factor_indices, dtype=torch.long),
+        factor_qubits=torch.tensor(factor_qubits, dtype=torch.long),
+        factor_symbols=torch.tensor(factor_symbols, dtype=torch.long),
+        term_indices=torch.tensor(term_indices, dtype=torch.long),
+        term_qubits=torch.tensor(term_qubits, dtype=torch.long),
+        term_symbols=torch.tensor(term_symbols, dtype=torch.long),
+        term_scalars=term_scalars,
+    )
 
 
 def interpolate_operator(

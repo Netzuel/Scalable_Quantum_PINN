@@ -24,6 +24,7 @@ from agp_physical_validation import (  # noqa: E402
     learned_term_selection,
     interpolate_coefficients,
     learned_schedule,
+    refresh_hcd_connection_summary,
     schedule_sin2,
     subset_learned_terms,
     variational_l1_agp,
@@ -785,7 +786,11 @@ def statevector_comparison_results(
     return _canonical_mpo_results(source if isinstance(source, Mapping) else {})
 
 
-def _eligible_mpo_resolution_identity(case: Mapping[str, object]) -> tuple[object, ...] | None:
+def _eligible_mpo_resolution_identity(
+    case: Mapping[str, object],
+    *,
+    required_protocols: Sequence[str] = _CANONICAL_MPO_PROTOCOLS,
+) -> tuple[object, ...] | None:
     """Return the shared physical identity for a completed canonical MPO resolution."""
 
     if bool(case.get("ablation", False)) or str(case.get("learned_support", "")) != "full_support":
@@ -801,12 +806,14 @@ def _eligible_mpo_resolution_identity(case: Mapping[str, object]) -> tuple[objec
     if any(key not in settings for key in _ELIGIBLE_MPO_IDENTITY_KEYS):
         return None
     canonical = _canonical_mpo_results(results)
-    if set(canonical) != set(_CANONICAL_MPO_PROTOCOLS):
+    required = {_canonical_mpo_protocol(protocol) for protocol in required_protocols}
+    if not required or not required.issubset(canonical):
         return None
     if not all(
         isinstance(row.get("mps_diagnostics"), Mapping)
         and _completed_mpo_result(row["mps_diagnostics"])
-        for row in canonical.values()
+        for protocol, row in canonical.items()
+        if protocol in required
     ):
         return None
     return (
@@ -825,11 +832,19 @@ def _eligible_mpo_resolution_identity(case: Mapping[str, object]) -> tuple[objec
 
 def eligible_mpo_resolution_ladder(
     resolutions: Sequence[Mapping[str, object]],
+    *,
+    required_protocols: Sequence[str] = _CANONICAL_MPO_PROTOCOLS,
 ) -> list[Mapping[str, object]]:
     """Select only full-support canonical resolutions with one common physical identity."""
 
     candidates = [
-        (case, _eligible_mpo_resolution_identity(case))
+        (
+            case,
+            _eligible_mpo_resolution_identity(
+                case,
+                required_protocols=required_protocols,
+            ),
+        )
         for case in resolutions
         if isinstance(case, Mapping)
     ]
@@ -842,18 +857,28 @@ def eligible_mpo_resolution_ladder(
 
 def final_eligible_mpo_resolution(
     resolutions: Sequence[Mapping[str, object]],
+    *,
+    required_protocols: Sequence[str] = _CANONICAL_MPO_PROTOCOLS,
 ) -> Mapping[str, object] | None:
-    ladder = eligible_mpo_resolution_ladder(resolutions)
+    ladder = eligible_mpo_resolution_ladder(
+        resolutions,
+        required_protocols=required_protocols,
+    )
     return ladder[-1] if ladder else None
 
 
 def publish_final_eligible_mpo_results(
     payload: dict[str, object],
     resolutions: Sequence[Mapping[str, object]],
+    *,
+    required_protocols: Sequence[str] = _CANONICAL_MPO_PROTOCOLS,
 ) -> Mapping[str, object] | None:
     """Publish top-level certified metrics only from the final eligible MPO row."""
 
-    resolution = final_eligible_mpo_resolution(resolutions)
+    resolution = final_eligible_mpo_resolution(
+        resolutions,
+        required_protocols=required_protocols,
+    )
     if resolution is None:
         return None
     settings = resolution.get("settings", {})
@@ -1253,6 +1278,7 @@ def assess_independent_mpo_convergence(
     convergence_pairs: Mapping[str, Sequence[str]],
     energy_atol: float,
     fidelity_atol: float,
+    required_protocols: Sequence[str] = _CANONICAL_MPO_PROTOCOLS,
 ) -> dict[str, object]:
     """Assess timestep and MPS refinement on explicit, unconfounded pairs."""
 
@@ -1315,7 +1341,7 @@ def assess_independent_mpo_convergence(
             _canonical_mpo_results(fine_results),
             energy_atol=float(energy_atol),
             fidelity_atol=float(fidelity_atol),
-            required_protocols=_CANONICAL_MPO_PROTOCOLS,
+            required_protocols=required_protocols,
         )
 
     timestep_pair = pair("timestep")
@@ -1413,13 +1439,14 @@ def assess_statevector_agreement(
     energy_atol: float,
     fidelity_atol: float,
     require_all_protocols: bool = False,
+    required_protocols: Sequence[str] = _CANONICAL_MPO_PROTOCOLS,
 ) -> dict[str, object]:
     protocols: dict[str, dict[str, float | bool]] = {}
     incomplete = False
-    compared_protocols = _CANONICAL_MPO_PROTOCOLS if require_all_protocols else tuple(mps_results)
+    compared_protocols = tuple(required_protocols) if require_all_protocols else tuple(mps_results)
     if require_all_protocols and (
-        not set(_CANONICAL_MPO_PROTOCOLS).issubset(mps_results)
-        or not set(_CANONICAL_MPO_PROTOCOLS).issubset(statevector_results)
+        not set(required_protocols).issubset(mps_results)
+        or not set(required_protocols).issubset(statevector_results)
     ):
         incomplete = True
     for protocol in compared_protocols:
@@ -1777,6 +1804,27 @@ def _resolve_path(raw: object, *, base: Path) -> Path:
     return path if path.is_absolute() else base / path
 
 
+def load_optional_statevector_reference(
+    raw: object,
+    *,
+    base: Path,
+) -> tuple[dict[str, object] | None, dict[str, object]]:
+    """Load an optional statevector oracle without discarding completed TN results."""
+
+    path = _resolve_path(raw, base=base)
+    if not path.is_file():
+        return None, {
+            "status": "not_tested",
+            "reason": f"Configured statevector reference does not exist: {path}",
+            "reference_path": str(path),
+        }
+    return _load_json(path), {
+        "status": "not_tested",
+        "reason": "Statevector reference was loaded but has not yet been compared.",
+        "reference_path": str(path),
+    }
+
+
 def _ground_reference(
     validation: Mapping[str, object],
     *,
@@ -1826,6 +1874,23 @@ def _add_baseline_quotients(results: dict[str, dict[str, object]]) -> None:
 def _save_progress(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def finalize_validation_artifacts(
+    *,
+    summary_path: Path,
+    images_dir: Path,
+    payload: Mapping[str, object],
+    trained_run: Path,
+    refresh_training_hcd: bool = True,
+) -> None:
+    """Publish the TN summary/table and refresh the matching training figure."""
+
+    _save_progress(summary_path, payload)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    plot_physical_comparison_table(images_dir, payload)
+    if refresh_training_hcd:
+        refresh_hcd_connection_summary(trained_run, trained_run)
 
 
 def select_validation_cases(
@@ -1993,6 +2058,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--trained-run", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--evaluation-duration",
+        type=float,
+        default=None,
+        help=(
+            "Explicit physical duration for normalized-time reparameterization. "
+            "The learned schedule is kept as a function of tau and its velocity is "
+            "rescaled by d_lambda/dt=(1/T)d_lambda/dtau."
+        ),
+    )
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--max-bond", type=int, default=None)
     parser.add_argument("--mpo-max-bond", type=int, default=None)
@@ -2030,7 +2105,14 @@ def main() -> None:
     backend = resolve_validation_backend(validation)
 
     n_qubits = int(parameters.get("num_qubits", 0))
-    total_time = float(parameters.get("T", 1.0))
+    source_total_time = float(parameters.get("T", 1.0))
+    total_time = float(
+        args.evaluation_duration
+        if args.evaluation_duration is not None
+        else source_total_time
+    )
+    if total_time <= 0.0:
+        raise ValueError("Tensor-network evaluation duration must be positive.")
     hamiltonian_source = _resolve_path(
         parameters.get("hamiltonian_source", "Hamiltonians_to_use/pauli_decompositions/index.json"),
         base=ROOT,
@@ -2084,13 +2166,21 @@ def main() -> None:
         protocols = tuple(item.strip() for item in protocols_raw.split(",") if item.strip())
     else:
         protocols = tuple(str(item) for item in protocols_raw)
+    required_canonical_protocols = tuple(
+        _MPO_PROTOCOL_ALIASES.get(protocol, protocol) for protocol in protocols
+    )
     max_requested_terms = max(
         int(args.learned_terms or row.get("learned_terms", validation.get("learned_terms", 256)))
         for row in configured_cases
         if isinstance(row, dict)
     )
     selection_limit = sys.maxsize if backend["name"] == "tenpy_tdvp_mpo" else max_requested_terms
-    learned_full = learned_term_selection(coefficient_path, selection_limit)
+    learned_full = learned_term_selection(
+        coefficient_path,
+        selection_limit,
+        expected_total_time=total_time,
+        allow_duration_reparameterization=args.evaluation_duration is not None,
+    )
 
     output_dir = args.output_dir or _resolve_path(
         validation.get("output_dir", "mps_validation"),
@@ -2123,6 +2213,8 @@ def main() -> None:
         "backend_configuration": backend,
         "n_qubits": n_qubits,
         "total_time": total_time,
+        "source_total_time": source_total_time,
+        "duration_reparameterized": bool(args.evaluation_duration is not None),
         "trained_run": str(trained_run),
         "coefficient_path": str(coefficient_path),
         "ground_energy": ground_energy,
@@ -2326,7 +2418,10 @@ def main() -> None:
     }
     eligible_ladder: list[Mapping[str, object]] = []
     if backend["name"] == "tenpy_tdvp_mpo":
-        eligible_ladder = eligible_mpo_resolution_ladder(resolution_results)
+        eligible_ladder = eligible_mpo_resolution_ladder(
+            resolution_results,
+            required_protocols=required_canonical_protocols,
+        )
         payload["eligible_resolution_count"] = len(eligible_ladder)
     convergence_pairs = validation.get("convergence_pairs", {})
     if (
@@ -2339,6 +2434,7 @@ def main() -> None:
             convergence_pairs=convergence_pairs,  # type: ignore[arg-type]
             energy_atol=float(validation.get("convergence_energy_atol", 0.05)),
             fidelity_atol=float(validation.get("convergence_fidelity_atol", 0.01)),
+            required_protocols=required_canonical_protocols,
         )
         timestep_value = independent.get("timestep", {})
         state_value = independent.get("state", {})
@@ -2362,7 +2458,7 @@ def main() -> None:
             fine_results,
             energy_atol=float(validation.get("convergence_energy_atol", 0.05)),
             fidelity_atol=float(validation.get("convergence_fidelity_atol", 0.01)),
-            required_protocols=_CANONICAL_MPO_PROTOCOLS,
+            required_protocols=required_canonical_protocols,
         )
         timestep_convergence = assess_timestep_convergence(eligible_ladder[-2], eligible_ladder[-1])
     elif backend["name"] != "tenpy_tdvp_mpo" and len(resolution_results) >= 2:
@@ -2377,7 +2473,11 @@ def main() -> None:
     payload["state_convergence"] = state_convergence
 
     compression: dict[str, object] = {"status": "not_tested", "reason": "Legacy product-formula backend."}
-    gate_resolution = publish_final_eligible_mpo_results(payload, resolution_results)
+    gate_resolution = publish_final_eligible_mpo_results(
+        payload,
+        resolution_results,
+        required_protocols=required_canonical_protocols,
+    )
     if backend["name"] == "tenpy_tdvp_mpo" and gate_resolution is not None:
         final_results = gate_resolution["results"]  # type: ignore[index]
     else:
@@ -2404,34 +2504,39 @@ def main() -> None:
     }
     statevector_reference = validation.get("statevector_reference")
     if statevector_reference:
-        reference_payload = _load_json(_resolve_path(statevector_reference, base=run_root))
-        final_settings = (
-            gate_resolution["settings"]  # type: ignore[index]
-            if backend["name"] == "tenpy_tdvp_mpo" and gate_resolution is not None
-            else resolution_results[-1]["settings"]
+        reference_payload, statevector_agreement = load_optional_statevector_reference(
+            statevector_reference,
+            base=run_root,
         )
-        reference_results = statevector_results_for_learned_terms(
-            reference_payload,
-            learned_terms=int(final_settings["learned_terms"]),  # type: ignore[index]
-            learned_scale=float(validation.get("learned_scale", 1.0)),
-            require_matching_learned_terms=backend["name"] == "tenpy_tdvp_mpo",
-            required_identity=(
-                _statevector_reference_identity(final_settings)  # type: ignore[arg-type]
-                if backend["name"] == "tenpy_tdvp_mpo"
-                else None
-            ),
-        )
-        statevector_agreement = assess_statevector_agreement(
-            statevector_gate_results if backend["name"] == "tenpy_tdvp_mpo" else final_results,  # type: ignore[arg-type]
-            (
-                _canonical_mpo_results(reference_results)
-                if backend["name"] == "tenpy_tdvp_mpo"
-                else reference_results
-            ),
-            energy_atol=float(validation.get("statevector_energy_atol", 0.05)),
-            fidelity_atol=float(validation.get("statevector_fidelity_atol", 0.01)),
-            require_all_protocols=backend["name"] == "tenpy_tdvp_mpo",
-        )
+        if reference_payload is not None:
+            final_settings = (
+                gate_resolution["settings"]  # type: ignore[index]
+                if backend["name"] == "tenpy_tdvp_mpo" and gate_resolution is not None
+                else resolution_results[-1]["settings"]
+            )
+            reference_results = statevector_results_for_learned_terms(
+                reference_payload,
+                learned_terms=int(final_settings["learned_terms"]),  # type: ignore[index]
+                learned_scale=float(validation.get("learned_scale", 1.0)),
+                require_matching_learned_terms=backend["name"] == "tenpy_tdvp_mpo",
+                required_identity=(
+                    _statevector_reference_identity(final_settings)  # type: ignore[arg-type]
+                    if backend["name"] == "tenpy_tdvp_mpo"
+                    else None
+                ),
+            )
+            statevector_agreement = assess_statevector_agreement(
+                statevector_gate_results if backend["name"] == "tenpy_tdvp_mpo" else final_results,  # type: ignore[arg-type]
+                (
+                    _canonical_mpo_results(reference_results)
+                    if backend["name"] == "tenpy_tdvp_mpo"
+                    else reference_results
+                ),
+                energy_atol=float(validation.get("statevector_energy_atol", 0.05)),
+                fidelity_atol=float(validation.get("statevector_fidelity_atol", 0.01)),
+                require_all_protocols=backend["name"] == "tenpy_tdvp_mpo",
+                required_protocols=required_canonical_protocols,
+            )
     payload["statevector_agreement"] = statevector_agreement
     payload["certification"] = validation_certification(
         convergence=convergence,
@@ -2452,7 +2557,7 @@ def main() -> None:
             else resolution_results[-1]["ablation"]
         ),
         completed_comparable_resolutions=(
-            _completed_comparable_mpo_resolution_count(eligible_ladder)
+            len(eligible_ladder)
             if backend["name"] == "tenpy_tdvp_mpo"
             else None
         ),
@@ -2463,9 +2568,13 @@ def main() -> None:
             "reason": "Diagnostic preflight cannot certify physical dynamics.",
             "required_gates": [],
         }
-    _save_progress(summary_path, payload)
-    images_dir.mkdir(parents=True, exist_ok=True)
-    plot_physical_comparison_table(images_dir, payload)
+    finalize_validation_artifacts(
+        summary_path=summary_path,
+        images_dir=images_dir,
+        payload=payload,
+        trained_run=trained_run,
+        refresh_training_hcd=not bool(args.preflight_only),
+    )
     if args.preflight_only:
         status_payload = preflight_gate_status_payload(
             payload,
